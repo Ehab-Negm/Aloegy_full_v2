@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"TODO\\\\|FIXME\\\\|console.log\\\\|console.error\\\\|debugger\" 'd:\\\\lovable livekit\\\\frontend\\\\entameen-main\\\\src' -r --include=*.ts --include=*.tsx)",
+      "Bash(python -m py_compile \"d:\\\\lovable livekit\\\\backend\\\\main.py\")",
+      "Bash(grep -r import.*from.*['']@/ 'd:/lovable livekit/frontend/entameen-main/src' --include=*.tsx --include=*.ts)",
+      "Bash(find 'd:/lovable livekit/frontend/entameen-main/src/pages' -name *.tsx -exec head -20 {})",
+      "Bash(2)",
+      "Bash(npm list:*)",
+      "Bash(grep -rn import.*froms*['']@/ 'd:/lovable livekit/frontend/entameen-main/src' --include=*.tsx --include=*.ts)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''backend/main.py'', doraise=True\\); print\\(''OK''\\)\")"
+    ]
+  }
+}

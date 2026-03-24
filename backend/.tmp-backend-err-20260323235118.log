@@ -1,0 +1,90 @@
+2026-03-23T23:51:21 | INFO | aloegy.backend | database | using SQLite at backend\data\smoke-test-20260323235118.db
+INFO:     Started server process [10632]
+INFO:     Waiting for application startup.
+2026-03-23T23:51:22 | INFO | aloegy.backend | seeded backend database with sample data
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8015 (Press CTRL+C to quit)
+2026-03-23T23:51:23 | INFO | aloegy.backend | otp generated | phone=+201094321642
+2026-03-23T23:51:23 | INFO | aloegy.backend | otp generated | phone=+201094321642
+2026-03-23T23:51:23 | INFO | aloegy.backend | otp generated | phone=+201094321642
+2026-03-23T23:51:23 | INFO | aloegy.backend | otp generated | phone=+201111111111
+2026-03-23T23:51:23 | INFO | aloegy.backend | otp generated | phone=+201012345678
+2026-03-23T23:51:23 | INFO | aloegy.backend | otp generated | phone=+201302683344
+2026-03-23T23:51:24 | ERROR | aloegy.backend | livekit demo session creation failed
+Traceback (most recent call last):
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\connector.py", line 1268, in _wrap_create_connection
+    sock = await aiohappyeyeballs.start_connection(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohappyeyeballs\impl.py", line 122, in start_connection
+    raise first_exception
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohappyeyeballs\impl.py", line 73, in start_connection
+    sock = await _connect_sock(
+           ^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohappyeyeballs\impl.py", line 208, in _connect_sock
+    await loop.sock_connect(sock, address)
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py", line 728, in sock_connect
+    return await self._proactor.connect(sock, address)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\asyncio\windows_events.py", line 804, in _poll
+    value = callback(transferred, key, ov)
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\asyncio\windows_events.py", line 600, in finish_connect
+    ov.getresult()
+    ~~~~~~~~~~~~^^
+PermissionError: [WinError 5] Access is denied
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\lovable livekit\backend\main.py", line 1003, in create_livekit_demo_session
+    await lk_api.room.create_room(
+    ...<6 lines>...
+    )
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\livekit\api\room_service.py", line 71, in create_room
+    return await self._client.request(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\livekit\api\twirp_client.py", line 121, in request
+    async with self._session.post(
+               ~~~~~~~~~~~~~~~~~~^
+        url, headers=headers, data=serialized_data, timeout=timeout
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ) as resp:
+    ^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\client.py", line 1510, in __aenter__
+    self._resp: _RetType = await self._coro
+                           ^^^^^^^^^^^^^^^^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\client.py", line 779, in _request
+    resp = await handler(req)
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\client.py", line 734, in _connect_and_send_request
+    conn = await self._connector.connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        req, traces=traces, timeout=real_timeout
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\connector.py", line 642, in connect
+    proto = await self._create_connection(req, traces, timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\connector.py", line 1209, in _create_connection
+    _, proto = await self._create_direct_connection(req, traces, timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\connector.py", line 1581, in _create_direct_connection
+    raise last_exc
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\connector.py", line 1550, in _create_direct_connection
+    transp, proto = await self._wrap_create_connection(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "C:\Users\El Negm\AppData\Local\Programs\Python\Python313\Lib\site-packages\aiohttp\connector.py", line 1291, in _wrap_create_connection
+    raise client_error(req.connection_key, exc) from exc
+aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host cognixel-ai-d1mmqn9u.livekit.cloud:443 ssl:default [Access is denied]
