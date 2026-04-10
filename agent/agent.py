@@ -134,14 +134,14 @@ BACKEND_MAX_RETRIES          = _get_env_int("BACKEND_MAX_RETRIES", 2, min_value=
 BACKEND_RETRY_BASE_SECONDS   = _get_env_float("BACKEND_RETRY_BASE_SECONDS", 0.2, min_value=0.01)
 CONFIG_FETCH_RETRIES         = _get_env_int("CONFIG_FETCH_RETRIES", 2, min_value=1)
 CONFIG_FETCH_BACKOFF_SECONDS = _get_env_float("CONFIG_FETCH_BACKOFF_SECONDS", 0.15, min_value=0.01)
-CONFIG_FETCH_TOTAL_BUDGET_SECONDS = _get_env_float("CONFIG_FETCH_TOTAL_BUDGET_SECONDS", 1.0, min_value=0.1)
-PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 4, min_value=2)
-TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 18, min_value=8)
+CONFIG_FETCH_TOTAL_BUDGET_SECONDS = _get_env_float("CONFIG_FETCH_TOTAL_BUDGET_SECONDS", 0.6, min_value=0.1)
+PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 2, min_value=2)
+TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 10, min_value=8)
 MAX_TOOL_STEPS               = _get_env_int("MAX_TOOL_STEPS", 10, min_value=6)
-MIN_INTERRUPTION_DURATION_SECONDS = _get_env_float("MIN_INTERRUPTION_DURATION_SECONDS", 0.6, min_value=0.0)
-MIN_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MIN_ENDPOINTING_DELAY_SECONDS", 0.35, min_value=0.05)
-MAX_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MAX_ENDPOINTING_DELAY_SECONDS", 1.0, min_value=0.1)
-FALSE_INTERRUPTION_TIMEOUT_SECONDS = _get_env_float("FALSE_INTERRUPTION_TIMEOUT_SECONDS", 1.5, min_value=0.1)
+MIN_INTERRUPTION_DURATION_SECONDS = _get_env_float("MIN_INTERRUPTION_DURATION_SECONDS", 0.35, min_value=0.0)
+MIN_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MIN_ENDPOINTING_DELAY_SECONDS", 0.2, min_value=0.05)
+MAX_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MAX_ENDPOINTING_DELAY_SECONDS", 0.55, min_value=0.1)
+FALSE_INTERRUPTION_TIMEOUT_SECONDS = _get_env_float("FALSE_INTERRUPTION_TIMEOUT_SECONDS", 0.8, min_value=0.1)
 USER_AWAY_TIMEOUT_SECONDS         = _get_env_float("USER_AWAY_TIMEOUT_SECONDS", 9.0, min_value=0.5)
 NO_SPEECH_PROMPT_SECONDS          = _get_env_float("NO_SPEECH_PROMPT_SECONDS", 12.0, min_value=1.0)
 NO_SPEECH_CLOSE_SECONDS           = _get_env_float("NO_SPEECH_CLOSE_SECONDS", 28.0, min_value=2.0)
@@ -159,8 +159,11 @@ SESSION_STT_LANGUAGE_HINTS_STRICT = _get_env_bool("SESSION_STT_LANGUAGE_HINTS_ST
 SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION = _get_env_bool("SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION", True)
 SESSION_STT_KEYTERM_LIMIT    = _get_env_int("SESSION_STT_KEYTERM_LIMIT", 40, min_value=5)
 SESSION_STT_EXTRA_KEYTERMS   = os.getenv("SESSION_STT_EXTRA_KEYTERMS", "")
-SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.5-flash")
-SESSION_PREEMPTIVE_GENERATION = _get_env_bool("SESSION_PREEMPTIVE_GENERATION", True)
+SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.0-flash")
+SESSION_LLM_REASONING_EFFORT = os.getenv("SESSION_LLM_REASONING_EFFORT", "low").strip().lower() or "low"
+SESSION_LLM_VERBOSITY        = os.getenv("SESSION_LLM_VERBOSITY", "low").strip().lower() or "low"
+SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 160, min_value=32)
+SESSION_PREEMPTIVE_GENERATION = _get_env_bool("SESSION_PREEMPTIVE_GENERATION", False)
 CONFIG_SHARED_CACHE_ENABLED  = _get_env_bool("CONFIG_SHARED_CACHE_ENABLED", True)
 CONFIG_SHARED_CACHE_PATH     = os.getenv("CONFIG_SHARED_CACHE_PATH", f".runtime/{APP_ENV}/config_cache.json")
 BACKEND_WRITE_QUEUE_ENABLED  = _get_env_bool("BACKEND_WRITE_QUEUE_ENABLED", True)
@@ -169,6 +172,7 @@ BACKEND_WRITE_QUEUE_MAX_ITEMS = _get_env_int("BACKEND_WRITE_QUEUE_MAX_ITEMS", 50
 BACKEND_WRITE_QUEUE_RETRY_INTERVAL_SECONDS = _get_env_float("BACKEND_WRITE_QUEUE_RETRY_INTERVAL_SECONDS", 5.0, min_value=0.5)
 BACKEND_WRITE_CIRCUIT_FAILURE_THRESHOLD = _get_env_int("BACKEND_WRITE_CIRCUIT_FAILURE_THRESHOLD", 3, min_value=1)
 BACKEND_WRITE_CIRCUIT_OPEN_SECONDS = _get_env_float("BACKEND_WRITE_CIRCUIT_OPEN_SECONDS", 8.0, min_value=0.5)
+AGENT_IDLE_PROCESSES         = _get_env_int("AGENT_IDLE_PROCESSES", 2 if APP_ENV == "prod" else 1, min_value=0)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TTS/STT/LLM — session-level فقط، مفيش per-agent overrides
@@ -237,7 +241,12 @@ if not os.getenv("XAI_API_KEY"):
     logger.warning("XAI_API_KEY is not set — TTS will fail")
 SESSION_STT_PROVIDER = "soniox"
 if SESSION_LLM_MODEL.startswith("gpt-") or SESSION_LLM_MODEL.startswith("o"):
-    SESSION_LLM = openai.LLM(model=SESSION_LLM_MODEL)
+    SESSION_LLM = openai.LLM(
+        model=SESSION_LLM_MODEL,
+        reasoning_effort=SESSION_LLM_REASONING_EFFORT,
+        verbosity=SESSION_LLM_VERBOSITY,
+        max_completion_tokens=SESSION_LLM_MAX_COMPLETION_TOKENS,
+    )
     logger.info("LLM provider: OpenAI | model=%s", SESSION_LLM_MODEL)
 else:
     SESSION_LLM = google.LLM(model=SESSION_LLM_MODEL)
@@ -3710,7 +3719,7 @@ async def _safe_close_session_once(
 # ─────────────────────────────────────────────────────────────────────────────
 # Entrypoint
 # ─────────────────────────────────────────────────────────────────────────────
-server = AgentServer()
+server = AgentServer(num_idle_processes=AGENT_IDLE_PROCESSES)
 
 MAX_CALL_DURATION = _get_env_int("MAX_CALL_DURATION", 600, min_value=30)  # ثواني — default 10 دقايق
 
