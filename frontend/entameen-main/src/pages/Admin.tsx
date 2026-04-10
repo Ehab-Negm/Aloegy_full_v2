@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -102,7 +102,7 @@ const Admin = () => {
   const [newSalesPhone, setNewSalesPhone] = useState("");
   const [newSalesName, setNewSalesName] = useState("");
 
-  const loadAdminData = async () => {
+  const loadAdminData = useCallback(async () => {
     try {
       setLoading(true);
       const [restaurantsData, overviewData, salesTeamData, salesRequestsData] = await Promise.all([
@@ -125,11 +125,11 @@ const Admin = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [toast]);
 
   useEffect(() => {
     void loadAdminData();
-  }, []);
+  }, [loadAdminData]);
 
   useEffect(() => {
     if (selectedRestaurantId !== null && !owners.some((owner) => owner.restaurantId === selectedRestaurantId)) {

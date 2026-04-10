@@ -43,7 +43,7 @@
 │         LiveKit Client · shadcn/ui · Recharts           │
 ├─────────────────────────────────────────────────────────┤
 │                      Backend API                        │
-│              FastAPI + SQLAlchemy + Pydantic             │
+│              FastAPI + SQLAlchemy + Pydantic            │
 │           JWT Auth · RBAC · SSE Streaming               │
 ├──────────────────────┬──────────────────────────────────┤
 │     Voice Agent      │          Database                │
@@ -265,7 +265,7 @@ Proprietary — All rights reserved.
 
 <div align="center">
 
-**Built with ❤️ in Egypt**
+**Built with Ehab Negm **
 
 AloEgy © 2025
 

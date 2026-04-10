@@ -1,0 +1,26 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime
+.runtime/
+
+# Node
+node_modules/
+dist/
+
+# Databases
+*.db
+
+# Uploaded files
+storage/
+
+# OS
+.DS_Store
+
+# Logs
+*.log

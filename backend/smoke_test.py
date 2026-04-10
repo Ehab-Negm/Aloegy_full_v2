@@ -17,6 +17,7 @@ ADMIN_PHONE = "+201094321642"
 SALES_PHONE = "+201111111111"
 OWNER_PHONE = "+201012345678"
 DEFAULT_DEMO_RESTAURANT_ID = "demo-restaurant"
+DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "956956").strip() or "956956"
 
 
 class SmokeTestError(RuntimeError):
@@ -124,7 +125,7 @@ def login_with_bypass(api: ApiClient, phone: str, expected_role: str) -> Session
     check(send_result.get("success") is True, f"OTP send should succeed for {phone}")
     check("devOtp" not in send_result, f"OTP response should not expose devOtp for {phone}")
 
-    verify_result = api.post("/auth/verify-otp", data={"phone": phone, "otp": "123456"})
+    verify_result = api.post("/auth/verify-otp", data={"phone": phone, "otp": DEV_OTP_BYPASS})
     check(verify_result.get("success") is True, f"OTP verify should succeed for {phone}")
     check(verify_result.get("role") == expected_role, f"Expected role {expected_role} for {phone}")
     token = verify_result.get("token")
@@ -263,9 +264,12 @@ def main() -> int:
         log_pass("owner login works and returns restaurant scope")
 
         new_owner_phone = unique_phone("13")
-        new_owner_session = login_with_bypass(api, new_owner_phone, "owner")
-        check(isinstance(new_owner_session.profile.get("restaurantId"), int), "New owner auto-provision should create a restaurant")
-        log_pass("new owner auto-provisioning works")
+        try:
+            api.post("/auth/send-otp", data={"phone": new_owner_phone})
+            raise SmokeTestError("Unknown owner phone should be rejected")
+        except ApiError as exc:
+            check(exc.status_code == 403, "Unknown owner phone should return 403")
+        log_pass("unknown owner phone is rejected")
 
         owner_api = api.with_token(owner_session.token)
         stats = owner_api.get("/stats")
@@ -297,7 +301,7 @@ def main() -> int:
             f"/orders/{first_order['id']}",
             data={"status": "completed", "driverPhone": "+201122233344"},
         )
-        check(updated_order["status"] == "completed", "Order update should change status")
+        check(updated_order["status"] == "delivered", "Order update should canonicalize completed to delivered")
         owner_api.patch(
             f"/orders/{first_order['id']}",
             data={"status": original_order_status, "driverPhone": None},
@@ -549,3 +553,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

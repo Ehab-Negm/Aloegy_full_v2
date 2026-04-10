@@ -10,6 +10,8 @@ import hashlib
 import json as _json
 import logging
 import os
+import atexit
+import random as _random
 import re
 import sys
 import time
@@ -32,7 +34,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.metrics import EOUMetrics, LLMMetrics, STTMetrics, TTSMetrics
 from livekit.agents.voice import Agent, AgentSession, RunContext
 from livekit.agents import inference
-from livekit.plugins import google, silero
+from livekit.plugins import google, openai, silero
 try:
     from livekit.plugins import soniox
 except ImportError:
@@ -51,6 +53,8 @@ try:
     CAIRO_TZ = ZoneInfo("Africa/Cairo")
 except Exception:
     CAIRO_TZ = timezone(timedelta(hours=2))
+
+AGENT_DIR = Path(__file__).resolve().parent
 
 
 def _get_env_float(name: str, default: float, *, min_value: float | None = None) -> float:
@@ -104,7 +108,7 @@ def _get_env_bool(name: str, default: bool) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # Env — fail fast
 # ─────────────────────────────────────────────────────────────────────────────
-load_dotenv()
+load_dotenv(AGENT_DIR / ".env")
 
 REQUIRED_ENV_VARS = [
     "LIVEKIT_URL",
@@ -127,17 +131,17 @@ HTTP_CONNECT_TIMEOUT_SECONDS = _get_env_float("HTTP_CONNECT_TIMEOUT_SECONDS", 1.
 HTTP_READ_TIMEOUT_SECONDS    = _get_env_float("HTTP_READ_TIMEOUT_SECONDS", 3.0, min_value=0.05)
 HTTP_WRITE_TIMEOUT_SECONDS   = _get_env_float("HTTP_WRITE_TIMEOUT_SECONDS", 3.0, min_value=0.05)
 BACKEND_MAX_RETRIES          = _get_env_int("BACKEND_MAX_RETRIES", 2, min_value=1)
-BACKEND_RETRY_BASE_SECONDS   = _get_env_float("BACKEND_RETRY_BASE_SECONDS", 0.35, min_value=0.01)
+BACKEND_RETRY_BASE_SECONDS   = _get_env_float("BACKEND_RETRY_BASE_SECONDS", 0.2, min_value=0.01)
 CONFIG_FETCH_RETRIES         = _get_env_int("CONFIG_FETCH_RETRIES", 2, min_value=1)
-CONFIG_FETCH_BACKOFF_SECONDS = _get_env_float("CONFIG_FETCH_BACKOFF_SECONDS", 0.25, min_value=0.01)
-CONFIG_FETCH_TOTAL_BUDGET_SECONDS = _get_env_float("CONFIG_FETCH_TOTAL_BUDGET_SECONDS", 1.8, min_value=0.1)
+CONFIG_FETCH_BACKOFF_SECONDS = _get_env_float("CONFIG_FETCH_BACKOFF_SECONDS", 0.15, min_value=0.01)
+CONFIG_FETCH_TOTAL_BUDGET_SECONDS = _get_env_float("CONFIG_FETCH_TOTAL_BUDGET_SECONDS", 1.0, min_value=0.1)
 PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 4, min_value=2)
 TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 18, min_value=8)
 MAX_TOOL_STEPS               = _get_env_int("MAX_TOOL_STEPS", 10, min_value=6)
-MIN_INTERRUPTION_DURATION_SECONDS = _get_env_float("MIN_INTERRUPTION_DURATION_SECONDS", 0.5, min_value=0.0)
-MIN_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MIN_ENDPOINTING_DELAY_SECONDS", 0.45, min_value=0.05)
-MAX_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MAX_ENDPOINTING_DELAY_SECONDS", 2.0, min_value=0.1)
-FALSE_INTERRUPTION_TIMEOUT_SECONDS = _get_env_float("FALSE_INTERRUPTION_TIMEOUT_SECONDS", 2.2, min_value=0.1)
+MIN_INTERRUPTION_DURATION_SECONDS = _get_env_float("MIN_INTERRUPTION_DURATION_SECONDS", 0.6, min_value=0.0)
+MIN_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MIN_ENDPOINTING_DELAY_SECONDS", 0.35, min_value=0.05)
+MAX_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MAX_ENDPOINTING_DELAY_SECONDS", 1.0, min_value=0.1)
+FALSE_INTERRUPTION_TIMEOUT_SECONDS = _get_env_float("FALSE_INTERRUPTION_TIMEOUT_SECONDS", 1.5, min_value=0.1)
 USER_AWAY_TIMEOUT_SECONDS         = _get_env_float("USER_AWAY_TIMEOUT_SECONDS", 9.0, min_value=0.5)
 NO_SPEECH_PROMPT_SECONDS          = _get_env_float("NO_SPEECH_PROMPT_SECONDS", 12.0, min_value=1.0)
 NO_SPEECH_CLOSE_SECONDS           = _get_env_float("NO_SPEECH_CLOSE_SECONDS", 28.0, min_value=2.0)
@@ -146,7 +150,7 @@ NO_SPEECH_REPROMPT_GAP_SECONDS    = _get_env_float("NO_SPEECH_REPROMPT_GAP_SECON
 VOICE_MENU_LIMIT             = _get_env_int("VOICE_MENU_LIMIT", 10, min_value=4)
 MENU_PROMPT_LIMIT            = _get_env_int("MENU_PROMPT_LIMIT", 20, min_value=6)
 SESSION_TTS_MODEL            = os.getenv("SESSION_TTS_MODEL", "xai/tts-1")
-SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "leo")
+SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "ara")
 SESSION_TTS_LANGUAGE         = os.getenv("SESSION_TTS_LANGUAGE", "ar-EG")
 SESSION_STT_LANGUAGE         = os.getenv("SESSION_STT_LANGUAGE", "ar")
 SESSION_STT_MODEL            = os.getenv("SESSION_STT_MODEL", "stt-rt-v4")
@@ -222,28 +226,42 @@ def _stt_provider_ready_reason() -> str | None:
     return None
 
 
-SESSION_TTS = inference.TTS(
-    model=SESSION_TTS_MODEL,
+from xai_tts import TTS as XaiTTS  # noqa: E402
+
+SESSION_TTS = XaiTTS(
+    api_key=os.getenv("XAI_API_KEY", ""),
     voice=SESSION_TTS_VOICE,
     language=SESSION_TTS_LANGUAGE,
 )
+if not os.getenv("XAI_API_KEY"):
+    logger.warning("XAI_API_KEY is not set — TTS will fail")
 SESSION_STT_PROVIDER = "soniox"
-SESSION_LLM = google.LLM(model=SESSION_LLM_MODEL)
+if SESSION_LLM_MODEL.startswith("gpt-") or SESSION_LLM_MODEL.startswith("o"):
+    SESSION_LLM = openai.LLM(model=SESSION_LLM_MODEL)
+    logger.info("LLM provider: OpenAI | model=%s", SESSION_LLM_MODEL)
+else:
+    SESSION_LLM = google.LLM(model=SESSION_LLM_MODEL)
+    logger.info("LLM provider: Google | model=%s", SESSION_LLM_MODEL)
 SESSION_VAD = silero.VAD.load(
-    min_silence_duration=0.2,
-    prefix_padding_duration=0.1,
-    activation_threshold=0.45,
+    min_silence_duration=0.25,
+    prefix_padding_duration=0.2,
+    activation_threshold=0.5,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared httpx client — reuse TCP/TLS connections instead of per-request
 # ─────────────────────────────────────────────────────────────────────────────
 _http_client: httpx.AsyncClient | None = None
+_http_client_lock = asyncio.Lock()
 
 
 async def _get_http_client() -> httpx.AsyncClient:
     global _http_client
-    if _http_client is None or _http_client.is_closed:
+    if _http_client is not None and not _http_client.is_closed:
+        return _http_client
+    async with _http_client_lock:
+        if _http_client is not None and not _http_client.is_closed:
+            return _http_client
         _http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(
                 timeout=HTTP_TIMEOUT_SECONDS,
@@ -261,7 +279,7 @@ async def _get_http_client() -> httpx.AsyncClient:
                 "User-Agent": "restaurant-voice-agent/1.0",
             },
         )
-    return _http_client
+        return _http_client
 
 
 def _retry_delay(attempt: int, base_seconds: float) -> float:
@@ -647,7 +665,7 @@ def _degraded_config() -> RestaurantConfig:
 def _runtime_file_path(raw_path: str) -> Path:
     path = Path(raw_path)
     if not path.is_absolute():
-        path = Path.cwd() / path
+        path = AGENT_DIR / path
     return path
 
 
@@ -703,14 +721,14 @@ def _config_from_dict(data: dict) -> RestaurantConfig:
     )
 
 
-def _read_shared_cache_map() -> dict:
+async def _read_shared_cache_map() -> dict:
     if not CONFIG_SHARED_CACHE_ENABLED:
         return {}
     path = _runtime_file_path(CONFIG_SHARED_CACHE_PATH)
     if not path.exists():
         return {}
     try:
-        raw = _json.loads(path.read_text(encoding="utf-8"))
+        raw = _json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
         return raw if isinstance(raw, dict) else {}
     except Exception as exc:
         logger.warning("shared config cache read failed | path=%s | %s", path, _exc_log_fields(exc))
@@ -726,8 +744,8 @@ def _shared_cache_entry_age_seconds(entry: dict | None) -> float | None:
     return max(0.0, time.time() - fetched_at_epoch)
 
 
-def _read_shared_cache_entry(cache_key: str) -> tuple[RestaurantConfig, float] | None:
-    shared_map = _read_shared_cache_map()
+async def _read_shared_cache_entry(cache_key: str) -> tuple[RestaurantConfig, float] | None:
+    shared_map = await _read_shared_cache_map()
     entry = shared_map.get(cache_key)
     if not isinstance(entry, dict):
         return None
@@ -738,20 +756,20 @@ def _read_shared_cache_entry(cache_key: str) -> tuple[RestaurantConfig, float] |
     return _config_from_dict(config_data), age
 
 
-def _write_shared_cache_entry(cache_key: str, cfg: RestaurantConfig) -> None:
+async def _write_shared_cache_entry(cache_key: str, cfg: RestaurantConfig) -> None:
     if not CONFIG_SHARED_CACHE_ENABLED:
         return
     path = _runtime_file_path(CONFIG_SHARED_CACHE_PATH)
     _ensure_parent_dir(path)
-    shared_map = _read_shared_cache_map()
+    shared_map = await _read_shared_cache_map()
     shared_map[cache_key] = {
         "fetched_at_epoch": time.time(),
         "source": "backend",
         "config": _config_to_dict(cfg),
     }
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(_json.dumps(shared_map, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_path, path)
+    await asyncio.to_thread(tmp_path.write_text, _json.dumps(shared_map, ensure_ascii=False), encoding="utf-8")
+    await asyncio.to_thread(os.replace, tmp_path, path)
 
 
 def _stt_context_terms_for_config(cfg: RestaurantConfig) -> list[str]:
@@ -838,7 +856,7 @@ async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfi
     endpoint = f"{BACKEND_BASE}/restaurant/config"
     cached_entry = _config_cache.get(cache_key)
     cache_age = _config_cache_age_seconds(cached_entry)
-    shared_entry = _read_shared_cache_entry(cache_key)
+    shared_entry = await _read_shared_cache_entry(cache_key)
     shared_cfg = shared_entry[0] if shared_entry else None
     shared_age = shared_entry[1] if shared_entry else None
 
@@ -944,7 +962,13 @@ async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfi
                 config=cfg,
                 source="backend",
             )
-            _write_shared_cache_entry(cache_key, cfg)
+            try:
+                await _write_shared_cache_entry(cache_key, cfg)
+            except Exception as exc:
+                logger.warning(
+                    "call=%s | shared cache write skipped | restaurant=%s | %s",
+                    call_id, cache_key, _exc_log_fields(exc),
+                )
             _runtime_health.config_available = True
             _runtime_health.last_config_error = ""
             logger.info(
@@ -990,9 +1014,6 @@ async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfi
 # Backend helpers — retry + idempotency + latency logging
 # ─────────────────────────────────────────────────────────────────────────────
 def _backend_queue_lock_instance() -> asyncio.Lock:
-    global _backend_queue_lock
-    if _backend_queue_lock is None:
-        _backend_queue_lock = asyncio.Lock()
     return _backend_queue_lock
 
 
@@ -1297,6 +1318,7 @@ async def submit_takeaway(ud: "UserData") -> dict | None:
         "order_items":      order_items,
         "special_requests": ud.special_requests,
         "order_time":       datetime.now(timezone.utc).isoformat(),
+        "upsell_accepted":  ud.upsell_accepted,
         "channel":          "voice_agent",
     }, ud.call_id, idempotency_action="takeaway", write_health=ud.write_health)
 
@@ -1314,6 +1336,7 @@ async def submit_delivery(ud: "UserData") -> dict | None:
         "delivery_zone":     ud.delivery_zone,
         "delivery_landmark": ud.delivery_landmark,
         "order_time":        datetime.now(timezone.utc).isoformat(),
+        "upsell_accepted":   ud.upsell_accepted,
         "channel":           "voice_agent",
     }, ud.call_id, idempotency_action="delivery", write_health=ud.write_health)
 
@@ -1405,8 +1428,6 @@ def _local_phone_digits(digits: str) -> str:
     normalized = re.sub(r"\D", "", (digits or "").translate(_AR_DIGITS))
     if normalized.startswith("20") and len(normalized) >= 12:
         normalized = "0" + normalized[2:]
-    if normalized.startswith("201") and len(normalized) >= 13:
-        normalized = "0" + normalized[3:]
     return normalized
 
 
@@ -1524,8 +1545,8 @@ def _clean_followup_note(note: str) -> str:
 
 def _followup_after_name(flow: str, ud: "UserData") -> str:
     if flow == "complaint":
-        return "ورقم موبايلك علشان نتواصل معاك؟" if not ud.customer_phone else "تحب حاجة تانية يا فندم؟"
-    return "ورقم موبايلك؟"
+        return _ask_phone() if not ud.customer_phone else "تحب حاجة تانية؟"
+    return _ask_phone()
 
 
 def _followup_after_phone(flow: str, ud: "UserData") -> str:
@@ -1553,10 +1574,10 @@ def _join_user_phrases(*parts: str) -> str:
 def _complaint_followup_question(ud: "UserData") -> str:
     missing = _complaint_next_missing_slot(ud)
     if missing == "الاسم":
-        return "اسمك إيه يا فندم؟"
+        return _ask_name()
     if missing == "رقم الموبايل":
-        return "ورقم موبايلك علشان نتواصل معاك؟"
-    return "تحب حاجة تانية يا فندم؟"
+        return _ask_phone()
+    return "تحب حاجة تانية؟"
 
 
 async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str) -> str:
@@ -1582,8 +1603,8 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
         if note:
             return _voice_safe_text(_join_user_phrases(note, followup), max_chars=180)
         if followup:
-            return _voice_safe_text(_join_user_phrases("تمام", followup), max_chars=180)
-        return _voice_safe_text("تمام.")
+            return _voice_safe_text(_join_user_phrases(_ack(), followup), max_chars=180)
+        return _voice_safe_text(f"{_ack()}.")
 
     partial_digits = combined_digits if _is_plausible_partial_phone_digits(combined_digits) else ""
     if partial_digits:
@@ -1612,7 +1633,7 @@ async def _apply_name_update(ud: "UserData", name_text: str, *, flow_name: str) 
         return _voice_safe_text(_join_user_phrases(note, _followup_after_name(flow_name, ud)), max_chars=180)
     return _voice_safe_text(
         _join_user_phrases(
-            f"تمام يا {cleaned}",
+            _random.choice([f"أهلاً يا {cleaned}", f"نورت يا {cleaned}", f"{_ack()} يا {cleaned}"]),
             _followup_after_name(flow_name, ud),
         ),
         max_chars=180,
@@ -1719,7 +1740,7 @@ _runtime_health = RuntimeHealth()
 CONFIG_CACHE_TTL = _get_env_float("CONFIG_CACHE_TTL", 60.0, min_value=1.0)
 _backend_circuits: dict[str, BackendCircuitState] = {}
 _backend_queue_worker: asyncio.Task | None = None
-_backend_queue_lock: asyncio.Lock | None = None
+_backend_queue_lock = asyncio.Lock()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Idempotency key
@@ -1750,6 +1771,10 @@ class UserData:
     order_validated:       bool             = False
     order_total:           float            = 0.0
     special_requests:      str | None       = None
+    upsell_offered:        bool             = False
+    upsell_accepted:       bool             = False
+    pending_upsell_item:   str | None       = None
+    pending_upsell_price:  float | None     = None
     order_confirmed:       bool             = False
     order_id:              str | None       = None
     order_submit_in_flight: bool           = False
@@ -1758,6 +1783,7 @@ class UserData:
     delivery_address:      str | None       = None   # العنوان كامل
     delivery_zone:         str | None       = None   # المنطقة / الحي
     delivery_landmark:     str | None       = None   # علامة مميزة
+    landmark_asked:        bool             = False  # هل اتسأل عن العلامة
 
     # حجز
     reservation_time:      str | None       = None
@@ -1789,6 +1815,8 @@ class UserData:
             "phone":            self.customer_phone    or "—",
             "order":            self.order             or "—",
             "special_requests": self.special_requests  or "—",
+            "pending_upsell":   self.pending_upsell_item or "—",
+            "upsell_accepted":  self.upsell_accepted,
             "delivery_address": self.delivery_address  or "—",
             "delivery_zone":    self.delivery_zone     or "—",
             "reservation_time": self.reservation_time  or "—",
@@ -1803,11 +1831,30 @@ NEGATIVE_WORDS = {
     "لا", "لأ", "لاا", "مفيش", "مفيش طلب", "مفيش حاجه", "مفيش حاجة",
     "خلاص", "بس كده", "تمام كده", "لا تمام", "لا شكرا", "لا شكرًا",
     "ولا حاجه", "ولا حاجة", "no", "none",
+    "آه لا", "اه لا", "آه لأ", "اه لأ", "لا مفيش", "لا خلاص", "لا كده تمام",
+    "لا تمام كده", "آه مفيش", "اه مفيش",
 }
 
 POSITIVE_CONFIRMATION_WORDS = {
     "صح", "صح كده", "ايوه", "أيوه", "ماشي", "مظبوط", "تمام", "تمام كده",
     "تمام يا فندم", "أوكي", "اوكي", "yes",
+}
+
+UPSELL_ACCEPT_WORDS = {
+    "ضيف", "ضيفها", "ضيفه", "ضيفهم", "حط", "حطها", "حطه", "حطهم",
+    "زود", "زودها", "زوده", "زودهم", "هات", "هاتها", "هاته", "هاتهم",
+    "عايزها", "عايزه", "عاوزها", "عاوزه", "ماشي ضيفها", "تمام ضيفها",
+    "ايوه ضيفها", "أيوه ضيفها", "ايوه حطها", "أيوه حطها",
+}
+
+UPSELL_ITEM_REQUEST_WORDS = {
+    "عايز", "عاوزه", "عاوز", "ممكن", "هات", "ضيف", "حط", "زود",
+}
+
+UPSELL_REJECTION_WORDS = {
+    "بلاش", "مش عايز", "مش عاوز", "مش محتاج", "مش عايزها", "مش عاوزها",
+    "لا بلاش", "لا مش عايز", "لا مش عاوز", "لا شكرا", "لا شكرًا",
+    "لا ميرسي", "لا مرسي", "مش دلوقتي", "خلينا كده", "كفاية كده",
 }
 
 THANKS_WORDS = {
@@ -1827,6 +1874,32 @@ def _looks_empty_answer(text: str | None) -> bool:
         return True
     negative_forms = {_normalize_ar(word) for word in NEGATIVE_WORDS}
     return any(normalized == word or normalized.startswith(f"{word} ") for word in negative_forms)
+
+
+_ACK_PHRASES = ["تمام", "حاضر", "ماشي", "أوكي", "تمام يا فندم", "حاضر يا فندم"]
+_ACK_GOT_IT = ["سجلت", "معايا", "خدت", "حطيت"]
+_NEXT_NAME = ["اسمك إيه؟", "الاسم إيه يا فندم؟", "ممكن اسمك؟"]
+_NEXT_PHONE = ["ورقم موبايلك؟", "وإيه رقم الموبايل؟", "والموبايل يا فندم؟"]
+_NEXT_SPECIAL = ["في أي طلب خاص في التحضير؟", "عندك أي طلب خاص؟", "حابب حاجة معينة في التحضير؟"]
+_NEXT_ADDRESS = ["عنوانك إيه يا فندم؟", "فين هنوصلك يا فندم؟", "قولي العنوان يا فندم."]
+
+def _ack() -> str:
+    return _random.choice(_ACK_PHRASES)
+
+def _ack_got(thing: str) -> str:
+    return f"{_random.choice(_ACK_GOT_IT)} {thing}"
+
+def _ask_name() -> str:
+    return _random.choice(_NEXT_NAME)
+
+def _ask_phone() -> str:
+    return _random.choice(_NEXT_PHONE)
+
+def _ask_special() -> str:
+    return _random.choice(_NEXT_SPECIAL)
+
+def _ask_address() -> str:
+    return _random.choice(_NEXT_ADDRESS)
 
 
 def _format_order_item(name: str, qty: int) -> str:
@@ -1853,6 +1926,12 @@ def _contains_normalized_phrase(text: str, phrases: set[str]) -> bool:
     return any(f" {_normalize_ar(phrase)} " in wrapped for phrase in phrases)
 
 
+def _normalized_phrase_present(normalized_text: str, phrase: str) -> bool:
+    if not normalized_text:
+        return False
+    return f" {_normalize_ar(phrase)} " in f" {normalized_text} "
+
+
 def _is_thanks_message(text: str) -> bool:
     return _contains_normalized_phrase(text, THANKS_WORDS)
 
@@ -1864,6 +1943,38 @@ def _is_positive_confirmation(text: str) -> bool:
     if _contains_normalized_phrase(text, POSITIVE_CONFIRMATION_WORDS):
         return len(normalized.split()) <= 4
     return False
+
+
+def _is_explicit_upsell_acceptance(text: str, item_name: str | None) -> bool:
+    normalized = _normalize_ar(text)
+    if not normalized or _is_thanks_message(text) or _looks_empty_answer(text):
+        return False
+
+    if _contains_normalized_phrase(text, UPSELL_ACCEPT_WORDS):
+        return True
+
+    item_normalized = _normalize_ar(item_name or "")
+    if not item_normalized:
+        return False
+
+    mentions_item = _normalized_phrase_present(normalized, item_normalized)
+    if not mentions_item:
+        return False
+
+    if normalized == item_normalized:
+        return True
+    if _contains_normalized_phrase(text, POSITIVE_CONFIRMATION_WORDS | UPSELL_ITEM_REQUEST_WORDS):
+        return True
+    return False
+
+
+def _is_explicit_upsell_rejection(text: str) -> bool:
+    normalized = _normalize_ar(text)
+    if not normalized:
+        return False
+    if _looks_empty_answer(text):
+        return True
+    return _contains_normalized_phrase(text, UPSELL_REJECTION_WORDS)
 
 
 def _address_seems_specific(address: str) -> bool:
@@ -1939,6 +2050,38 @@ def _is_greeting_only(text: str) -> bool:
 def _is_menu_question(text: str) -> bool:
     normalized = _normalize_ar(text)
     return bool(normalized and _contains_any_hint(normalized, _MENU_HINTS))
+
+
+_FILLER_STARTS = {"آ", "آآ", "آه", "اه", "أه", "امم", "ام", "ممم", "هم", "اهم"}
+
+_NON_NAME_PATTERNS = {
+    "آه لا", "اه لا", "آه لأ", "اه لأ", "آه مفيش", "اه مفيش",
+    "آآ لا", "آآ لأ", "آآ مفيش", "آآ تمام",
+    "لا مفيش", "مفيش", "لا خلاص", "خلاص", "تمام", "تمام كده",
+    "لا تمام", "بس كده", "كده تمام", "اوكي", "أوكي", "ماشي",
+}
+
+def _is_likely_non_name_response(text: str) -> bool:
+    """Detect filler/negative responses that should not be captured as names."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return True
+    normalized = _normalize_ar(cleaned)
+    if not normalized:
+        return True
+    # Check against known non-name patterns
+    for pattern in _NON_NAME_PATTERNS:
+        np = _normalize_ar(pattern)
+        if normalized == np or normalized.startswith(np + " "):
+            return True
+    # Starts with filler sound (آ, آآ, آه, اه, امم...) followed by anything
+    first_token = cleaned.split()[0]
+    if first_token in _FILLER_STARTS or _normalize_ar(first_token) in {_normalize_ar(f) for f in _FILLER_STARTS}:
+        return True
+    # Also reject if it's just a negative word
+    if _looks_empty_answer(cleaned):
+        return True
+    return False
 
 
 def _extract_name_candidate(text: str) -> str | None:
@@ -2054,7 +2197,11 @@ def _greeter_turn_decision(
 ) -> GreeterTurnDecision:
     if _is_greeting_only(text):
         return GreeterTurnDecision(
-            message="طلب أكل ولا حجز ولا شكوى يا فندم؟",
+            message=_random.choice([
+                "أهلاً! تحب تطلب أكل، تحجز، ولا في حاجة تانية؟",
+                "يا هلا! عايز تطلب ولا تحجز ولا إيه؟",
+                "أهلاً وسهلاً! تحب تطلب، تحجز، ولا محتاج حاجة؟",
+            ]),
             reason="greeting_only",
         )
 
@@ -2082,11 +2229,14 @@ def _greeter_turn_decision(
         )
     if intent == "order_ambiguous":
         return GreeterTurnDecision(
-            message="تيكاواي ولا توصيل يا فندم؟",
+            message=_random.choice(["تيكاواي ولا توصيل يا فندم؟", "هتيجي تاخده ولا نوصلهولك؟"]),
             reason="order_ambiguous",
         )
     return GreeterTurnDecision(
-        message="طلب أكل ولا حجز ولا شكوى يا فندم؟",
+        message=_random.choice([
+            "تحب تطلب أكل، تحجز، ولا حاجة تانية؟",
+            "عايز تطلب ولا تحجز ولا إيه يا فندم؟",
+        ]),
         reason="unknown",
     )
 
@@ -2287,6 +2437,51 @@ def _resolve_menu_item(item_name: str, menu_items: list[dict]) -> dict | None:
     if exact_match:
         return exact_match
     return best_partial[1] if best_partial else None
+
+
+def _get_upsell_suggestion(ud: "UserData", cfg: "RestaurantConfig") -> str | None:
+    """Pick an upsell item not already in the order."""
+    if ud.upsell_offered or not cfg.upsell_rules:
+        return None
+    order_lower = {(item or "").lower() for item in (ud.order or [])}
+    for rule in cfg.upsell_rules:
+        item_name = rule.get("item", "")
+        if item_name.lower() not in order_lower:
+            price = rule.get("price")
+            ud.upsell_offered = True
+            ud.pending_upsell_item = item_name
+            ud.pending_upsell_price = float(price) if price is not None else None
+            if price:
+                return f"ولو تحب، أزودلك {item_name} مع الطلب بـ{_int_to_ar(int(price))} جنيه؟"
+            return rule.get("suggestion", f"ولو تحب، أزودلك {item_name} مع الطلب؟")
+    return None
+
+
+def _clear_pending_upsell(ud: "UserData", *, accepted: bool | None = None) -> None:
+    ud.pending_upsell_item = None
+    ud.pending_upsell_price = None
+    if accepted is not None:
+        ud.upsell_accepted = accepted
+
+
+def _accept_pending_upsell(ud: "UserData", cfg: "RestaurantConfig") -> str | None:
+    item_name = (ud.pending_upsell_item or "").strip()
+    if not item_name:
+        return None
+
+    current_items = list(ud.order or [])
+    normalized_items, unknown, total = _normalize_order_items(current_items + [item_name], cfg.menu_items)
+    if unknown:
+        ud.order = current_items + [item_name]
+        if ud.pending_upsell_price is not None:
+            ud.order_total += float(ud.pending_upsell_price)
+    else:
+        ud.order = normalized_items
+        ud.order_total = total
+        ud.order_validated = True
+
+    _clear_pending_upsell(ud, accepted=True)
+    return item_name
 
 
 def _normalize_order_items(items: list[str], menu_items: list[dict]) -> tuple[list[str], list[str], float]:
@@ -2623,20 +2818,20 @@ class BaseAgent(Agent):
         chat_ctx.add_message(
             role="system",
             content=(
-                "قواعد الرد:\n"
-                "- مصري قصير: جملة أو اتنين، وسؤال واحد بس.\n"
-                "- كمّل على أول معلومة ناقصة بس، وما تكررش حاجة متسجلة.\n"
-                "- ممنوع كلمة واحدة أو تأكيد قبل التنفيذ الحقيقي.\n"
-                "- ما تقولش tools ولا تحويلات، والأرقام بالكلام.\n"
-                "- اكتب: كوشري، تيكاواي. والأسماء بالعربي الصوتي.\n"
+                "أسلوب الكلام:\n"
+                "- اتكلم زي موظف مطعم مصري طبيعي، ودود وعفوي.\n"
+                "- خليك مختصر بس مش جاف — كلمة لطيفة هنا وهنا عادي.\n"
+                "- كمّل على أول معلومة ناقصة، ومتكررش حاجة العميل قالها قبل كده.\n"
+                "- متضيفش أصناف أو كميات من عندك.\n"
+                "- الأرقام بالكلام والأسماء بالعربي الصوتي.\n"
                 f"بيانات العميل: {ud.summarize()}"
             ),
         )
         chat_ctx.add_message(
             role="system",
             content=(
-                f"أنت الآن في مرحلة {self.__class__.__name__}. "
-                "رد قصير بالمصري، سؤال واحد بس، ومتكررّش معلومة متسجلة، وكمّل على أول معلومة ناقصة بس."
+                f"أنت دلوقتي في {self.__class__.__name__}. "
+                "رد طبيعي بالمصري وكمّل على اللي ناقص."
             ),
         )
         await self.update_chat_ctx(chat_ctx)
@@ -2697,7 +2892,7 @@ class BaseAgent(Agent):
             _set_phone_capture_mode(ud, desired_phone_mode)
         self._sync_phone_capture_mode()
 
-        if _flow_missing_name(flow, ud):
+        if _flow_missing_name(flow, ud) and not _is_likely_non_name_response(user_text):
             candidate = _extract_name_candidate(user_text)
             if candidate:
                 logger.info("call=%s | name turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
@@ -2721,10 +2916,10 @@ class BaseAgent(Agent):
         if ud.order_confirmed or ud.reservation_confirmed or ud.complaint_logged:
             if _is_thanks_message(user_text):
                 logger.info("call=%s | post_completion_thanks_intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-                await self._say_and_stop("العفو يا فندم.")
+                await self._say_and_stop(_random.choice(["العفو يا فندم!", "ولا يهمك!", "بالهنا والشفا!"]))
             if _is_positive_confirmation(user_text):
                 logger.info("call=%s | post_completion_ack_intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-                await self._say_and_stop("تحت أمرك يا فندم.")
+                await self._say_and_stop(_random.choice(["تحت أمرك!", "في أي حاجة تانية يا فندم؟"]))
 
         if await self._maybe_handle_turn_deterministically(user_text):
             raise StopResponse()
@@ -2739,7 +2934,7 @@ class BaseAgent(Agent):
                 content=(
                     f"آخر كلام واضح من العميل: {user_text or '—'}\n"
                     f"{guard}\n"
-                    "ممنوع الرد بكلمة واحدة أو تأكيد كاذب أو سؤال عن معلومة غير المطلوبة الآن."
+                    "رد بشكل طبيعي وكمّل على اللي ناقص."
                 ),
             )
 
@@ -2784,24 +2979,18 @@ class Greeter(BaseAgent):
             delivery_line = "• طلب توصيل → to_delivery\n" if cfg.delivery_enabled else ""
             instructions = (
                 f"أنت موظف استقبال في مطعم '{cfg.name}'.\n\n"
-                f"الجملة الأولى بالظبط: 'أهلاً بيك يا فندم، معاك {cfg.name}. "
-                "تحب تطلب، تحجز، ولا في حاجة تانية؟'\n\n"
-                "مهم جدًا:\n"
-                "• أول ما تفهم نية العميل استدعي الأداة المناسبة فورًا من غير كلام تمهيدي.\n"
-                "• ممنوع ترد بكلمة واحدة زي: أوردر، صح، أوكي.\n"
-                "• لو العميل قال توصيل صراحة، متسألوش تيكاواي ولا توصيل.\n"
-                "• لو العميل قال تيكاواي أو هياخد الطلب بنفسه، حوّله فورًا لتيكاواي.\n"
-                "• لو العميل سأل على المتاح أو المنيو، استخدم get_menu فقط.\n\n"
-                "بعدين حدد نية العميل:\n"
-                "• استخدم resolve_request أولاً لو كلامه فيه أكتر من إشارة أو STT ملخبطة\n"
+                "أول ما تفهم نية العميل حوّله للمكان الصح على طول.\n"
+                "لو العميل قال توصيل أو تيكاواي صراحة، حوّله فوراً من غير أسئلة زيادة.\n"
+                "لو سأل على المنيو أو سعر → get_menu.\n\n"
+                "التحويلات:\n"
                 "• طلب أكل / تيكاواي → to_takeaway\n"
                 f"{delivery_line}"
                 "• حجز ترابيزة → to_reservation\n"
                 "• شكوى أو مشكلة → to_complaint\n"
-                "• سأل عن المنيو أو سعر → استدعي get_menu وردّ بالأسعار\n"
-                "• مش واضح → قول: 'تيكاواي ولا توصيل يا فندم؟'\n\n"
+                "• مش واضح → اسأله بشكل عفوي\n"
+                "• استخدم resolve_request لو الكلام مش واضح أو الـ STT ملخبطة\n\n"
                 f"أصناف متاحة: {cfg.menu_names()}\n\n"
-                "ممنوع: لا تاخد طلبات ولا تحسب إجمالي."
+                "اتكلم زي موظف مصري طبيعي — ودود وعفوي. متاخدش طلبات ولا تحسب إجمالي."
             )
 
         super().__init__(
@@ -2892,22 +3081,25 @@ class Takeaway(BaseAgent):
     def __init__(self, cfg: RestaurantConfig) -> None:
         self.cfg = cfg
 
-        self._opening = "تحب تطلب إيه؟"
+        self._opening = "اتفضل يا فندم، تحب تطلب إيه؟"
         super().__init__(
             instructions=(
                 f"أنت موظف طلبات تيكاواي في '{cfg.name}'.\n"
                 f"وقت الاستلام: {num2ar(cfg.wait_minutes)} دقيقة.\n"
                 f"أصناف: {cfg.menu_names()}\n\n"
-                "اتبع الخطوات دي بالترتيب — سؤال واحد بس في كل مرة:\n"
-                "١. قول: 'تحب تطلب إيه؟' → استدعي update_order\n"
-                "٢. قول: 'في أي طلب خاص في التحضير؟' → لو قال لأ أو مفيش → انتقل للخطوة التالية فوراً، لو قال إيه → update_special_requests\n"
-                "٣. قول: 'اسمك إيه يا فندم؟' → update_name\n"
-                "٤. قول: 'ورقم موبايلك؟' → update_phone\n"
-                "٥. قول ملخص الطلب: '[الطلب] باسم [الاسم]، صح؟' → لو أكّد → confirm_order فوراً\n\n"
-                "قواعد:\n"
+                "اتكلم زي موظف مطعم مصري حقيقي — عفوي وودود، مش بتقرأ من سكريبت.\n"
+                "نوّع في كلامك، متقولش نفس الجمل كل مرة.\n"
+                "الترتيب العام:\n"
+                "١. خُد الطلب واستدعِ update_order.\n"
+                "٢. اسأل لو فيه طلب خاص، ولو قال لأ كمّل.\n"
+                "٣. خُد الاسم ورقم الموبايل.\n"
+                "٤. لخّص الطلب مرة واحدة، ولو وافق استدعِ confirm_order.\n"
+                "لو العميل قال معلومة من خطوة جاية سجّلها وكمّل عادي.\n\n"
                 "- لو سأل عن سعر → get_menu\n"
                 "- لو عنده شكوى → to_complaint\n"
-                "- لو حاجة خارج نطاقك → to_greeter\n"
+                "- متضيفش أصناف من عندك.\n"
+                "- اقتراح الإضافة مرة واحدة بس وبشكل عفوي.\n"
+                "- 'أيوه' أو 'تمام' مش موافقة على الإضافة إلا لو ذكر الصنف.\n"
                 "- لا تكرر التأكيد أكتر من مرة واحدة"
             ),
             tools=[
@@ -2921,6 +3113,21 @@ class Takeaway(BaseAgent):
     async def _maybe_handle_turn_deterministically(self, user_text: str) -> bool:
         ud = self.session.userdata
         context = self._tool_context()
+
+        if ud.pending_upsell_item:
+            pending_item = ud.pending_upsell_item
+            if _is_explicit_upsell_acceptance(user_text, pending_item):
+                logger.info("call=%s | takeaway upsell accepted | item=%s", ud.call_id, pending_item)
+                accepted_item = _accept_pending_upsell(ud, self.cfg) or "الإضافة"
+                await self._say_and_stop(
+                    _voice_safe_text(f"{_ack()}، ضفت {accepted_item}. {_ask_special()}", max_chars=180)
+                )
+            if _is_positive_confirmation(user_text) or _is_explicit_upsell_rejection(user_text):
+                logger.info("call=%s | takeaway upsell skipped | item=%s | text=%r", ud.call_id, pending_item, user_text)
+                _clear_pending_upsell(ud, accepted=False)
+                await self._say_and_stop(f"{_ack()}. {_ask_special()}")
+            logger.info("call=%s | takeaway pending upsell cleared for next turn | item=%s", ud.call_id, pending_item)
+            _clear_pending_upsell(ud, accepted=False)
 
         if ud.order and not ud.customer_name and _looks_empty_answer(user_text):
             logger.info("call=%s | takeaway optional_empty_intercepted | text=%r", ud.call_id, user_text)
@@ -2956,14 +3163,17 @@ class Takeaway(BaseAgent):
             context.userdata.order_validated = False
             context.userdata.order_total = 0.0
             logger.warning("call=%s | takeaway order captured without menu validation", context.userdata.call_id)
-            return _voice_safe_text(f"تمام يا فندم، سجلت الطلب مبدئيًا: {', '.join(normalized_items)}. في أي طلب خاص في التحضير؟")
+            return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {_ask_special()}")
         normalized_items, unknown, total = _normalize_order_items(items, self.cfg.menu_items)
         if unknown:
             return _voice_safe_text(f"'{', '.join(unknown)}' مش في المنيو. المتاح: {self.cfg.menu_text()}", max_chars=170)
         context.userdata.order = normalized_items
         context.userdata.order_validated = True
         context.userdata.order_total = total
-        return _voice_safe_text(f"تمام يا فندم، طلبك {', '.join(normalized_items)}. في أي طلب خاص في التحضير؟")
+        upsell = _get_upsell_suggestion(context.userdata, self.cfg)
+        if upsell:
+            return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {upsell}")
+        return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {_ask_special()}")
 
     @function_tool()
     async def update_special_requests(
@@ -2971,11 +3181,12 @@ class Takeaway(BaseAgent):
         requests: Annotated[str, Field(description="طلبات خاصة في التحضير أو مفيش")],
         context: RunContext_T,
     ) -> str:
+        _clear_pending_upsell(context.userdata)
         if _looks_empty_answer(requests):
             context.userdata.special_requests = None
-            return _voice_safe_text("تمام يا فندم، مفيش طلب خاص. اسمك إيه يا فندم؟")
+            return _voice_safe_text(f"{_ack()}. {_ask_name()}")
         context.userdata.special_requests = requests.strip()
-        return _voice_safe_text("تمام يا فندم، سجلت الطلب الخاص. اسمك إيه يا فندم؟")
+        return _voice_safe_text(f"{_ack()}، سجلت الطلب الخاص. {_ask_name()}")
 
     @function_tool()
     async def confirm_order(self, context: RunContext_T) -> str:
@@ -3018,7 +3229,7 @@ class Takeaway(BaseAgent):
 class Delivery(BaseAgent):
     def __init__(self, cfg: RestaurantConfig) -> None:
         self.cfg = cfg
-        self._opening = "تحب تطلب إيه؟"
+        self._opening = "اتفضل يا فندم، تحب تطلب إيه؟"
 
         zones_info = f" | مناطق: {cfg.delivery_zones_text()}" if cfg.delivery_zones else ""
 
@@ -3027,19 +3238,20 @@ class Delivery(BaseAgent):
                 f"أنت موظف طلبات توصيل في '{cfg.name}'.\n"
                 f"{cfg.delivery_info_text()}{zones_info}\n"
                 f"أصناف: {cfg.menu_names()}\n\n"
-                "اتبع الخطوات دي بالترتيب — سؤال واحد بس في كل مرة:\n"
-                "١. قول: 'تحب تطلب إيه؟' → update_order\n"
-                "٢. قول: 'في أي طلب خاص في التحضير؟' → لو لأ → انتقل، لو إيه → update_special_requests\n"
-                "٣. قول: 'عنوانك إيه يا فندم؟ قولي الشارع والمنطقة.' → update_delivery_address\n"
-                "٤. قول: 'في علامة مميزة قريبة منك؟' → لو لأ → انتقل، لو إيه → update_delivery_landmark\n"
-                "٥. قول: 'اسمك إيه يا فندم؟' → update_name\n"
-                "٦. قول: 'ورقم موبايلك؟' → update_phone\n"
-                "٧. قول ملخص: '[الطلب] لـ[العنوان] باسم [الاسم]، صح؟' → لو أكّد → confirm_delivery فوراً\n\n"
-                "قواعد:\n"
+                "اتكلم زي موظف مطعم مصري حقيقي — عفوي وودود.\n"
+                "نوّع في كلامك، متقولش نفس الجمل كل مرة.\n"
+                "الترتيب العام:\n"
+                "١. خُد الطلب واستدعِ update_order.\n"
+                "٢. اسأل لو فيه طلب خاص، ولو قال لأ كمّل.\n"
+                "٣. خُد العنوان، وبعده العلامة المميزة لو محتاج توضيح.\n"
+                "٤. خُد الاسم ورقم الموبايل.\n"
+                "٥. لخّص الطلب مرة واحدة، ولو وافق استدعِ confirm_delivery.\n"
+                "لو العميل قال معلومة من خطوة جاية سجّلها وكمّل عادي.\n\n"
                 "- لو سأل عن سعر → get_menu\n"
                 "- لو عنده شكوى → to_complaint\n"
-                "- لو حاجة خارج نطاقك → to_greeter\n"
-                "- لا تكرر التأكيد أكتر من مرة"
+                "- متضيفش أصناف من عندك.\n"
+                "- اقتراح الإضافة مرة واحدة بس وبشكل عفوي.\n"
+                "- 'أيوه' أو 'تمام' مش موافقة على الإضافة إلا لو ذكر الصنف."
             ),
             tools=[
                 update_name,
@@ -3053,11 +3265,26 @@ class Delivery(BaseAgent):
         ud = self.session.userdata
         context = self._tool_context()
 
+        if ud.pending_upsell_item:
+            pending_item = ud.pending_upsell_item
+            if _is_explicit_upsell_acceptance(user_text, pending_item):
+                logger.info("call=%s | delivery upsell accepted | item=%s", ud.call_id, pending_item)
+                accepted_item = _accept_pending_upsell(ud, self.cfg) or "الإضافة"
+                await self._say_and_stop(
+                    _voice_safe_text(f"{_ack()}، ضفت {accepted_item}. {_ask_special()}", max_chars=180)
+                )
+            if _is_positive_confirmation(user_text) or _is_explicit_upsell_rejection(user_text):
+                logger.info("call=%s | delivery upsell skipped | item=%s | text=%r", ud.call_id, pending_item, user_text)
+                _clear_pending_upsell(ud, accepted=False)
+                await self._say_and_stop(f"{_ack()}. {_ask_special()}")
+            logger.info("call=%s | delivery pending upsell cleared for next turn | item=%s", ud.call_id, pending_item)
+            _clear_pending_upsell(ud, accepted=False)
+
         if ud.order and not ud.delivery_address and _looks_empty_answer(user_text):
             logger.info("call=%s | delivery optional_empty_intercepted | step=special_requests | text=%r", ud.call_id, user_text)
             await self._say_and_stop(await self.update_special_requests(requests=user_text, context=context))
 
-        if ud.delivery_address and not ud.customer_name and _looks_empty_answer(user_text):
+        if ud.delivery_address and not ud.landmark_asked and _looks_empty_answer(user_text):
             logger.info("call=%s | delivery optional_empty_intercepted | step=landmark | text=%r", ud.call_id, user_text)
             await self._say_and_stop(await self.update_delivery_landmark(landmark=user_text, context=context))
 
@@ -3087,7 +3314,7 @@ class Delivery(BaseAgent):
             context.userdata.order_validated = False
             context.userdata.order_total = 0.0
             logger.warning("call=%s | delivery order captured without menu validation", context.userdata.call_id)
-            return _voice_safe_text(f"تمام يا فندم، سجلت الطلب مبدئيًا: {', '.join(normalized_items)}. في أي طلب خاص في التحضير؟")
+            return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {_ask_special()}")
         normalized_items, unknown, total = _normalize_order_items(items, self.cfg.menu_items)
         if unknown:
             return _voice_safe_text(f"'{', '.join(unknown)}' مش في المنيو. المتاح: {self.cfg.menu_text()}", max_chars=170)
@@ -3103,7 +3330,10 @@ class Delivery(BaseAgent):
         context.userdata.order = normalized_items
         context.userdata.order_validated = True
         context.userdata.order_total = total
-        return _voice_safe_text(f"تمام يا فندم، طلبك {', '.join(normalized_items)}. في أي طلب خاص في التحضير؟")
+        upsell = _get_upsell_suggestion(context.userdata, self.cfg)
+        if upsell:
+            return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {upsell}")
+        return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {_ask_special()}")
 
     @function_tool()
     async def update_special_requests(
@@ -3112,11 +3342,12 @@ class Delivery(BaseAgent):
         context: RunContext_T,
     ) -> str:
         """يُستدعى لما العميل يذكر طلبات خاصة."""
+        _clear_pending_upsell(context.userdata)
         if _looks_empty_answer(requests):
             context.userdata.special_requests = None
-            return _voice_safe_text("تمام يا فندم، مفيش طلب خاص. عنوانك إيه يا فندم؟ قولي الشارع والمنطقة.")
+            return _voice_safe_text(f"{_ack()}. {_ask_address()}")
         context.userdata.special_requests = requests.strip()
-        return _voice_safe_text("تمام يا فندم، سجلت الطلب الخاص. عنوانك إيه يا فندم؟ قولي الشارع والمنطقة.")
+        return _voice_safe_text(f"{_ack()}، سجلت الطلب الخاص. {_ask_address()}")
 
     @function_tool()
     async def update_delivery_address(
@@ -3142,12 +3373,14 @@ class Delivery(BaseAgent):
 
         context.userdata.delivery_address = address.strip()
         context.userdata.delivery_zone    = zone.strip()
+        context.userdata.delivery_landmark = None
         logger.info("call=%s | delivery_address=%s zone=%s",
                     context.userdata.call_id, address, zone)
         if _address_seems_specific(address):
-            context.userdata.delivery_landmark = None
-            return _voice_safe_text(f"تمام يا فندم، سجلت العنوان: {address}. اسمك إيه يا فندم؟", max_chars=180)
-        return _voice_safe_text(f"تمام يا فندم، سجلت العنوان: {address}. في علامة مميزة قريبة منك؟", max_chars=180)
+            context.userdata.landmark_asked = True
+            return _voice_safe_text(f"{_ack()}، {_ack_got('العنوان')}. {_ask_name()}", max_chars=180)
+        context.userdata.landmark_asked = False
+        return _voice_safe_text(f"{_ack()}، {_ack_got('العنوان')}. في علامة مميزة قريبة منك؟", max_chars=180)
 
     @function_tool()
     async def update_delivery_landmark(
@@ -3156,11 +3389,19 @@ class Delivery(BaseAgent):
         context: RunContext_T,
     ) -> str:
         """يُستدعى لما العميل يذكر علامة مميزة."""
+        context.userdata.landmark_asked = True
         if _looks_empty_answer(landmark):
             context.userdata.delivery_landmark = None
-            return _voice_safe_text("تمام يا فندم. اسمك إيه يا فندم؟")
+            return _voice_safe_text(f"{_ack()}. {_ask_name()}")
+        explicit_name_reply = re.match(r"^\s*(?:انا|أنا|اسمي|اسمى|الاسم|اسم|معاك|معاكي)\b", landmark, flags=re.IGNORECASE)
+        if explicit_name_reply and not context.userdata.customer_name:
+            name_candidate = _extract_name_candidate(landmark)
+            if name_candidate:
+                context.userdata.delivery_landmark = None
+                context.userdata.customer_name = name_candidate
+                return _voice_safe_text(f"{_ack()} يا {name_candidate}. {_ask_phone()}", max_chars=180)
         context.userdata.delivery_landmark = landmark.strip()
-        return _voice_safe_text(f"تمام يا فندم، سجلت العلامة: {landmark}. اسمك إيه يا فندم؟", max_chars=180)
+        return _voice_safe_text(f"{_ack()}، سجلت العلامة. {_ask_name()}", max_chars=180)
 
     @function_tool()
     async def to_complaint(self, context: RunContext_T) -> tuple[Agent, str]:
@@ -3223,15 +3464,16 @@ class Reservation(BaseAgent):
                 f"أنت موظف حجوزات في '{cfg.name}'.\n"
                 f"مواعيد: {cfg.hours_text()}\n"
                 f"الحجز: من {num2ar(cfg.min_guests)} لـ{num2ar(cfg.max_guests)} ضيف{branch_note}\n\n"
-                "اتبع الخطوات دي بالترتيب — سؤال واحد بس في كل مرة:\n"
-                "١. قول: 'عايز تحجز إمتى؟' → update_reservation_time\n"
-                "   لو الوقت خارج المواعيد → قول المواعيد واقترح وقت بديل\n"
-                "٢. قول: 'كام ضيف؟' → update_guests_count\n"
-                "٣. قول: 'في مناسبة خاصة؟' → لو لأ → انتقل، لو إيه → update_reservation_notes\n"
-                + (f"٤. قول: 'أي فرع تفضل؟ {cfg.branch_names()}' → update_branch\n" if len(cfg.branches) > 1 else "")
-                + "٤. قول: 'اسمك إيه يا فندم؟' → update_name\n"
-                "٥. قول: 'ورقم موبايلك؟' → update_phone\n"
-                "٦. قول ملخص: 'حجز [العدد] ضيوف يوم [الوقت] باسم [الاسم]، صح؟' → لو أكّد → confirm_reservation فوراً\n\n"
+                "اتكلم زي موظف مصري طبيعي — ودود وعفوي.\n"
+                "الترتيب العام:\n"
+                "١. اسأل عن الوقت → update_reservation_time\n"
+                "   لو خارج المواعيد → قول المواعيد واقترح بديل\n"
+                "٢. اسأل عن عدد الضيوف → update_guests_count\n"
+                "٣. اسأل لو في مناسبة → update_reservation_notes\n"
+                + (f"٤. اسأل عن الفرع: {cfg.branch_names()} → update_branch\n" if len(cfg.branches) > 1 else "")
+                + ("٥" if len(cfg.branches) > 1 else "٤") + ". خُد الاسم → update_name\n"
+                + ("٦" if len(cfg.branches) > 1 else "٥") + ". خُد رقم الموبايل → update_phone\n"
+                + ("٧" if len(cfg.branches) > 1 else "٦") + ". لخّص الحجز، ولو أكّد → confirm_reservation\n\n"
                 "لو حاجة خارج نطاقك → to_greeter"
             ),
             tools=[
@@ -3273,7 +3515,7 @@ class Reservation(BaseAgent):
             return _voice_safe_text("الوقت مش واضح. قول اليوم والساعة مع بعض، زي بكرة الساعة 8 بالليل.")
         context.userdata.reservation_time = parsed.raw_text
         context.userdata.reservation_time_iso = parsed.normalized_text
-        return _voice_safe_text(f"تمام يا فندم، سجلت الوقت: {parsed.raw_text}. كام ضيف؟", max_chars=180)
+        return _voice_safe_text(f"{_ack()}، {parsed.raw_text}. كام شخص هتكونوا؟", max_chars=180)
 
     @function_tool()
     async def update_guests_count(
@@ -3287,7 +3529,7 @@ class Reservation(BaseAgent):
         if count > self.cfg.max_guests:
             return _voice_safe_text(f"أكتر عدد في حجز واحد {num2ar(self.cfg.max_guests)}، اتصل على {spoken_phone(self.cfg.phone)} مباشرة لو أكتر.")
         context.userdata.guests_count = count
-        return _voice_safe_text(f"تمام يا فندم، {num2ar(count)} ضيوف. في مناسبة خاصة؟")
+        return _voice_safe_text(f"{_ack()}، {num2ar(count)} أشخاص. في مناسبة معينة ولا عادي؟")
 
     @function_tool()
     async def update_branch(
@@ -3300,7 +3542,7 @@ class Reservation(BaseAgent):
         if not resolved:
             return _voice_safe_text(f"الفرع ده مش واضح. الفروع المتاحة: {self.cfg.branch_names()}.", max_chars=170)
         context.userdata.selected_branch = resolved
-        return _voice_safe_text(f"تمام يا فندم، فرع {resolved}. اسمك إيه يا فندم؟")
+        return _voice_safe_text(f"{_ack()}، فرع {resolved}. {_ask_name()}")
 
     @function_tool()
     async def update_reservation_notes(
@@ -3312,12 +3554,12 @@ class Reservation(BaseAgent):
         if _looks_empty_answer(notes):
             context.userdata.reservation_notes = None
             if len(self.cfg.branches) > 1 and not context.userdata.selected_branch:
-                return _voice_safe_text(f"تمام يا فندم. أي فرع تفضل؟ {self.cfg.branch_names()}")
-            return _voice_safe_text("تمام يا فندم. اسمك إيه يا فندم؟")
+                return _voice_safe_text(f"{_ack()}. أي فرع تفضل؟ {self.cfg.branch_names()}")
+            return _voice_safe_text(f"{_ack()}. {_ask_name()}")
         context.userdata.reservation_notes = notes.strip()
         if len(self.cfg.branches) > 1 and not context.userdata.selected_branch:
-            return _voice_safe_text(f"تمام يا فندم، سجلت الملاحظة. أي فرع تفضل؟ {self.cfg.branch_names()}", max_chars=180)
-        return _voice_safe_text("تمام يا فندم، سجلت الملاحظة. اسمك إيه يا فندم؟")
+            return _voice_safe_text(f"{_ack()}، سجلت الملاحظة. أي فرع تفضل؟ {self.cfg.branch_names()}", max_chars=180)
+        return _voice_safe_text(f"{_ack()}، سجلت الملاحظة. {_ask_name()}")
 
     @function_tool()
     async def confirm_reservation(self, context: RunContext_T) -> str:
@@ -3408,8 +3650,6 @@ class Complaint(BaseAgent):
 # ─────────────────────────────────────────────────────────────────────────────
 # Graceful shutdown — httpx cleanup via atexit (signal handling done by SDK)
 # ─────────────────────────────────────────────────────────────────────────────
-import atexit
-
 def _cleanup_http():
     global _http_client
     client = _http_client
@@ -3477,7 +3717,7 @@ MAX_CALL_DURATION = _get_env_int("MAX_CALL_DURATION", 600, min_value=30)  # ثو
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
-    call_id = str(uuid.uuid4())[:8]
+    call_id = str(uuid.uuid4())[:16]
     logger.info("call=%s | started | room=%s", call_id, ctx.room.name)
 
     # ── استخراج restaurant_id من room metadata لدعم multi-tenant ──────────

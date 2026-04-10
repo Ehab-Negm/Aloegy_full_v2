@@ -50,6 +50,12 @@ def make_big_menu_cfg() -> agent.RestaurantConfig:
     )
 
 
+def make_upsell_cfg() -> agent.RestaurantConfig:
+    cfg = make_cfg()
+    cfg.upsell_rules = [{"item": "cola", "price": 15}]
+    return cfg
+
+
 def make_ctx(current_agent, cfg, ud=None, agents=None):
     userdata = ud or agent.UserData(call_id="call-test", restaurant=cfg)
     userdata.restaurant = cfg
@@ -250,9 +256,94 @@ async def main() -> int:
     reservation_no_notes = await reservation.update_reservation_notes("لا تمام", reservation_optional_ctx)
     check("takeaway_no_special_natural", "مفيش طلب خاص" in takeaway_no_special and takeaway_optional_ctx.userdata.special_requests is None)
     check("delivery_no_special_natural", "مفيش طلب خاص" in delivery_no_special and delivery_optional_ctx.userdata.special_requests is None)
+    name_as_landmark_ctx = make_ctx(delivery, cfg, agent.UserData(call_id="call-name-as-landmark", restaurant=cfg))
+    name_as_landmark_ctx.userdata.order = ["burger large"]
+    name_as_landmark_ctx.userdata.delivery_address = "street 1"
+    name_as_landmark_ctx.userdata.delivery_zone = "nasr city"
+    landmark_name_msg = await delivery.update_delivery_landmark("اسمي أحمد", name_as_landmark_ctx)
     check("delivery_no_landmark_natural", "تمام يا فندم" in delivery_no_landmark and delivery_optional_ctx.userdata.delivery_landmark is None)
+    check(
+        "name_reply_not_saved_as_landmark",
+        name_as_landmark_ctx.userdata.customer_name == "أحمد"
+        and name_as_landmark_ctx.userdata.delivery_landmark is None
+        and "ورقم موبايلك" in landmark_name_msg,
+    )
     check("detailed_address_skips_landmark", "اسمك إيه" in detailed_address_msg and detailed_address_ctx.userdata.delivery_landmark is None)
     check("reservation_no_notes_natural", "تمام يا فندم" in reservation_no_notes and reservation_optional_ctx.userdata.reservation_notes is None)
+
+    upsell_cfg = make_upsell_cfg()
+    takeaway_upsell = agent.Takeaway(upsell_cfg)
+    upsell_ctx = make_ctx(takeaway_upsell, upsell_cfg, agent.UserData(call_id="call-upsell", restaurant=upsell_cfg))
+    upsell_offer_msg = await takeaway_upsell.update_order(items=["burger large"], context=upsell_ctx)
+    accepted_item = agent._accept_pending_upsell(upsell_ctx.userdata, upsell_cfg)
+    await takeaway_upsell.update_special_requests("لا تمام", upsell_ctx)
+    check(
+        "upsell_acceptance_persists",
+        accepted_item == "cola"
+        and
+        "cola" in (upsell_ctx.userdata.order or [])
+        and upsell_ctx.userdata.order_total == 60
+        and upsell_ctx.userdata.pending_upsell_item is None
+        and upsell_ctx.userdata.upsell_accepted is True
+        and "cola" in upsell_offer_msg
+    )
+    check(
+        "upsell_acceptance_needs_explicit_intent",
+        agent._is_explicit_upsell_acceptance("أيوه ضيفها", "cola")
+        and not agent._is_explicit_upsell_acceptance("تمام", "cola")
+    )
+
+    takeaway_ambiguous_upsell = agent.Takeaway(upsell_cfg)
+    takeaway_ambiguous_ud = agent.UserData(call_id="call-upsell-ambiguous", restaurant=upsell_cfg)
+    takeaway_ambiguous_ctx = make_ctx(takeaway_ambiguous_upsell, upsell_cfg, takeaway_ambiguous_ud)
+    await takeaway_ambiguous_upsell.update_order(items=["burger large"], context=takeaway_ambiguous_ctx)
+    takeaway_ambiguous_upsell._activity = SimpleNamespace(
+        session=SimpleNamespace(userdata=takeaway_ambiguous_ud, current_agent=takeaway_ambiguous_upsell)
+    )
+    takeaway_ambiguous_msgs: list[str] = []
+
+    async def fake_takeaway_say_and_stop(text: str) -> None:
+        takeaway_ambiguous_msgs.append(text)
+        raise agent.StopResponse()
+
+    takeaway_ambiguous_upsell._say_and_stop = fake_takeaway_say_and_stop
+    with contextlib.suppress(agent.StopResponse):
+        await takeaway_ambiguous_upsell._maybe_handle_turn_deterministically("تمام")
+    check(
+        "takeaway_ambiguous_upsell_not_added",
+        "cola" not in (takeaway_ambiguous_ud.order or [])
+        and takeaway_ambiguous_ud.pending_upsell_item is None
+        and takeaway_ambiguous_ud.upsell_accepted is False
+        and takeaway_ambiguous_msgs
+        and "طلب خاص" in takeaway_ambiguous_msgs[-1]
+    )
+
+    delivery_upsell_cfg = make_upsell_cfg()
+    delivery_upsell_cfg.min_order = 0
+    delivery_ambiguous_upsell = agent.Delivery(delivery_upsell_cfg)
+    delivery_ambiguous_ud = agent.UserData(call_id="call-delivery-upsell-ambiguous", restaurant=delivery_upsell_cfg)
+    delivery_ambiguous_ctx = make_ctx(delivery_ambiguous_upsell, delivery_upsell_cfg, delivery_ambiguous_ud)
+    await delivery_ambiguous_upsell.update_order(items=["burger large"], context=delivery_ambiguous_ctx)
+    delivery_ambiguous_upsell._activity = SimpleNamespace(
+        session=SimpleNamespace(userdata=delivery_ambiguous_ud, current_agent=delivery_ambiguous_upsell)
+    )
+    delivery_ambiguous_msgs: list[str] = []
+
+    async def fake_delivery_say_and_stop(text: str) -> None:
+        delivery_ambiguous_msgs.append(text)
+        raise agent.StopResponse()
+
+    delivery_ambiguous_upsell._say_and_stop = fake_delivery_say_and_stop
+    with contextlib.suppress(agent.StopResponse):
+        await delivery_ambiguous_upsell._maybe_handle_turn_deterministically("تمام")
+    check(
+        "delivery_ambiguous_upsell_not_added",
+        "cola" not in (delivery_ambiguous_ud.order or [])
+        and delivery_ambiguous_ud.pending_upsell_item is None
+        and delivery_ambiguous_ud.upsell_accepted is False
+        and delivery_ambiguous_msgs
+        and "طلب خاص" in delivery_ambiguous_msgs[-1]
+    )
 
     saved_client = agent._http_client
     saved_cache = dict(agent._config_cache)
@@ -450,6 +541,32 @@ async def main() -> int:
     )
     agent._post = orig_post
 
+    captured_takeaway_payload = {}
+
+    async def capture_takeaway_post(endpoint, payload, call_id, **kwargs):
+        captured_takeaway_payload["endpoint"] = endpoint
+        captured_takeaway_payload["payload"] = payload
+        return {"order_id": "o-upsell", "estimated_time": 15}
+
+    agent._post = capture_takeaway_post
+    takeaway_payload_ud = agent.UserData(
+        call_id="call-upsell-payload",
+        restaurant=upsell_cfg,
+        customer_name="Ahmed",
+        customer_phone="01012345678",
+        order=["burger large", "cola"],
+        order_validated=True,
+        order_total=60,
+        upsell_offered=True,
+        upsell_accepted=True,
+    )
+    await agent.submit_takeaway(takeaway_payload_ud)
+    check(
+        "takeaway_payload_tracks_upsell_acceptance",
+        captured_takeaway_payload.get("payload", {}).get("upsell_accepted") is True,
+    )
+    agent._post = orig_post
+
     shared_cache_path = ".runtime/test_shared_config_cache.json"
     saved_shared_cache_path = agent.CONFIG_SHARED_CACHE_PATH
     saved_cache = dict(agent._config_cache)
@@ -459,7 +576,7 @@ async def main() -> int:
         agent.CONFIG_SHARED_CACHE_PATH = shared_cache_path
         shared_cfg = make_cfg()
         shared_cfg.name = "shared-cache-name"
-        agent._write_shared_cache_entry("__default__", shared_cfg)
+        await agent._write_shared_cache_entry("__default__", shared_cfg)
         agent._config_cache = {}
         shared_loaded_cfg = await agent.fetch_config("call-shared-cache")
         check(

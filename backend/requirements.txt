@@ -5,3 +5,4 @@ python-dotenv==1.2.1
 PyJWT==2.10.1
 python-multipart==0.0.6
 livekit-api==1.0.7
+slowapi==0.1.9

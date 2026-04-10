@@ -1,38 +1,41 @@
-from __future__ import annotations
-
 import hashlib
+import asyncio
 import json
 import logging
 import os
-import queue
-import random
 import re
+import secrets
+import tempfile
 import threading
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from livekit import api as livekit_api
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, desc, func, select
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, cast, create_engine, desc, event, func, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
+from sqlalchemy.pool import NullPool
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = ROOT_DIR / "backend"
 DATA_DIR = BACKEND_DIR / "data"
-STORAGE_DIR = BACKEND_DIR / "storage"
+DEFAULT_STORAGE_DIR = BACKEND_DIR / "storage"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 load_dotenv(BACKEND_DIR / ".env")
 load_dotenv(ROOT_DIR / "agent" / ".env")
@@ -44,14 +47,72 @@ logging.basicConfig(
 )
 logger = logging.getLogger("aloegy.backend")
 
+
+def _resolve_backend_runtime_dir() -> Path:
+    configured = os.getenv("BACKEND_RUNTIME_DIR")
+    candidates = [Path(configured.strip())] if configured and configured.strip() else [
+        BACKEND_DIR / ".runtime",
+        Path(tempfile.gettempdir()) / "aloegy-backend-runtime",
+    ]
+    last_error: OSError | None = None
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            if os.access(candidate, os.W_OK):
+                return candidate
+        except OSError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("failed to resolve writable backend runtime directory")
+
+
+def _resolve_writable_runtime_path(
+    *,
+    env_name: str,
+    default_path: Path,
+    runtime_path: Path,
+) -> Path:
+    configured = os.getenv(env_name)
+    if configured is not None and configured.strip():
+        return Path(configured.strip())
+    candidate_is_writable = (
+        os.access(default_path, os.W_OK)
+        if default_path.exists()
+        else os.access(default_path.parent, os.W_OK)
+    )
+    if candidate_is_writable:
+        return default_path
+    logger.warning("%s target is not writable | using runtime path %s", env_name, runtime_path)
+    return runtime_path
+
+
+BACKEND_RUNTIME_DIR = _resolve_backend_runtime_dir()
 APP_ENV = os.getenv("APP_ENV", "dev").strip().lower() or "dev"
-BACKEND_DB_PATH = Path(os.getenv("BACKEND_DB_PATH", str(DATA_DIR / "app.db")))
+BACKEND_DB_PATH = _resolve_writable_runtime_path(
+    env_name="BACKEND_DB_PATH",
+    default_path=DATA_DIR / "app.db",
+    runtime_path=BACKEND_RUNTIME_DIR / "app.db",
+)
+STORAGE_DIR = _resolve_writable_runtime_path(
+    env_name="BACKEND_STORAGE_DIR",
+    default_path=DEFAULT_STORAGE_DIR,
+    runtime_path=BACKEND_RUNTIME_DIR / "storage",
+)
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
 JWT_ALGORITHM = "HS256"
 JWT_TTL_MINUTES = max(10, int(os.getenv("JWT_TTL_MINUTES", "720")))
 OTP_TTL_MINUTES = max(1, int(os.getenv("OTP_TTL_MINUTES", "10")))
-DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "123456").strip()
+DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "956956").strip()
 BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "mock_secret_key").strip()
+
+if APP_ENV == "prod":
+    if JWT_SECRET == "change-me-in-production":
+        raise RuntimeError("FATAL: JWT_SECRET must be set in production")
+    if BACKEND_API_KEY == "mock_secret_key":
+        raise RuntimeError("FATAL: BACKEND_API_KEY must be set in production")
+
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "").strip()
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "").strip()
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "").strip()
@@ -65,6 +126,8 @@ DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:4173",
 ]
 CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", ",".join(DEFAULT_CORS_ORIGINS)).split(",") if origin.strip()]
+
+
 DEFAULT_CORS_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$"
 CORS_ORIGIN_REGEX = (
     r"https?://.*"
@@ -74,36 +137,96 @@ CORS_ORIGIN_REGEX = (
 ALLOW_CREDENTIALS = APP_ENV == "prod"
 BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1").strip() or "127.0.0.1"
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
+DEFAULT_COLLECTION_LIMIT = max(20, int(os.getenv("DEFAULT_COLLECTION_LIMIT", "200")))
+MAX_COLLECTION_LIMIT = max(DEFAULT_COLLECTION_LIMIT, int(os.getenv("MAX_COLLECTION_LIMIT", "500")))
+MAX_REQUEST_BODY_BYTES = max(1024 * 1024, int(os.getenv("MAX_REQUEST_BODY_BYTES", str(10 * 1024 * 1024))))
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-if DATABASE_URL:
-    SQLALCHEMY_DATABASE_URL = DATABASE_URL
-    engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_size=10, max_overflow=20, pool_pre_ping=True)
+SQLALCHEMY_DATABASE_URL = ""
+SessionLocal = sessionmaker(autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+def _sqlite_database_url() -> str:
+    return f"sqlite:///{BACKEND_DB_PATH.as_posix()}"
+
+
+def _create_database_engine(database_url: str):
+    if database_url.startswith("sqlite"):
+        sqlite_engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False, "timeout": 30},
+            poolclass=NullPool,
+        )
+
+        @event.listens_for(sqlite_engine, "connect")
+        def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            for statement in (
+                "PRAGMA foreign_keys=ON",
+                "PRAGMA journal_mode=WAL",
+                "PRAGMA synchronous=NORMAL",
+            ):
+                with suppress(Exception):
+                    cursor.execute(statement)
+            cursor.close()
+
+        return sqlite_engine
+    return create_engine(database_url, pool_size=10, max_overflow=20, pool_pre_ping=True)
+
+
+def _bind_database(database_url: str) -> None:
+    global SQLALCHEMY_DATABASE_URL, engine
+
+    SQLALCHEMY_DATABASE_URL = database_url
+    engine = _create_database_engine(database_url)
+    SessionLocal.configure(bind=engine)
+
+    if database_url.startswith("sqlite"):
+        logger.info("database | using SQLite at %s", BACKEND_DB_PATH)
+        return
     logger.info("database | using DATABASE_URL (PostgreSQL or external)")
+
+
+def _fallback_to_sqlite(exc: OperationalError) -> None:
+    logger.warning(
+        "database | failed to connect using DATABASE_URL in APP_ENV=%s; falling back to SQLite at %s | %s",
+        APP_ENV,
+        BACKEND_DB_PATH,
+        exc.orig or exc,
+    )
+    _bind_database(_sqlite_database_url())
+
+
+if DATABASE_URL:
+    _bind_database(DATABASE_URL)
 else:
-    SQLALCHEMY_DATABASE_URL = f"sqlite:///{BACKEND_DB_PATH.as_posix()}"
-    engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
-    logger.info("database | using SQLite at %s", BACKEND_DB_PATH)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    _bind_database(_sqlite_database_url())
+
+
+class OrderEventSubscriber:
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
 
 
 class OrderEventBroker:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._subscribers: dict[int, set[queue.Queue[dict[str, Any]]]] = {}
+        self._subscribers: dict[int, list[OrderEventSubscriber]] = {}
 
-    def subscribe(self, restaurant_id: int) -> queue.Queue[dict[str, Any]]:
-        subscriber: queue.Queue[dict[str, Any]] = queue.Queue()
+    def subscribe(self, restaurant_id: int) -> OrderEventSubscriber:
+        subscriber = OrderEventSubscriber(asyncio.get_running_loop())
         with self._lock:
-            self._subscribers.setdefault(restaurant_id, set()).add(subscriber)
+            self._subscribers.setdefault(restaurant_id, []).append(subscriber)
         return subscriber
 
-    def unsubscribe(self, restaurant_id: int, subscriber: queue.Queue[dict[str, Any]]) -> None:
+    def unsubscribe(self, restaurant_id: int, subscriber: OrderEventSubscriber) -> None:
         with self._lock:
             subscribers = self._subscribers.get(restaurant_id)
             if not subscribers:
                 return
-            subscribers.discard(subscriber)
+            with suppress(ValueError):
+                subscribers.remove(subscriber)
             if not subscribers:
                 self._subscribers.pop(restaurant_id, None)
 
@@ -111,7 +234,23 @@ class OrderEventBroker:
         with self._lock:
             subscribers = list(self._subscribers.get(restaurant_id, ()))
         for subscriber in subscribers:
-            subscriber.put_nowait(event)
+            try:
+                subscriber.loop.call_soon_threadsafe(self._publish_nowait, subscriber.queue, event)
+            except RuntimeError:
+                continue
+
+    @staticmethod
+    def _publish_nowait(queue: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:
+        try:
+            queue.put_nowait(event)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        with suppress(asyncio.QueueEmpty):
+            queue.get_nowait()
+        with suppress(asyncio.QueueFull):
+            queue.put_nowait(event)
 
 
 order_event_broker = OrderEventBroker()
@@ -175,6 +314,7 @@ class OtpCode(Base):
     phone: Mapped[str] = mapped_column(String(32), index=True)
     code_hash: Mapped[str] = mapped_column(String(128))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
@@ -343,7 +483,7 @@ class ContactFormRequest(BaseModel):
 
 
 class OrderStatusUpdateRequest(BaseModel):
-    status: str
+    status: Literal["pending", "received", "preparing", "ready", "out_for_delivery", "delivered", "completed", "in_progress", "cancelled"]
     driverPhone: str | None = None
 
 
@@ -366,6 +506,25 @@ class AgentSettingsPayload(BaseModel):
 class SettingsPayload(BaseModel):
     restaurant: RestaurantSettingsPayload
     agent: AgentSettingsPayload
+
+
+def _safe_price(value: str | None) -> float:
+    try:
+        price = float(value or 0)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail=f"invalid price value: {value!r}")
+    if price < 0:
+        raise HTTPException(status_code=400, detail="price must not be negative")
+    return price
+
+
+def _normalize_order_status(status: str) -> str:
+    normalized = (status or "").strip().lower()
+    aliases = {
+        "completed": "delivered",
+        "in_progress": "preparing",
+    }
+    return aliases.get(normalized, normalized)
 
 
 class MenuItemPayload(BaseModel):
@@ -439,6 +598,7 @@ class AgentOrderPayload(BaseModel):
     delivery_zone: str | None = None
     delivery_landmark: str | None = None
     order_time: str | None = None
+    upsell_accepted: bool = False
     channel: str = "voice_agent"
 
 
@@ -464,6 +624,31 @@ class AgentComplaintPayload(BaseModel):
     channel: str = "voice_agent"
 
 
+for _model in (
+    PhoneRequest,
+    VerifyOtpRequest,
+    ContactFormRequest,
+    OrderStatusUpdateRequest,
+    RestaurantSettingsPayload,
+    AgentSettingsPayload,
+    SettingsPayload,
+    MenuItemPayload,
+    EmployeePayload,
+    IssueStatusPayload,
+    AdminRestaurantCreatePayload,
+    SalesMemberPayload,
+    SalesRequestPayload,
+    SalesRequestStatusPayload,
+    DemoSessionPayload,
+    DemoLivekitSessionPayload,
+    AgentOrderItemPayload,
+    AgentOrderPayload,
+    AgentReservationPayload,
+    AgentComplaintPayload,
+):
+    _model.model_rebuild()
+
+
 class CurrentUser(BaseModel):
     id: int
     name: str
@@ -477,7 +662,22 @@ class CurrentUser(BaseModel):
 def get_db():
     db = SessionLocal()
     try:
-        yield db
+        if not SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+            try:
+                db.execute(text("SELECT 1"))
+            except OperationalError as exc:
+                db.close()
+                if APP_ENV == "prod" or not DATABASE_URL:
+                    raise
+                _fallback_to_sqlite(exc)
+                db = SessionLocal()
+        try:
+            yield db
+        except OperationalError as exc:
+            db.rollback()
+            if APP_ENV != "prod":
+                raise HTTPException(status_code=500, detail=f"OperationalError: {exc}") from exc
+            raise
     finally:
         db.close()
 
@@ -574,6 +774,18 @@ def require_roles(*roles: str):
 def verify_agent_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
     if x_api_key != BACKEND_API_KEY:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid api key")
+
+
+def extract_access_token(
+    *,
+    authorization: str | None = None,
+    access_token: str | None = None,
+) -> str | None:
+    if access_token and access_token.strip():
+        return access_token.strip()
+    if authorization and authorization.startswith("Bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return None
 
 
 def slugify(value: str) -> str:
@@ -686,8 +898,12 @@ def publish_order_event(restaurant: Restaurant, order: Order, action: Literal["c
     )
 
 
-def serialize_file(file_asset: FileAsset, request: Request) -> dict[str, Any]:
-    preview_url = str(request.base_url).rstrip("/") + f"/storage/{Path(file_asset.stored_path).relative_to(STORAGE_DIR).as_posix()}"
+def serialize_file(file_asset: FileAsset, request: Request, *, access_token: str | None = None) -> dict[str, Any]:
+    preview_url = str(request.url_for("download_file", file_id=str(file_asset.id)))
+    if access_token:
+        preview_url = str(request.url_for("download_file", file_id=str(file_asset.id)).include_query_params(token=access_token, inline="1"))
+    else:
+        preview_url = str(request.url_for("download_file", file_id=str(file_asset.id)).include_query_params(inline="1"))
     return {
         "id": file_asset.id,
         "name": file_asset.name,
@@ -803,6 +1019,25 @@ def _parse_working_hours(raw: str) -> dict[str, Any]:
     return DEFAULT_HOURS
 
 
+UPSELL_CATEGORIES = {"مشروبات", "إضافات", "حلويات", "drinks", "extras", "desserts", "sides", "سلطات"}
+
+def _build_upsell_rules(menu_items: list[MenuItem]) -> list[dict]:
+    available = [i for i in menu_items if i.available]
+    main_items = [i for i in available if (i.category or "").strip().lower() not in UPSELL_CATEGORIES]
+    side_items = [i for i in available if (i.category or "").strip().lower() in UPSELL_CATEGORIES]
+    if not main_items or not side_items:
+        return []
+    rules = []
+    for side in side_items[:5]:
+        rules.append({
+            "category": (side.category or "إضافات").strip(),
+            "item": side.name,
+            "price": best_menu_price(side),
+            "suggestion": f"تحب تضيف {side.name}؟",
+        })
+    return rules
+
+
 def restaurant_config_payload(restaurant: Restaurant, menu_items: list[MenuItem]) -> dict[str, Any]:
     return {
         "id": restaurant.public_id,
@@ -815,11 +1050,7 @@ def restaurant_config_payload(restaurant: Restaurant, menu_items: list[MenuItem]
             {"name": item.name, "price": best_menu_price(item), "available": item.available}
             for item in menu_items
         ],
-        "upsell_rules": [
-            {"trigger": menu_items[0].name, "suggestion": f"تحب تضيف {menu_items[1].name}؟"}
-            for _ in [0]
-            if len(menu_items) >= 2
-        ],
+        "upsell_rules": _build_upsell_rules(menu_items),
         "is_open": restaurant.is_open,
         "closed_reason": restaurant.closed_reason,
         "wait_minutes": restaurant.wait_minutes,
@@ -833,23 +1064,52 @@ def restaurant_config_payload(restaurant: Restaurant, menu_items: list[MenuItem]
     }
 
 
-def compute_customer_profiles(db: Session, restaurant_id: int) -> list[dict[str, Any]]:
-    orders = db.scalars(select(Order).where(Order.restaurant_id == restaurant_id).order_by(desc(Order.created_at))).all()
-    grouped: dict[str, list[Order]] = {}
-    for order in orders:
-        grouped.setdefault(order.phone, []).append(order)
+def _effective_collection_limit(limit: int | None) -> int:
+    if limit is None:
+        return DEFAULT_COLLECTION_LIMIT
+    return max(1, min(limit, MAX_COLLECTION_LIMIT))
+
+
+def _effective_collection_skip(skip: int | None) -> int:
+    if skip is None:
+        return 0
+    return max(0, skip)
+
+
+def compute_customer_profiles(
+    db: Session,
+    restaurant_id: int,
+    *,
+    skip: int | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    effective_limit = _effective_collection_limit(limit)
+    effective_skip = _effective_collection_skip(skip)
+    rows = db.execute(
+        select(
+            Order.phone.label("phone"),
+            func.count(Order.id).label("total_orders"),
+            func.coalesce(func.sum(Order.amount), 0.0).label("total_spent"),
+            func.max(Order.created_at).label("last_order_at"),
+        )
+        .where(Order.restaurant_id == restaurant_id)
+        .group_by(Order.phone)
+        .order_by(desc("last_order_at"))
+        .offset(effective_skip)
+        .limit(effective_limit)
+    ).all()
 
     profiles = []
-    for phone, user_orders in grouped.items():
-        total_spent = sum(order.amount for order in user_orders)
-        total_orders = len(user_orders)
+    for row in rows:
+        total_spent = float(row.total_spent)
+        total_orders = int(row.total_orders)
         avg_order = total_spent / total_orders if total_orders else 0.0
         profiles.append(
             {
-                "phone": phone,
+                "phone": row.phone,
                 "totalOrders": total_orders,
                 "totalSpent": currency_text(total_spent),
-                "lastOrder": relative_time_label(user_orders[0].created_at),
+                "lastOrder": relative_time_label(row.last_order_at),
                 "avgOrder": currency_text(avg_order),
             }
         )
@@ -870,7 +1130,7 @@ def compute_dashboard_stats(db: Session, restaurant_id: int) -> dict[str, str]:
 
 
 def compute_analytics(db: Session, restaurant_id: int) -> dict[str, Any]:
-    # Summary — single SQL aggregation instead of loading all orders
+    # Summary: single SQL aggregation instead of loading all orders.
     summary_row = db.execute(
         select(
             func.coalesce(func.sum(Order.amount), 0.0).label("total_revenue"),
@@ -889,37 +1149,68 @@ def compute_analytics(db: Session, restaurant_id: int) -> dict[str, Any]:
         )
     ) or 0
 
-    # Daily orders — last 14 days aggregated in SQL
     fourteen_days_ago = utc_now() - timedelta(days=14)
-    daily_rows = db.execute(
-        select(
-            func.strftime("%w", Order.created_at).label("dow"),
-            func.count(Order.id).label("cnt"),
-            func.coalesce(func.sum(Order.amount), 0.0).label("rev"),
-        )
-        .where(Order.restaurant_id == restaurant_id, Order.created_at >= fourteen_days_ago)
-        .group_by("dow")
-        .order_by("dow")
-    ).all()
+    dialect_name = db.get_bind().dialect.name
     day_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    daily_orders = [
-        {"day": day_labels[int(row.dow)] if row.dow is not None else "?", "orders": int(row.cnt), "revenue": float(row.rev)}
-        for row in daily_rows
-    ]
 
-    # Monthly revenue — aggregated in SQL
-    monthly_rows = db.execute(
-        select(
-            func.strftime("%Y-%m", Order.created_at).label("month"),
-            func.coalesce(func.sum(Order.amount), 0.0).label("rev"),
-        )
-        .where(Order.restaurant_id == restaurant_id)
-        .group_by("month")
-        .order_by("month")
-    ).all()
-    monthly_revenue = [{"month": row.month, "revenue": float(row.rev)} for row in monthly_rows][-6:]
+    if dialect_name == "sqlite":
+        daily_rows = db.execute(
+            select(
+                func.strftime("%w", Order.created_at).label("dow"),
+                func.count(Order.id).label("cnt"),
+                func.coalesce(func.sum(Order.amount), 0.0).label("rev"),
+            )
+            .where(Order.restaurant_id == restaurant_id, Order.created_at >= fourteen_days_ago)
+            .group_by("dow")
+            .order_by("dow")
+        ).all()
+        daily_orders = [
+            {"day": day_labels[int(row.dow)] if row.dow is not None else "?", "orders": int(row.cnt), "revenue": float(row.rev)}
+            for row in daily_rows
+        ]
 
-    # Category breakdown — only loads order_items (lighter than full orders)
+        monthly_rows = db.execute(
+            select(
+                func.strftime("%Y-%m", Order.created_at).label("month"),
+                func.coalesce(func.sum(Order.amount), 0.0).label("rev"),
+            )
+            .where(Order.restaurant_id == restaurant_id)
+            .group_by("month")
+            .order_by("month")
+        ).all()
+        monthly_revenue = [{"month": row.month, "revenue": float(row.rev)} for row in monthly_rows][-6:]
+    else:
+        daily_rows = db.execute(
+            select(
+                cast(func.extract("dow", Order.created_at), Integer).label("dow"),
+                func.count(Order.id).label("cnt"),
+                func.coalesce(func.sum(Order.amount), 0.0).label("rev"),
+            )
+            .where(Order.restaurant_id == restaurant_id, Order.created_at >= fourteen_days_ago)
+            .group_by("dow")
+            .order_by("dow")
+        ).all()
+        daily_orders = [
+            {"day": day_labels[int(row.dow)] if row.dow is not None else "?", "orders": int(row.cnt), "revenue": float(row.rev)}
+            for row in daily_rows
+        ]
+
+        monthly_rows = db.execute(
+            select(
+                cast(func.extract("year", Order.created_at), Integer).label("year"),
+                cast(func.extract("month", Order.created_at), Integer).label("month_num"),
+                func.coalesce(func.sum(Order.amount), 0.0).label("rev"),
+            )
+            .where(Order.restaurant_id == restaurant_id)
+            .group_by("year", "month_num")
+            .order_by("year", "month_num")
+        ).all()
+        monthly_revenue = [
+            {"month": f"{int(row.year):04d}-{int(row.month_num):02d}", "revenue": float(row.rev)}
+            for row in monthly_rows
+        ][-6:]
+
+    # Category breakdown: only loads order_items (lighter than full orders).
     category_rows = db.execute(
         select(
             MenuItem.category,
@@ -945,16 +1236,25 @@ def compute_analytics(db: Session, restaurant_id: int) -> dict[str, Any]:
         "monthlyRevenue": monthly_revenue,
         "categoryData": category_data,
     }
+def _provisional_public_id(prefix: str) -> str:
+    return f"TMP-{prefix}-{uuid.uuid4().hex[:12].upper()}"
 
 
-def generate_public_order_id(db: Session) -> str:
-    next_number = (db.scalar(select(func.count(Order.id))) or 0) + 1
-    return f"ORD-{utc_now().year}-{next_number:05d}"
+def _format_public_id(prefix: str, numeric_id: int, created_at: datetime | None = None) -> str:
+    year = ensure_utc_datetime(created_at or utc_now()).year
+    return f"{prefix}-{year}-{numeric_id:05d}"
 
 
-def generate_public_reservation_id(db: Session) -> str:
-    next_number = (db.scalar(select(func.count(Reservation.id))) or 0) + 1
-    return f"RES-{utc_now().year}-{next_number:05d}"
+def _assign_order_public_id(order: Order) -> None:
+    if order.id is None:
+        raise ValueError("order id must exist before assigning public_id")
+    order.public_id = _format_public_id("ORD", order.id, order.created_at)
+
+
+def _assign_reservation_public_id(reservation: Reservation) -> None:
+    if reservation.id is None:
+        raise ValueError("reservation id must exist before assigning public_id")
+    reservation.public_id = _format_public_id("RES", reservation.id, reservation.created_at)
 
 
 def get_file_type(filename: str) -> str:
@@ -976,9 +1276,42 @@ def save_upload_file(restaurant: Restaurant, upload: UploadFile) -> tuple[str, i
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", upload.filename or "file.bin")
     unique_name = f"{uuid.uuid4().hex[:10]}-{safe_name}"
     target = restaurant_dir / unique_name
-    data = upload.file.read()
+    MAX_READ = MAX_UPLOAD_SIZE_BYTES + 1
+    data = upload.file.read(MAX_READ)
+    if len(data) >= MAX_READ:
+        raise HTTPException(status_code=413, detail="File too large")
     target.write_bytes(data)
     return str(target), len(data)
+
+
+def _resolve_asset_path(asset: FileAsset) -> Path:
+    try:
+        resolved = Path(asset.stored_path).resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="file not found") from exc
+
+    storage_root = STORAGE_DIR.resolve()
+    if resolved != storage_root and storage_root not in resolved.parents:
+        raise HTTPException(status_code=400, detail="invalid file path")
+    return resolved
+
+
+def _build_file_access_url(
+    request: Request,
+    *,
+    file_id: int,
+    token: str | None,
+    inline: bool = True,
+) -> str:
+    url = request.url_for("download_file", file_id=str(file_id))
+    query_params: dict[str, str] = {}
+    if inline:
+        query_params["inline"] = "1"
+    if token:
+        query_params["token"] = token
+    if query_params:
+        url = url.include_query_params(**query_params)
+    return str(url)
 
 
 def ensure_livekit_configured() -> None:
@@ -1215,6 +1548,7 @@ def _run_migrations() -> None:
     inspector = sa.inspect(engine)
     migrations: list[tuple[str, str, str]] = [
         ("reservations", "reservation_time_iso", "VARCHAR(64)"),
+        ("otp_codes", "attempts", "INTEGER DEFAULT 0"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in migrations:
@@ -1225,45 +1559,91 @@ def _run_migrations() -> None:
         conn.commit()
 
 
+class LimitBodySizeMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, *, max_body_bytes: int) -> None:
+        super().__init__(app)
+        self.max_body_bytes = max_body_bytes
+
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                size = int(content_length)
+            except ValueError:
+                size = None
+            if size is not None and size > self.max_body_bytes:
+                return Response(
+                    status_code=413,
+                    content=json.dumps({"detail": "request body too large"}),
+                    media_type="application/json",
+                )
+        return await call_next(request)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    _run_migrations()
+    try:
+        Base.metadata.create_all(bind=engine)
+        _run_migrations()
+    except OperationalError as exc:
+        if APP_ENV == "prod" or not DATABASE_URL:
+            raise
+        _fallback_to_sqlite(exc)
+        Base.metadata.create_all(bind=engine)
+        _run_migrations()
     seed_database()
     yield
 
 
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(title="Aloegy Backend", version="1.0.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, lambda req, exc: Response(
+    status_code=429,
+    content=json.dumps({"detail": "Too many requests. Try again later."}),
+    media_type="application/json",
+))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if APP_ENV != "prod" else CORS_ORIGINS,
-    allow_origin_regex=None if APP_ENV != "prod" else CORS_ORIGIN_REGEX,
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/storage", StaticFiles(directory=STORAGE_DIR), name="storage")
+app.add_middleware(LimitBodySizeMiddleware, max_body_bytes=MAX_REQUEST_BODY_BYTES)
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "env": APP_ENV, "database": str(BACKEND_DB_PATH)}
+    return {"status": "ok", "env": APP_ENV}
 
 
 @app.post("/contact")
-def submit_contact_form(payload: ContactFormRequest, db: Session = Depends(get_db)) -> bool:
+@limiter.limit("5/minute")
+def submit_contact_form(
+    request: Request,
+    payload: ContactFormRequest = Body(...),
+    db: Session = Depends(get_db),
+) -> bool:
     db.add(ContactLead(restaurant_name=payload.restaurantName, phone=validate_phone_or_400(payload.phone), message=payload.message))
     db.commit()
     return True
 
 
 @app.post("/auth/send-otp")
-def send_otp(payload: PhoneRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
+@limiter.limit("10/minute")
+def send_otp(
+    request: Request,
+    payload: PhoneRequest = Body(...),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     phone = validate_phone_or_400(payload.phone)
     user_exists = db.scalar(select(User).where(User.phone == phone))
     if not user_exists:
         raise HTTPException(status_code=403, detail="هذا الرقم غير مسجل في النظام. تواصل مع الإدارة.")
-    code = f"{random.randint(0, 999999):06d}"
+    code = f"{secrets.randbelow(1000000):06d}"
     db.add(
         OtpCode(
             phone=phone,
@@ -1277,7 +1657,12 @@ def send_otp(payload: PhoneRequest, db: Session = Depends(get_db)) -> dict[str, 
 
 
 @app.post("/auth/verify-otp")
-def verify_otp(payload: VerifyOtpRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
+@limiter.limit("10/minute")
+def verify_otp(
+    request: Request,
+    payload: VerifyOtpRequest = Body(...),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     phone = validate_phone_or_400(payload.phone)
     otp = payload.otp.strip()
 
@@ -1287,6 +1672,13 @@ def verify_otp(payload: VerifyOtpRequest, db: Session = Depends(get_db)) -> dict
         .order_by(desc(OtpCode.created_at))
     )
     otp_is_valid = False
+
+    # Check attempt count — max 5 failed attempts per OTP
+    if otp_row and getattr(otp_row, "attempts", 0) >= 5:
+        otp_row.consumed_at = utc_now()
+        db.commit()
+        raise HTTPException(status_code=429, detail="Too many attempts. Request a new OTP.")
+
     if otp_row and ensure_utc_datetime(otp_row.expires_at) >= utc_now() and otp_row.code_hash == hash_otp(phone, otp):
         otp_is_valid = True
         otp_row.consumed_at = utc_now()
@@ -1294,6 +1686,9 @@ def verify_otp(payload: VerifyOtpRequest, db: Session = Depends(get_db)) -> dict
         otp_is_valid = True
 
     if not otp_is_valid:
+        if otp_row:
+            otp_row.attempts = getattr(otp_row, "attempts", 0) + 1
+            db.commit()
         raise HTTPException(status_code=400, detail="invalid otp")
 
     user = db.scalar(select(User).where(User.phone == phone))
@@ -1341,37 +1736,55 @@ def fetch_stats(
 @app.get("/calls")
 def fetch_calls(
     restaurant_id: int | None = Query(default=None, alias="restaurantId"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_COLLECTION_LIMIT, ge=1, le=MAX_COLLECTION_LIMIT),
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     restaurant = resolve_restaurant_scope(db, user, restaurant_id)
-    calls = db.scalars(select(CallLog).where(CallLog.restaurant_id == restaurant.id).order_by(desc(CallLog.created_at))).all()
+    calls = db.scalars(
+        select(CallLog)
+        .where(CallLog.restaurant_id == restaurant.id)
+        .order_by(desc(CallLog.created_at))
+        .offset(_effective_collection_skip(skip))
+        .limit(_effective_collection_limit(limit))
+    ).all()
     return [serialize_call(call) for call in calls]
 
 
 @app.get("/users")
 def fetch_users(
     restaurant_id: int | None = Query(default=None, alias="restaurantId"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_COLLECTION_LIMIT, ge=1, le=MAX_COLLECTION_LIMIT),
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     restaurant = resolve_restaurant_scope(db, user, restaurant_id)
-    return compute_customer_profiles(db, restaurant.id)
+    return compute_customer_profiles(db, restaurant.id, skip=skip, limit=limit)
 
 
 @app.get("/orders")
 def fetch_orders(
     restaurant_id: int | None = Query(default=None, alias="restaurantId"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_COLLECTION_LIMIT, ge=1, le=MAX_COLLECTION_LIMIT),
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     restaurant = resolve_restaurant_scope(db, user, restaurant_id)
-    orders = db.scalars(select(Order).where(Order.restaurant_id == restaurant.id).order_by(desc(Order.created_at))).all()
+    orders = db.scalars(
+        select(Order)
+        .where(Order.restaurant_id == restaurant.id)
+        .order_by(desc(Order.created_at))
+        .offset(_effective_collection_skip(skip))
+        .limit(_effective_collection_limit(limit))
+    ).all()
     return [serialize_order(order) for order in orders]
 
 
 @app.get("/orders/stream")
-def stream_orders(
+async def stream_orders(
     token: str | None = Query(default=None),
     restaurant_id: int | None = Query(default=None, alias="restaurantId"),
     db: Session = Depends(get_db),
@@ -1383,13 +1796,13 @@ def stream_orders(
     restaurant = resolve_restaurant_scope(db, user, restaurant_id)
     subscriber = order_event_broker.subscribe(restaurant.id)
 
-    def event_stream():
+    async def event_stream():
         try:
             yield format_sse_message("ready", {"restaurantId": restaurant.id})
             while True:
                 try:
-                    event = subscriber.get(timeout=15)
-                except queue.Empty:
+                    event = await asyncio.wait_for(subscriber.queue.get(), timeout=15)
+                except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
                     continue
                 yield format_sse_message("order_update", event)
@@ -1419,7 +1832,7 @@ def update_order_status(
         raise HTTPException(status_code=404, detail="order not found")
     if user.role != "admin" and order.restaurant_id != user.restaurant_id:
         raise HTTPException(status_code=403, detail="forbidden")
-    order.status = payload.status
+    order.status = _normalize_order_status(payload.status)
     order.driver_phone = normalize_phone(payload.driverPhone) if payload.driverPhone else None
     db.commit()
     db.refresh(order)
@@ -1431,12 +1844,22 @@ def update_order_status(
 def fetch_files(
     request: Request,
     restaurant_id: int | None = Query(default=None, alias="restaurantId"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_COLLECTION_LIMIT, ge=1, le=MAX_COLLECTION_LIMIT),
+    authorization: str | None = Header(default=None, alias="Authorization"),
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     restaurant = resolve_restaurant_scope(db, user, restaurant_id)
-    files = db.scalars(select(FileAsset).where(FileAsset.restaurant_id == restaurant.id).order_by(desc(FileAsset.created_at))).all()
-    return [serialize_file(file_asset, request) for file_asset in files]
+    access_token = extract_access_token(authorization=authorization)
+    files = db.scalars(
+        select(FileAsset)
+        .where(FileAsset.restaurant_id == restaurant.id)
+        .order_by(desc(FileAsset.created_at))
+        .offset(_effective_collection_skip(skip))
+        .limit(_effective_collection_limit(limit))
+    ).all()
+    return [serialize_file(file_asset, request, access_token=access_token) for file_asset in files]
 
 
 MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -1459,9 +1882,6 @@ def upload_file(
         raise HTTPException(status_code=400, detail=f"file type '{ext}' is not allowed")
     restaurant = resolve_restaurant_scope(db, user, None)
     stored_path, size_bytes = save_upload_file(restaurant, file)
-    if size_bytes > MAX_UPLOAD_SIZE_BYTES:
-        Path(stored_path).unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="file size exceeds 10 MB limit")
     asset = FileAsset(
         restaurant_id=restaurant.id,
         name=file.filename or "upload.bin",
@@ -1484,31 +1904,42 @@ def upload_file(
 @app.get("/files/{file_id}/download")
 def download_file(
     file_id: int,
-    user: CurrentUser = Depends(get_current_user),
+    inline: bool = Query(default=False),
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None, alias="Authorization"),
     db: Session = Depends(get_db),
 ) -> FileResponse:
+    user = authenticate_current_user(db, authorization=authorization, access_token=token)
     asset = db.get(FileAsset, file_id)
     if not asset:
         raise HTTPException(status_code=404, detail="file not found")
     if user.role != "admin" and asset.restaurant_id != user.restaurant_id:
         raise HTTPException(status_code=403, detail="forbidden")
-    return FileResponse(asset.stored_path, filename=asset.name)
+    file_path = _resolve_asset_path(asset)
+    response = FileResponse(file_path, filename=asset.name)
+    if inline:
+        safe_name = asset.name.replace('"', "")
+        response.headers["Content-Disposition"] = f'inline; filename="{safe_name}"'
+    return response
 
 
 @app.get("/files/{file_id}/preview")
 def preview_file(
     file_id: int,
     request: Request,
-    user: CurrentUser = Depends(get_current_user),
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None, alias="Authorization"),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
+    user = authenticate_current_user(db, authorization=authorization, access_token=token)
     asset = db.get(FileAsset, file_id)
     if not asset:
         raise HTTPException(status_code=404, detail="file not found")
     if user.role != "admin" and asset.restaurant_id != user.restaurant_id:
         raise HTTPException(status_code=403, detail="forbidden")
-    url = str(request.base_url).rstrip("/") + f"/storage/{Path(asset.stored_path).relative_to(STORAGE_DIR).as_posix()}"
-    return {"url": url}
+    _resolve_asset_path(asset)
+    access_token = extract_access_token(authorization=authorization, access_token=token)
+    return {"url": _build_file_access_url(request, file_id=file_id, token=access_token, inline=True)}
 
 
 @app.get("/settings")
@@ -1568,9 +1999,9 @@ def create_menu_item(
         name=payload.name,
         category=payload.category,
         ingredients=payload.ingredients,
-        small_price=float(payload.smallPrice or 0),
-        medium_price=float(payload.mediumPrice or 0),
-        large_price=float(payload.largePrice or 0),
+        small_price=_safe_price(payload.smallPrice),
+        medium_price=_safe_price(payload.mediumPrice),
+        large_price=_safe_price(payload.largePrice),
         available=payload.available,
     )
     db.add(item)
@@ -1594,9 +2025,9 @@ def update_menu_item(
     item.name = payload.name
     item.category = payload.category
     item.ingredients = payload.ingredients
-    item.small_price = float(payload.smallPrice or 0)
-    item.medium_price = float(payload.mediumPrice or 0)
-    item.large_price = float(payload.largePrice or 0)
+    item.small_price = _safe_price(payload.smallPrice)
+    item.medium_price = _safe_price(payload.mediumPrice)
+    item.large_price = _safe_price(payload.largePrice)
     item.available = payload.available
     item.updated_at = utc_now()
     db.commit()
@@ -1669,11 +2100,19 @@ def delete_employee(
 @app.get("/issues")
 def fetch_issues(
     restaurant_id: int | None = Query(default=None, alias="restaurantId"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_COLLECTION_LIMIT, ge=1, le=MAX_COLLECTION_LIMIT),
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     restaurant = resolve_restaurant_scope(db, user, restaurant_id)
-    issues = db.scalars(select(Issue).where(Issue.restaurant_id == restaurant.id).order_by(desc(Issue.created_at))).all()
+    issues = db.scalars(
+        select(Issue)
+        .where(Issue.restaurant_id == restaurant.id)
+        .order_by(desc(Issue.created_at))
+        .offset(_effective_collection_skip(skip))
+        .limit(_effective_collection_limit(limit))
+    ).all()
     return [serialize_issue(issue) for issue in issues]
 
 
@@ -1707,6 +2146,8 @@ def fetch_analytics(
 
 @app.get("/admin/restaurants")
 def fetch_admin_restaurants(
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_COLLECTION_LIMIT, ge=1, le=MAX_COLLECTION_LIMIT),
     user: CurrentUser = Depends(require_roles("admin")),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
@@ -1739,6 +2180,8 @@ def fetch_admin_restaurants(
         .outerjoin(orders_sub, Restaurant.id == orders_sub.c.restaurant_id)
         .outerjoin(employees_sub, Restaurant.id == employees_sub.c.restaurant_id)
         .order_by(Restaurant.id)
+        .offset(_effective_collection_skip(skip))
+        .limit(_effective_collection_limit(limit))
     ).all()
 
     return [
@@ -1795,7 +2238,7 @@ def create_admin_restaurant(
     db.flush()
     db.add(User(name=payload.ownerName, phone=owner_phone, role="owner", restaurant_id=restaurant.id))
     db.commit()
-    return fetch_admin_restaurants(user, db)[-1]
+    return fetch_admin_restaurants(skip=0, limit=DEFAULT_COLLECTION_LIMIT, user=user, db=db)[-1]
 
 
 @app.get("/admin/sales-team")
@@ -2053,48 +2496,65 @@ def create_agent_order(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     requested_id = (restaurant_id or x_restaurant_id or DEFAULT_RESTAURANT_PUBLIC_ID).strip()
-    restaurant = db.scalar(select(Restaurant).where(Restaurant.public_id == requested_id))
-    if not restaurant:
-        raise HTTPException(status_code=404, detail="restaurant not found")
-    if idempotency_key:
-        existing = db.scalar(select(Order).where(Order.idempotency_key == idempotency_key))
-        if existing:
-            return {"order_id": existing.public_id, "estimated_time": restaurant.delivery_minutes if existing.type == "delivery" else restaurant.wait_minutes}
+    try:
+        restaurant = db.scalar(select(Restaurant).where(Restaurant.public_id == requested_id))
+        if not restaurant:
+            raise HTTPException(status_code=404, detail="restaurant not found")
+        if idempotency_key:
+            existing = db.scalar(select(Order).where(Order.idempotency_key == idempotency_key))
+            if existing:
+                return {"order_id": existing.public_id, "estimated_time": restaurant.delivery_minutes if existing.type == "delivery" else restaurant.wait_minutes}
 
-    order = Order(
-        public_id=generate_public_order_id(db),
-        restaurant_id=restaurant.id,
-        call_id=payload.call_id,
-        type=payload.type,
-        customer_name=payload.customer_name,
-        phone=validate_phone_or_400(payload.customer_phone),
-        items_summary=" + ".join(f"{item.qty} {item.name}" for item in payload.order_items),
-        amount=sum(item.qty * item.price for item in payload.order_items),
-        status="received",
-        upsell=len(payload.order_items) > 1,
-        source=payload.channel,
-        special_requests=payload.special_requests,
-        delivery_address=payload.delivery_address,
-        delivery_zone=payload.delivery_zone,
-        delivery_landmark=payload.delivery_landmark,
-        idempotency_key=idempotency_key,
-    )
-    db.add(order)
-    db.flush()
-    for item in payload.order_items:
-        db.add(OrderItem(order_id=order.id, name=item.name, qty=item.qty, price=item.price))
-    upsert_call_log(
-        db,
-        restaurant_id=restaurant.id,
-        phone=order.phone,
-        last_message=order.items_summary,
-        ai_response=f"تم تسجيل الطلب {order.public_id}",
-        status="active",
-        order_total=order.amount,
-    )
-    db.commit()
-    publish_order_event(restaurant, order, "created")
-    return {"order_id": order.public_id, "estimated_time": restaurant.delivery_minutes if payload.type == "delivery" else restaurant.wait_minutes}
+        order = Order(
+            public_id=_provisional_public_id("ORD"),
+            restaurant_id=restaurant.id,
+            call_id=payload.call_id,
+            type=payload.type,
+            customer_name=payload.customer_name,
+            phone=validate_phone_or_400(payload.customer_phone),
+            items_summary=" + ".join(f"{item.qty} {item.name}" for item in payload.order_items),
+            amount=sum(item.qty * item.price for item in payload.order_items),
+            status="received",
+            upsell=payload.upsell_accepted,
+            source=payload.channel,
+            special_requests=payload.special_requests,
+            delivery_address=payload.delivery_address,
+            delivery_zone=payload.delivery_zone,
+            delivery_landmark=payload.delivery_landmark,
+            idempotency_key=idempotency_key,
+        )
+        db.add(order)
+        db.flush()
+        _assign_order_public_id(order)
+        for item in payload.order_items:
+            db.add(OrderItem(order_id=order.id, name=item.name, qty=item.qty, price=item.price))
+        upsert_call_log(
+            db,
+            restaurant_id=restaurant.id,
+            phone=order.phone,
+            last_message=order.items_summary,
+            ai_response=f"تم تسجيل الطلب {order.public_id}",
+            status="active",
+            order_total=order.amount,
+        )
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            if idempotency_key:
+                existing = db.scalar(select(Order).where(Order.idempotency_key == idempotency_key))
+                if existing:
+                    return {"order_id": existing.public_id, "estimated_time": restaurant.delivery_minutes if existing.type == "delivery" else restaurant.wait_minutes}
+            raise HTTPException(status_code=409, detail="order conflict, please retry") from exc
+        publish_order_event(restaurant, order, "created")
+        return {"order_id": order.public_id, "estimated_time": restaurant.delivery_minutes if payload.type == "delivery" else restaurant.wait_minutes}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("agent order create failed | restaurant=%s | call_id=%s", requested_id, payload.call_id)
+        if APP_ENV != "prod":
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+        raise
 
 
 @app.post("/reservations")
@@ -2115,7 +2575,7 @@ def create_agent_reservation(
         if existing:
             return {"reservation_id": existing.public_id}
     reservation = Reservation(
-        public_id=generate_public_reservation_id(db),
+        public_id=_provisional_public_id("RES"),
         restaurant_id=restaurant.id,
         call_id=payload.call_id,
         customer_name=payload.customer_name,
@@ -2128,6 +2588,8 @@ def create_agent_reservation(
         idempotency_key=idempotency_key,
     )
     db.add(reservation)
+    db.flush()
+    _assign_reservation_public_id(reservation)
     upsert_call_log(
         db,
         restaurant_id=restaurant.id,
@@ -2137,7 +2599,15 @@ def create_agent_reservation(
         status="closed",
         order_total=0.0,
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if idempotency_key:
+            existing = db.scalar(select(Reservation).where(Reservation.idempotency_key == idempotency_key))
+            if existing:
+                return {"reservation_id": existing.public_id}
+        raise HTTPException(status_code=409, detail="reservation conflict, please retry") from exc
     return {"reservation_id": reservation.public_id}
 
 
