@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\('agent.py', doraise=True\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('agent.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -m pytest smoke_tests.py -x -v)",
+      "Bash(pip install:*)",
+      "Bash(python smoke_tests.py)",
+      "Bash(python -c ':*)"
+    ]
+  }
+}

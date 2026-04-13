@@ -179,11 +179,10 @@ async def main() -> int:
     phone_msg_3 = await agent._apply_phone_update(phone_ud, "2899", flow_name="takeaway")
     check(
         "phone_partial_buffering",
-        phone_msg_1 == ""
+        "معايا" in phone_msg_1
         and "آخر أربع" in phone_msg_2
         and phone_ud.customer_phone == "01207882899"
         and "تحب تطلب" in phone_msg_3
-        and "زيرو" not in phone_msg_3
         and not phone_ud.phone_capture_mode,
     )
     check("phone_prefix_spoken_natural", agent.phone2ar("01207882899").startswith("زيرو اتناشر"))
@@ -196,7 +195,7 @@ async def main() -> int:
     name_msg = await agent._apply_name_update(name_ud, "اسم إيهاب", flow_name="delivery")
     stt_options = agent._session_stt_options(context_terms=["كوشري", "حمصية"], client_reference_id="call-stt")
     compact_menu_text = big_menu_cfg.menu_text()
-    check("name_prefix_extracted", name_ud.customer_name == "إيهاب" and "ورقم موبايلك" in name_msg)
+    check("name_prefix_extracted", name_ud.customer_name == "إيهاب" and ("رقم" in name_msg or "موبايل" in name_msg))
     check("name_enables_phone_mode", name_ud.phone_capture_mode)
     stt_context_ok = False
     if isinstance(stt_options.context, str):
@@ -220,8 +219,14 @@ async def main() -> int:
     finally:
         agent.SESSION_STT_LANGUAGE = original_stt_language
     check("empty_answer_handles_la_tamam", agent._looks_empty_answer("لا تمام يا فندم"))
-    check("rich_turn_guard_skipped", not agent._should_add_turn_guard("ممكن أعرف ايه المتاح في المنيو"))
+    check("rich_turn_guard_always_on", agent._should_add_turn_guard("ممكن أعرف ايه المتاح في المنيو"))
     check("short_turn_guard_kept", agent._should_add_turn_guard("لا تمام"))
+    check(
+        "delivery_zone_question_not_menu",
+        agent._is_delivery_zone_question("ممكن أعرف فين متاح؟")
+        and not agent._is_menu_question("ممكن أعرف فين متاح؟")
+        and "التوصيل" in agent._delivery_zone_user_message(cfg),
+    )
     check(
         "menu_voice_compact",
         compact_menu_text.startswith("المتاح دلوقتي:")
@@ -266,9 +271,9 @@ async def main() -> int:
         "name_reply_not_saved_as_landmark",
         name_as_landmark_ctx.userdata.customer_name == "أحمد"
         and name_as_landmark_ctx.userdata.delivery_landmark is None
-        and "ورقم موبايلك" in landmark_name_msg,
+        and ("رقم" in landmark_name_msg or "موبايل" in landmark_name_msg),
     )
-    check("detailed_address_skips_landmark", "اسمك إيه" in detailed_address_msg and detailed_address_ctx.userdata.delivery_landmark is None)
+    check("detailed_address_skips_landmark", ("اسم" in detailed_address_msg) and detailed_address_ctx.userdata.delivery_landmark is None)
     check("reservation_no_notes_natural", "تمام يا فندم" in reservation_no_notes and reservation_optional_ctx.userdata.reservation_notes is None)
 
     upsell_cfg = make_upsell_cfg()
@@ -315,7 +320,7 @@ async def main() -> int:
         and takeaway_ambiguous_ud.pending_upsell_item is None
         and takeaway_ambiguous_ud.upsell_accepted is False
         and takeaway_ambiguous_msgs
-        and "طلب خاص" in takeaway_ambiguous_msgs[-1]
+        and ("طلب خاص" in takeaway_ambiguous_msgs[-1] or "ملاحظة" in takeaway_ambiguous_msgs[-1])
     )
 
     delivery_upsell_cfg = make_upsell_cfg()
@@ -342,7 +347,57 @@ async def main() -> int:
         and delivery_ambiguous_ud.pending_upsell_item is None
         and delivery_ambiguous_ud.upsell_accepted is False
         and delivery_ambiguous_msgs
-        and "طلب خاص" in delivery_ambiguous_msgs[-1]
+        and ("طلب خاص" in delivery_ambiguous_msgs[-1] or "ملاحظة" in delivery_ambiguous_msgs[-1])
+    )
+
+    takeaway_special_upsell = agent.Takeaway(upsell_cfg)
+    takeaway_special_ud = agent.UserData(call_id="call-upsell-special", restaurant=upsell_cfg)
+    takeaway_special_ctx = make_ctx(takeaway_special_upsell, upsell_cfg, takeaway_special_ud)
+    await takeaway_special_upsell.update_order(items=["burger large"], context=takeaway_special_ctx)
+    takeaway_special_upsell._activity = SimpleNamespace(
+        session=SimpleNamespace(userdata=takeaway_special_ud, current_agent=takeaway_special_upsell)
+    )
+    takeaway_special_msgs: list[str] = []
+
+    async def fake_takeaway_special_say_and_stop(text: str) -> None:
+        takeaway_special_msgs.append(text)
+        raise agent.StopResponse()
+
+    takeaway_special_upsell._say_and_stop = fake_takeaway_special_say_and_stop
+    with contextlib.suppress(agent.StopResponse):
+        await takeaway_special_upsell._maybe_handle_turn_deterministically("هضيف cola وبس لو البرجر يكون حار")
+    check(
+        "takeaway_upsell_and_special_request_same_turn",
+        "cola" in (takeaway_special_ud.order or [])
+        and takeaway_special_ud.special_requests is not None
+        and "حار" in takeaway_special_ud.special_requests
+        and takeaway_special_msgs
+        and ("اسم" in takeaway_special_msgs[-1]),
+    )
+
+    delivery_special_upsell = agent.Delivery(delivery_upsell_cfg)
+    delivery_special_ud = agent.UserData(call_id="call-delivery-upsell-special", restaurant=delivery_upsell_cfg)
+    delivery_special_ctx = make_ctx(delivery_special_upsell, delivery_upsell_cfg, delivery_special_ud)
+    await delivery_special_upsell.update_order(items=["burger large"], context=delivery_special_ctx)
+    delivery_special_upsell._activity = SimpleNamespace(
+        session=SimpleNamespace(userdata=delivery_special_ud, current_agent=delivery_special_upsell)
+    )
+    delivery_special_msgs: list[str] = []
+
+    async def fake_delivery_special_say_and_stop(text: str) -> None:
+        delivery_special_msgs.append(text)
+        raise agent.StopResponse()
+
+    delivery_special_upsell._say_and_stop = fake_delivery_special_say_and_stop
+    with contextlib.suppress(agent.StopResponse):
+        await delivery_special_upsell._maybe_handle_turn_deterministically("لا وبس لو البرجر يكون حار")
+    check(
+        "delivery_reject_upsell_keep_special_request",
+        "cola" not in (delivery_special_ud.order or [])
+        and delivery_special_ud.special_requests is not None
+        and "حار" in delivery_special_ud.special_requests
+        and delivery_special_msgs
+        and ("عنوان" in delivery_special_msgs[-1]),
     )
 
     saved_client = agent._http_client

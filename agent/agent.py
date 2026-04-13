@@ -145,7 +145,7 @@ FALSE_INTERRUPTION_TIMEOUT_SECONDS = _get_env_float("FALSE_INTERRUPTION_TIMEOUT_
 USER_AWAY_TIMEOUT_SECONDS         = _get_env_float("USER_AWAY_TIMEOUT_SECONDS", 9.0, min_value=0.5)
 NO_SPEECH_PROMPT_SECONDS          = _get_env_float("NO_SPEECH_PROMPT_SECONDS", 12.0, min_value=1.0)
 NO_SPEECH_CLOSE_SECONDS           = _get_env_float("NO_SPEECH_CLOSE_SECONDS", 28.0, min_value=2.0)
-NO_SPEECH_REPROMPT_LIMIT          = _get_env_int("NO_SPEECH_REPROMPT_LIMIT", 1, min_value=1)
+NO_SPEECH_REPROMPT_LIMIT          = _get_env_int("NO_SPEECH_REPROMPT_LIMIT", 2, min_value=1)
 NO_SPEECH_REPROMPT_GAP_SECONDS    = _get_env_float("NO_SPEECH_REPROMPT_GAP_SECONDS", 8.0, min_value=0.5)
 VOICE_MENU_LIMIT             = _get_env_int("VOICE_MENU_LIMIT", 10, min_value=4)
 MENU_PROMPT_LIMIT            = _get_env_int("MENU_PROMPT_LIMIT", 20, min_value=6)
@@ -393,7 +393,7 @@ def _order_validation_user_message(cfg: "RestaurantConfig") -> str:
 def _delivery_unavailable_user_message(cfg: "RestaurantConfig") -> str:
     if cfg.degraded_mode:
         return _voice_safe_text("التوصيل محتاج تأكيد من النظام يا فندم. قولي طلبك الأول وأنا أمشي معاك خطوة خطوة.")
-    return _voice_safe_text("للأسف التوصيل مش متاح دلوقتي يا فندم. تحب تيكاواي بدل كده؟")
+    return _voice_safe_text("للأسف التوصيل مش متاح دلوقتي يا فندم. تحب تيجي تاخده من عندنا؟")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -1395,15 +1395,63 @@ def validate_phone(phone: str) -> str | None:
     return cleaned if re.fullmatch(r"(01[0125]\d{8}|\+201[0125]\d{8})", cleaned) else None
 
 
+_SPOKEN_DIGIT_MAP = {
+    "صفر": "0", "زيرو": "0", "zero": "0",
+    "واحد": "1", "واحده": "1",
+    "اتنين": "2", "اثنين": "2", "اتنان": "2",
+    "تلاته": "3", "تلاتة": "3", "ثلاثة": "3", "ثلاثه": "3",
+    "اربعه": "4", "أربعة": "4", "اربعة": "4", "أربعه": "4",
+    "خمسه": "5", "خمسة": "5",
+    "سته": "6", "ستة": "6",
+    "سبعه": "7", "سبعة": "7",
+    "تمنيه": "8", "تمانيه": "8", "تمانية": "8", "ثمانية": "8", "ثمانيه": "8",
+    "تسعه": "9", "تسعة": "9",
+    "عشره": "10", "عشرة": "10", "عشر": "10",
+    "حداشر": "11", "إحداشر": "11",
+    "اتناشر": "12", "إتناشر": "12",
+    "تلتاشر": "13", "ثلاثتاشر": "13",
+    "أربعتاشر": "14", "اربعتاشر": "14",
+    "خمستاشر": "15",
+}
+
+
+def _spoken_words_to_digits(text: str) -> str:
+    """Convert Arabic spoken number words to digit string."""
+    result = text
+    normalized = _normalize_ar(text)
+    tokens = normalized.split()
+    digit_parts = []
+    non_digit_parts = []
+    for token in tokens:
+        mapped = _SPOKEN_DIGIT_MAP.get(token)
+        if mapped is not None:
+            digit_parts.append(mapped)
+        elif re.fullmatch(r"\d+", token):
+            digit_parts.append(token)
+        else:
+            non_digit_parts.append(token)
+    if digit_parts:
+        return "".join(digit_parts)
+    return re.sub(r"\D", "", text.translate(_AR_DIGITS))
+
+
 def _phone_digits_only(phone: str) -> str:
+    spoken = _spoken_words_to_digits(phone)
+    if spoken:
+        return spoken
     return re.sub(r"\D", "", phone.translate(_AR_DIGITS))
 
 
 def _is_phone_like_text(text: str) -> bool:
     translated = (text or "").translate(_AR_DIGITS)
     digits = re.sub(r"\D", "", translated)
-    if not digits:
+    # Also check for spoken digit words
+    spoken_digits = _spoken_words_to_digits(text or "")
+    all_digits = spoken_digits or digits
+    if not all_digits:
         return False
+    if spoken_digits and len(spoken_digits) >= 2:
+        return True
     non_phone = re.sub(r"[\d\s()+\-]", "", translated).strip()
     return len(non_phone) <= 4
 
@@ -1445,18 +1493,23 @@ def _phone_capture_short_reply(ud: "UserData", partial_digits: str) -> str:
     remaining = max(0, 11 - len(local_digits))
     if remaining <= 0:
         return ""
+    spoken = phone2ar(local_digits)
     if remaining <= 4:
-        return "آخر أربع أرقام."
-    if ud.phone_capture_turns >= 2:
-        return "كمّل."
-    return ""
+        return f"معايا {spoken}، وآخر {_digit_count_ar(remaining)}؟"
+    return f"معايا {spoken}، كمّل الباقي."
+
+
+def _digit_count_ar(n: int) -> str:
+    _MAP = {1: "رقم", 2: "رقمين", 3: "تلات أرقام", 4: "أربع أرقام",
+            5: "خمس أرقام", 6: "ست أرقام", 7: "سبع أرقام", 8: "ثمن أرقام"}
+    return _MAP.get(n, f"{n} أرقام")
 
 
 def _phone_capture_failure_reply(ud: "UserData") -> str:
     if ud.phone_capture_failures <= 1:
-        return "الرقم ناقص."
+        return "مسمعتش الرقم كويس يا فندم، ممكن تعيده تاني؟"
     if ud.phone_capture_failures == 2:
-        return "كمّل بس أرقام."
+        return "الرقم لازم يكون 11 رقم يا فندم، ممكن تقوله تاني؟"
     return "الرقم 11 رقم ويبدأ بزيرو عشرة أو زيرو حداشر أو زيرو اتناشر أو زيرو خمستاشر."
 
 
@@ -1537,11 +1590,20 @@ def _spoken_order_items(order: list[str] | None) -> str:
 
 
 def _takeaway_confirmation_prompt(ud: "UserData") -> str:
-    return f"{_spoken_order_items(ud.order)} باسم {ud.customer_name}، صح؟"
+    total_part = f"، الإجمالي {money2ar(ud.order_total)} جنيه" if ud.order_validated and ud.order_total > 0 else ""
+    return f"{_spoken_order_items(ud.order)}{total_part} باسم {ud.customer_name}، صح؟"
 
 
 def _delivery_confirmation_prompt(ud: "UserData") -> str:
-    return f"{_spoken_order_items(ud.order)} لعنوان {ud.delivery_address} باسم {ud.customer_name}، صح؟"
+    total = ud.order_total
+    fee = getattr(ud, '_delivery_fee', 0.0)
+    if ud.restaurant and hasattr(ud.restaurant, 'delivery_fee'):
+        fee = float(ud.restaurant.delivery_fee or 0)
+        total += fee
+    total_part = f"، الإجمالي {money2ar(total)} جنيه" if ud.order_validated and total > 0 else ""
+    if fee > 0 and ud.order_validated:
+        total_part += " شامل التوصيل"
+    return f"{_spoken_order_items(ud.order)}{total_part} لعنوان {ud.delivery_address} باسم {ud.customer_name}، صح؟"
 
 
 def _reservation_confirmation_prompt(ud: "UserData") -> str:
@@ -1568,6 +1630,27 @@ def _followup_after_phone(flow: str, ud: "UserData") -> str:
     if flow == "complaint":
         return "تحب حاجة تانية يا فندم؟"
     return ""
+
+
+def _followup_after_special_request(flow: str) -> str:
+    if flow == "takeaway":
+        return _ask_name()
+    if flow == "delivery":
+        return _ask_address()
+    return ""
+
+
+def _special_request_followup_message(flow: str, ud: "UserData", *, accepted_item: str | None = None) -> str:
+    next_question = _followup_after_special_request(flow)
+    if accepted_item:
+        return _voice_safe_text(
+            _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item} وسجلت الملاحظة على الطلب", next_question),
+            max_chars=180,
+        )
+    return _voice_safe_text(
+        _join_user_phrases("تمام يا فندم، سجلت الملاحظة على الطلب", next_question),
+        max_chars=180,
+    )
 
 
 def _join_user_phrases(*parts: str) -> str:
@@ -1603,17 +1686,19 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
     cleaned = direct_valid or combined_valid
     if cleaned:
         ud.customer_phone = cleaned
+        was_chunked = bool(ud.pending_phone_digits)
         ud.pending_phone_digits = ""
         _set_phone_capture_mode(ud, False)
         logger.info("call=%s | phone set", ud.call_id)
         complaint_note = await _maybe_submit_pending_complaint_for_flow(ud, flow_name)
         note = _clean_followup_note(complaint_note)
         followup = _followup_after_phone(flow_name, ud)
+        phone_confirm = f"تمام، {phone2ar(cleaned)}" if was_chunked else _ack()
         if note:
-            return _voice_safe_text(_join_user_phrases(note, followup), max_chars=180)
+            return _voice_safe_text(_join_user_phrases(note, followup), max_chars=200)
         if followup:
-            return _voice_safe_text(_join_user_phrases(_ack(), followup), max_chars=180)
-        return _voice_safe_text(f"{_ack()}.")
+            return _voice_safe_text(_join_user_phrases(phone_confirm, followup), max_chars=200)
+        return _voice_safe_text(f"{phone_confirm}.")
 
     partial_digits = combined_digits if _is_plausible_partial_phone_digits(combined_digits) else ""
     if partial_digits:
@@ -1638,14 +1723,12 @@ async def _apply_name_update(ud: "UserData", name_text: str, *, flow_name: str) 
     complaint_note = await _maybe_submit_pending_complaint_for_flow(ud, flow_name)
     note = _clean_followup_note(complaint_note)
     _set_phone_capture_mode(ud, _flow_missing_phone(flow_name, ud))
+    followup = _followup_after_name(flow_name, ud)
     if note:
-        return _voice_safe_text(_join_user_phrases(note, _followup_after_name(flow_name, ud)), max_chars=180)
+        return _voice_safe_text(_join_user_phrases(note, followup), max_chars=200)
     return _voice_safe_text(
-        _join_user_phrases(
-            _random.choice([f"أهلاً يا {cleaned}", f"نورت يا {cleaned}", f"{_ack()} يا {cleaned}"]),
-            _followup_after_name(flow_name, ud),
-        ),
-        max_chars=180,
+        f"{_ack()} يا {cleaned}. {followup}",
+        max_chars=200,
     )
 
 
@@ -1854,6 +1937,7 @@ UPSELL_ACCEPT_WORDS = {
     "زود", "زودها", "زوده", "زودهم", "هات", "هاتها", "هاته", "هاتهم",
     "عايزها", "عايزه", "عاوزها", "عاوزه", "ماشي ضيفها", "تمام ضيفها",
     "ايوه ضيفها", "أيوه ضيفها", "ايوه حطها", "أيوه حطها",
+    "هضيف", "هضيفها", "هحط", "هحطها", "هزود", "هزودها", "اضيف", "أضيف",
 }
 
 UPSELL_ITEM_REQUEST_WORDS = {
@@ -1882,15 +1966,35 @@ def _looks_empty_answer(text: str | None) -> bool:
     if not normalized:
         return True
     negative_forms = {_normalize_ar(word) for word in NEGATIVE_WORDS}
-    return any(normalized == word or normalized.startswith(f"{word} ") for word in negative_forms)
+    for word in negative_forms:
+        if normalized == word:
+            return True
+        if normalized.startswith(f"{word} "):
+            tail = normalized[len(word):].strip()
+            if not tail:
+                return True
+            if all(token in _EMPTY_TAIL_WORDS for token in tail.split()):
+                return True
+    return False
 
 
-_ACK_PHRASES = ["تمام", "حاضر", "ماشي", "أوكي", "تمام يا فندم", "حاضر يا فندم"]
-_ACK_GOT_IT = ["سجلت", "معايا", "خدت", "حطيت"]
-_NEXT_NAME = ["اسمك إيه؟", "الاسم إيه يا فندم؟", "ممكن اسمك؟"]
-_NEXT_PHONE = ["ورقم موبايلك؟", "وإيه رقم الموبايل؟", "والموبايل يا فندم؟"]
-_NEXT_SPECIAL = ["في أي طلب خاص في التحضير؟", "عندك أي طلب خاص؟", "حابب حاجة معينة في التحضير؟"]
-_NEXT_ADDRESS = ["عنوانك إيه يا فندم؟", "فين هنوصلك يا فندم؟", "قولي العنوان يا فندم."]
+_ACK_PHRASES = ["تمام يا فندم", "حاضر يا فندم", "ماشي يا فندم", "تمام"]
+_ACK_GOT_IT = ["معايا", "سجلت", "أخدت"]
+_NEXT_NAME = ["اسمك إيه يا فندم؟", "الاسم إيه يا فندم؟", "ممكن اسم حضرتك؟"]
+_NEXT_PHONE = ["ورقم موبايلك؟", "رقم الموبايل يا فندم؟", "ورقم حضرتك؟", "ممكن رقم الموبايل؟"]
+_NEXT_SPECIAL = ["في أي طلب خاص في التحضير؟", "حابب تضيف أي ملاحظة على الطلب؟", "عندك أي طلب خاص؟"]
+_NEXT_ADDRESS = ["عنوانك إيه يا فندم؟", "العنوان إيه يا فندم؟", "ممكن العنوان؟"]
+_EMPTY_TAIL_WORDS = {
+    "تمام", "خلاص", "كده", "بس", "شكرا", "شكرًا", "ميرسي", "متشكر",
+    "يا", "فندم", "لو", "سمحت", "حضرتك", "اوكي", "أوكي", "ماشي", "حاضر",
+}
+_SPECIAL_REQUEST_HINTS = {
+    "من غير", "بدون", "سخنه", "سخنة", "حار", "بارد", "صوص", "شطه", "شطة",
+    "كاتشب", "مايونيز", "جبنه", "جبنة", "بصل", "طماطم", "مخلل", "تقطيع",
+    "مقطعه", "مقطعة", "مقرمشه", "مقرمشة", "زياده", "زيادة", "على جنب",
+    "خلي", "خليها", "خليه", "تكون", "استواء", "رفيعه", "رفيعة", "ناشف",
+    "طرية", "طريه", "زيادة جبنة", "من غير بصل", "من غير طماطم",
+}
 
 def _ack() -> str:
     return _random.choice(_ACK_PHRASES)
@@ -1983,7 +2087,67 @@ def _is_explicit_upsell_rejection(text: str) -> bool:
         return False
     if _looks_empty_answer(text):
         return True
-    return _contains_normalized_phrase(text, UPSELL_REJECTION_WORDS)
+    if _contains_normalized_phrase(text, UPSELL_REJECTION_WORDS):
+        return True
+    # "لا وبس لو البرجر يكون حار" — starts with a negative word, treat as rejection
+    _REJECTION_PREFIXES = {_normalize_ar(w) for w in ("لا", "لأ", "لاا")}
+    first_token = normalized.split()[0] if normalized else ""
+    if first_token in _REJECTION_PREFIXES and len(normalized.split()) > 1:
+        return True
+    return False
+
+
+_NEGATE_SPECIAL_PHRASES = {
+    "مفيش طلبات", "مفيش طلب خاص", "مفيش حاجة خاصة", "مفيش ملاحظات",
+    "مفيش طلبات خاصة", "لا مفيش", "من غير طلبات", "لا عادي",
+    "لا مفيش حاجة", "كده وبس", "بس كده", "خلاص كده",
+}
+
+def _upsell_reply_negates_special(text: str) -> bool:
+    """Check if the upsell reply also negates special requests — only when no real special request is present."""
+    if _extract_special_request_candidate(text):
+        return False
+    normalized = _normalize_ar(text or "")
+    return any(_normalize_ar(phrase) in normalized for phrase in _NEGATE_SPECIAL_PHRASES)
+
+
+def _extract_special_request_candidate(text: str | None) -> str | None:
+    raw = re.sub(r"\s+", " ", (text or "")).strip(" ،,.")
+    if not raw or _looks_empty_answer(raw) or _is_thanks_message(raw):
+        return None
+
+    cleaned = re.sub(
+        r"^\s*(?:بس|وبس|ولو|لو|طيب|طب|يعني|معلش|ممكن|حاضر|تمام يا فندم|تمام|ماشي|أيوه|ايوه)\b[\s،,]*",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    ).strip(" ،,.")
+    if not cleaned or _looks_empty_answer(cleaned):
+        return None
+
+    normalized = _normalize_ar(cleaned)
+    if any(_normalize_ar(hint) in normalized for hint in _SPECIAL_REQUEST_HINTS):
+        return cleaned
+    return None
+
+
+def _extract_special_request_after_upsell_reply(text: str, item_name: str | None) -> str | None:
+    raw = re.sub(r"\s+", " ", (text or "")).strip(" ،,.")
+    if not raw:
+        return None
+
+    cleaned = raw
+    if item_name:
+        cleaned = re.sub(re.escape(item_name), " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\b(?:هضيف|هضيفها|هحط|هحطها|هزود|هزودها|ضيف|ضيفها|حط|حطها|زود|زودها|هات|هاتها|"
+        r"أيوه|ايوه|تمام|ماشي|حاضر|لا|لأ|شكرا|شكرًا|ميرسي|لو سمحت|يا فندم|وبس|بس)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ،,.")
+    return _extract_special_request_candidate(cleaned)
 
 
 def _address_seems_specific(address: str) -> bool:
@@ -2005,13 +2169,30 @@ def _address_seems_specific(address: str) -> bool:
     return False
 
 
+def _extract_zone_from_address(address: str, delivery_zones: list[str] | None) -> str:
+    """Try to extract zone from address text by matching known delivery zones."""
+    if not delivery_zones:
+        return address.strip().split(",")[-1].strip() if "," in address else address.strip()
+    addr_norm = _normalize_ar(address)
+    for z in delivery_zones:
+        if _normalize_ar(z) in addr_norm:
+            return z
+    # Fallback: use the last part of the address as zone guess
+    parts = re.split(r"[،,\-]", address)
+    return parts[-1].strip() if len(parts) > 1 else address.strip()
+
+
 _DELIVERY_HINTS = {"توصيل", "دليفري", "الدليفري", "وصله", "يوصل", "delivery"}
 _TAKEAWAY_HINTS = {"تيكاواي", "takeaway", "استلام", "اجي استلمه", "آجي استلمه", "هاخده", "اخده من المطعم"}
 _ORDER_HINTS = {"اوردر", "أوردر", "طلب", "اطلب", "عايز اطلب", "أطلب"}
 _MENU_HINTS = {
     "المنيو", "المتاح", "ايه المتاح", "إيه المتاح", "المتاح ايه", "إيه عندك",
     "ايه عندك", "عندك ايه", "عندكم ايه", "الاصناف", "الأصناف", "السعر",
-    "الاسعار", "الأسعار", "ممكن اعرف المتاح", "اين متاح",
+    "الاسعار", "الأسعار", "ممكن اعرف المتاح",
+}
+_DELIVERY_ZONE_HINTS = {
+    "فين متاح", "متاح فين", "بتوصلوا فين", "التوصيل فين", "المناطق", "المناطق المتاحه",
+    "المناطق المتاحة", "ايه المناطق", "إيه المناطق", "فين التوصيل", "التوصيل متاح فين",
 }
 _RESERVATION_HINTS = {"حجز", "احجز", "ترابيزة", "ترابيزه", "رزيرفيشن"}
 _COMPLAINT_HINTS = {"شكوى", "مشكلة", "المشكله", "اعتراض", "complaint"}
@@ -2058,7 +2239,26 @@ def _is_greeting_only(text: str) -> bool:
 
 def _is_menu_question(text: str) -> bool:
     normalized = _normalize_ar(text)
-    return bool(normalized and _contains_any_hint(normalized, _MENU_HINTS))
+    if not normalized or _is_delivery_zone_question(text):
+        return False
+    return _contains_any_hint(normalized, _MENU_HINTS)
+
+
+def _is_delivery_zone_question(text: str) -> bool:
+    normalized = _normalize_ar(text)
+    if not normalized:
+        return False
+    if _contains_any_hint(normalized, _DELIVERY_ZONE_HINTS):
+        return True
+    return "فين" in normalized and "متاح" in normalized
+
+
+def _delivery_zone_user_message(cfg: "RestaurantConfig") -> str:
+    if cfg.delivery_zones:
+        return _voice_safe_text(f"التوصيل متاح في {cfg.delivery_zones_text()}. تحب تطلب إيه؟", max_chars=170)
+    if cfg.delivery_enabled:
+        return _voice_safe_text("التوصيل متاح يا فندم. تحب تطلب إيه؟", max_chars=140)
+    return _delivery_unavailable_user_message(cfg)
 
 
 _FILLER_STARTS = {"آ", "آآ", "آه", "اه", "أه", "امم", "ام", "ممم", "هم", "اهم"}
@@ -2135,7 +2335,13 @@ def _extract_name_candidate(text: str) -> str | None:
 
     blocked_tokens = {
         _normalize_ar(word)
-        for word in ("تمام", "صح", "ماشي", "أيوه", "ايوه", "عنوان", "شارع", "منطقة", "مدينه", "مدينة")
+        for word in (
+            "تمام", "صح", "ماشي", "أيوه", "ايوه", "عنوان", "شارع", "منطقة", "مدينه", "مدينة",
+            "كويس", "حلو", "طيب", "خلاص", "حاضر", "اوكي", "أوكي", "شكرا", "بس",
+            "فراخ", "لحمه", "لحمة", "جبنه", "جبنة", "بيتزا", "برجر", "كشري", "سلطه", "سلطة",
+            "كبير", "كبيره", "كبيرة", "صغير", "صغيره", "صغيرة", "وسط", "لارج", "ميديم",
+            "مشروب", "عصير", "كولا", "بيبسي", "مياه", "شاي", "قهوه", "قهوة",
+        )
     }
     if any(_normalize_ar(token) in blocked_tokens for token in tokens):
         return None
@@ -2206,11 +2412,7 @@ def _greeter_turn_decision(
 ) -> GreeterTurnDecision:
     if _is_greeting_only(text):
         return GreeterTurnDecision(
-            message=_random.choice([
-                "أهلاً! تحب تطلب أكل، تحجز، ولا في حاجة تانية؟",
-                "يا هلا! عايز تطلب ولا تحجز ولا إيه؟",
-                "أهلاً وسهلاً! تحب تطلب، تحجز، ولا محتاج حاجة؟",
-            ]),
+            message="أهلاً بيك يا فندم. تحب تطلب أكل، تحجز، ولا في حاجة تانية؟",
             reason="greeting_only",
         )
 
@@ -2238,14 +2440,11 @@ def _greeter_turn_decision(
         )
     if intent == "order_ambiguous":
         return GreeterTurnDecision(
-            message=_random.choice(["تيكاواي ولا توصيل يا فندم؟", "هتيجي تاخده ولا نوصلهولك؟"]),
+            message="حضرتك هتيجي تاخده ولا توصيل يا فندم؟",
             reason="order_ambiguous",
         )
     return GreeterTurnDecision(
-        message=_random.choice([
-            "تحب تطلب أكل، تحجز، ولا حاجة تانية؟",
-            "عايز تطلب ولا تحجز ولا إيه يا فندم؟",
-        ]),
+        message="تحب تطلب أكل، تحجز، ولا حاجة تانية يا فندم؟",
         reason="unknown",
     )
 
@@ -2622,41 +2821,42 @@ def _should_add_turn_guard(user_text: str) -> bool:
     normalized = _normalize_ar(user_text)
     if not normalized:
         return False
-    if _is_greeting_only(user_text) or _looks_empty_answer(user_text):
-        return True
-
-    tokens = normalized.split()
-    short_ack_tokens = {_normalize_ar(word) for word in ("صح", "تمام", "ماشي", "ايوه", "أيوه", "كده")}
-    if len(tokens) <= 2:
-        return True
-    if len(tokens) <= 4 and any(token in short_ack_tokens for token in tokens):
-        return True
-    return False
+    return True
 
 
 def _flow_turn_guard_message(flow: str, ud: UserData, user_text: str) -> str:
     normalized = _normalize_ar(user_text)
+
+    # Post-confirmation: don't restart the flow
+    if ud.order_confirmed or ud.reservation_confirmed or ud.complaint_logged:
+        return (
+            "الطلب/الحجز/الشكوى مسجّل خلاص. "
+            "لو العميل عايز حاجة تانية ساعده، "
+            "ولو بيسلّم أو بيشكر قول شكرا واقفل. "
+            "متبدأش أوردر جديد ومتسألش تحب تطلب إيه."
+        )
+
     if flow == "takeaway":
         missing = _takeaway_next_missing_slot(ud)
         if missing == "الطلب":
             return (
-                "هذه مرحلة تيكاواي. المطلوب الآن الطلب فقط. "
+                "هذه مرحلة استلام من المطعم. المطلوب الآن الطلب فقط. "
                 "لا تطلب الاسم أو الرقم أو التأكيد قبل تسجيل الطلب. "
                 "لو كلام العميل مجرد تحية أو موافقة قصيرة فاسأله: تحب تطلب إيه؟"
             )
         if missing == "الاسم":
             return (
-                "هذه مرحلة تيكاواي. المطلوب الآن الاسم فقط. "
+                "هذه مرحلة استلام من المطعم. المطلوب الآن الاسم فقط. "
                 "لا تطلب الرقم قبل الاسم. "
                 "لو آخر كلام من العميل كان نفيًا مثل لا أو مفيش على الطلب الخاص، انتقل للاسم فورًا."
             )
         if missing == "رقم الموبايل":
             return (
-                "هذه مرحلة تيكاواي. المطلوب الآن رقم الموبايل فقط. "
+                "هذه مرحلة استلام من المطعم. المطلوب الآن رقم الموبايل فقط. "
                 "لا تؤكد الطلب ولا تقل تم استلامه قبل تسجيل الرقم."
             )
         return (
-            "هذه مرحلة تيكاواي. المطلوب الآن تأكيد الطلب فقط. "
+            "هذه مرحلة استلام من المطعم. المطلوب الآن تأكيد الطلب فقط. "
             "لا تقل تم استلام الطلب أو تم تسجيله إلا بعد نجاح confirm_order."
         )
 
@@ -2669,7 +2869,8 @@ def _flow_turn_guard_message(flow: str, ud: UserData, user_text: str) -> str:
             )
         if missing == "العنوان والمنطقة":
             return (
-                "هذه مرحلة توصيل. المطلوب الآن العنوان والمنطقة فقط. "
+                "هذه مرحلة توصيل. المطلوب الآن العنوان فقط. "
+                "لما العميل يقول عنوانه استدعِ update_delivery_address فوراً. "
                 "لا تطلب الاسم أو الرقم قبل العنوان."
             )
         if missing == "الاسم":
@@ -2741,6 +2942,33 @@ def _flow_turn_guard_message(flow: str, ud: UserData, user_text: str) -> str:
 
 def _next_step_hint(context: RunContext_T) -> str:
     return _next_step_hint_for_flow(_current_flow_name(context), context.userdata)
+
+
+def _inactivity_reprompt(ud: "UserData", flow: str = "") -> str:
+    """Flow-aware reprompt when the user goes silent."""
+    if flow == "takeaway":
+        missing = _takeaway_next_missing_slot(ud)
+    elif flow == "delivery":
+        missing = _delivery_next_missing_slot(ud)
+    elif flow == "reservation":
+        missing = _reservation_next_missing_slot(ud, ud.restaurant)
+    else:
+        return "لسه معايا يا فندم؟"
+    if missing == "الطلب":
+        return "تحب تطلب إيه يا فندم؟"
+    if missing == "الاسم":
+        return _ask_name()
+    if missing == "رقم الموبايل":
+        return _ask_phone()
+    if missing == "العنوان والمنطقة":
+        return _ask_address()
+    if missing == "وقت الحجز":
+        return "امتى تحب تحجز يا فندم؟"
+    if missing == "عدد الضيوف":
+        return "كام فرد يا فندم؟"
+    if not missing:
+        return "كده تمام يا فندم؟"
+    return "لسه معايا يا فندم؟"
 
 
 async def _maybe_submit_pending_complaint(context: RunContext_T) -> str:
@@ -2901,22 +3129,13 @@ class BaseAgent(Agent):
             _set_phone_capture_mode(ud, desired_phone_mode)
         self._sync_phone_capture_mode()
 
-        if _flow_missing_name(flow, ud) and not _is_likely_non_name_response(user_text):
-            candidate = _extract_name_candidate(user_text)
-            if candidate:
-                logger.info("call=%s | name turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-                await self._say_and_stop(await _apply_name_update(ud, candidate, flow_name=flow))
-
-        if _flow_missing_phone(flow, ud) and _is_phone_like_text(user_text):
-            logger.info("call=%s | phone turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-            phone_reply = await _apply_phone_update(ud, user_text, flow_name=flow)
-            if phone_reply:
-                await self._say_and_stop(phone_reply)
-            raise StopResponse()
-
         if flow in {"takeaway", "delivery"} and _is_total_question(user_text):
             logger.info("call=%s | total turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
             await self._say_and_stop(_order_total_user_message(flow, ud, ud.restaurant))
+
+        if flow in {"greeter", "delivery"} and _is_delivery_zone_question(user_text):
+            logger.info("call=%s | delivery_zones_intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
+            await self._say_and_stop(_delivery_zone_user_message(ud.restaurant))
 
         if flow in {"takeaway", "delivery"} and _is_menu_question(user_text):
             logger.info("call=%s | menu turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
@@ -2930,7 +3149,24 @@ class BaseAgent(Agent):
                 logger.info("call=%s | post_completion_ack_intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
                 await self._say_and_stop(_random.choice(["تحت أمرك!", "في أي حاجة تانية يا فندم؟"]))
 
+        # Deterministic handler runs FIRST — upsell, special-request, confirmation
+        # This prevents name/phone interception from stealing turns during those steps.
         if await self._maybe_handle_turn_deterministically(user_text):
+            raise StopResponse()
+
+        # Name/phone interception runs AFTER deterministic handler so upsell/special
+        # request steps aren't mistakenly captured as names.
+        if _flow_missing_name(flow, ud) and not ud.pending_upsell_item and not _is_likely_non_name_response(user_text):
+            candidate = _extract_name_candidate(user_text)
+            if candidate:
+                logger.info("call=%s | name turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
+                await self._say_and_stop(await _apply_name_update(ud, candidate, flow_name=flow))
+
+        if _flow_missing_phone(flow, ud) and _is_phone_like_text(user_text):
+            logger.info("call=%s | phone turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
+            phone_reply = await _apply_phone_update(ud, user_text, flow_name=flow)
+            if phone_reply:
+                await self._say_and_stop(phone_reply)
             raise StopResponse()
 
         if len(turn_ctx.items) > TURN_CHAT_CTX_MAX_ITEMS:
@@ -2989,10 +3225,10 @@ class Greeter(BaseAgent):
             instructions = (
                 f"أنت موظف استقبال في مطعم '{cfg.name}'.\n\n"
                 "أول ما تفهم نية العميل حوّله للمكان الصح على طول.\n"
-                "لو العميل قال توصيل أو تيكاواي صراحة، حوّله فوراً من غير أسئلة زيادة.\n"
+                "لو العميل قال توصيل أو هييجي ياخده صراحة، حوّله فوراً من غير أسئلة زيادة.\n"
                 "لو سأل على المنيو أو سعر → get_menu.\n\n"
                 "التحويلات:\n"
-                "• طلب أكل / تيكاواي → to_takeaway\n"
+                "• طلب أكل / استلام من المطعم → to_takeaway\n"
                 f"{delivery_line}"
                 "• حجز ترابيزة → to_reservation\n"
                 "• شكوى أو مشكلة → to_complaint\n"
@@ -3044,7 +3280,7 @@ class Greeter(BaseAgent):
 
     @function_tool()
     async def to_takeaway(self, context: RunContext_T) -> tuple[Agent, str]:
-        """يُستدعى لما العميل يريد استلام طلبه من المطعم (تيكاواي)."""
+        """يُستدعى لما العميل يريد ييجي ياخد طلبه من المطعم."""
         return await self._transfer("takeaway", context)
 
     @function_tool()
@@ -3079,7 +3315,7 @@ class Greeter(BaseAgent):
         if intent == "menu":
             return await get_menu(context)
         if intent == "order_ambiguous":
-            return "تيكاواي ولا توصيل يا فندم؟"
+            return "حضرتك هتيجي تاخده ولا توصيل يا فندم؟"
         return "معلش يا فندم، طلب أكل ولا حجز ولا شكوى؟"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3093,21 +3329,23 @@ class Takeaway(BaseAgent):
         self._opening = "اتفضل يا فندم، تحب تطلب إيه؟"
         super().__init__(
             instructions=(
-                f"أنت موظف طلبات تيكاواي في '{cfg.name}'.\n"
-                f"وقت الاستلام: {num2ar(cfg.wait_minutes)} دقيقة.\n"
-                f"أصناف: {cfg.menu_names()}\n\n"
+                f"أنت موظف طلبات استلام من المطعم في '{cfg.name}'.\n"
+                f"وقت الاستلام: {num2ar(cfg.wait_minutes)} دقيقة.\n\n"
                 "اتكلم زي موظف مطعم مصري حقيقي — عفوي وودود، مش بتقرأ من سكريبت.\n"
                 "نوّع في كلامك، متقولش نفس الجمل كل مرة.\n"
                 "الترتيب العام:\n"
-                "١. خُد الطلب واستدعِ update_order.\n"
-                "٢. اسأل لو فيه طلب خاص، ولو قال لأ كمّل.\n"
-                "٣. خُد الاسم ورقم الموبايل.\n"
-                "٤. لخّص الطلب مرة واحدة، ولو وافق استدعِ confirm_order.\n"
+                "١. لما العميل يقول طلبه استدعِ update_order فوراً — هو اللي بيتحقق من المنيو.\n"
+                "٢. لو update_order رجّع إن الصنف مش في المنيو، بلّغ العميل ومتسجلوش.\n"
+                "٣. اقترح إضافة مرة واحدة بس (مشروب أو طبق جانبي).\n"
+                "٤. اسأل لو فيه طلب خاص في التحضير، ولو قال لأ كمّل.\n"
+                "٥. خُد الاسم ورقم الموبايل.\n"
+                "٦. لخّص الطلب والإجمالي مرة واحدة، ولو وافق استدعِ confirm_order.\n"
                 "لو العميل قال معلومة من خطوة جاية سجّلها وكمّل عادي.\n\n"
-                "- لو سأل عن سعر → get_menu\n"
+                "قواعد صارمة:\n"
+                "- لازم تستدعي update_order قبل ما تأكد أي صنف — أنت مش عارف المنيو.\n"
+                "- لو سأل عن المنيو أو سعر → get_menu\n"
                 "- لو عنده شكوى → to_complaint\n"
-                "- متضيفش أصناف من عندك.\n"
-                "- اقتراح الإضافة مرة واحدة بس وبشكل عفوي.\n"
+                "- متقولش للعميل إن صنف موجود أو مش موجود من عندك — استدعِ update_order وهو يرد.\n"
                 "- 'أيوه' أو 'تمام' مش موافقة على الإضافة إلا لو ذكر الصنف.\n"
                 "- لا تكرر التأكيد أكتر من مرة واحدة"
             ),
@@ -3128,13 +3366,41 @@ class Takeaway(BaseAgent):
             if _is_explicit_upsell_acceptance(user_text, pending_item):
                 logger.info("call=%s | takeaway upsell accepted | item=%s", ud.call_id, pending_item)
                 accepted_item = _accept_pending_upsell(ud, self.cfg) or "الإضافة"
+                special_request = _extract_special_request_after_upsell_reply(user_text, pending_item)
+                if special_request:
+                    ud.special_requests = special_request
+                    await self._say_and_stop(
+                        _special_request_followup_message("takeaway", ud, accepted_item=accepted_item)
+                    )
+                if _upsell_reply_negates_special(user_text):
+                    ud.special_requests = None
+                    await self._say_and_stop(
+                        _voice_safe_text(
+                            _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item}", _ask_name()),
+                            max_chars=180,
+                        )
+                    )
                 await self._say_and_stop(
-                    _voice_safe_text(f"{_ack()}، ضفت {accepted_item}. {_ask_special()}", max_chars=180)
+                    _voice_safe_text(
+                        _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item}", _ask_special()),
+                        max_chars=180,
+                    )
                 )
             if _is_positive_confirmation(user_text) or _is_explicit_upsell_rejection(user_text):
                 logger.info("call=%s | takeaway upsell skipped | item=%s | text=%r", ud.call_id, pending_item, user_text)
                 _clear_pending_upsell(ud, accepted=False)
-                await self._say_and_stop(f"{_ack()}. {_ask_special()}")
+                special_request = _extract_special_request_after_upsell_reply(user_text, pending_item)
+                if special_request:
+                    ud.special_requests = special_request
+                    await self._say_and_stop(_special_request_followup_message("takeaway", ud))
+                if _upsell_reply_negates_special(user_text):
+                    ud.special_requests = None
+                    await self._say_and_stop(
+                        _voice_safe_text(_join_user_phrases(_ack(), _ask_name()), max_chars=180)
+                    )
+                await self._say_and_stop(
+                    _voice_safe_text(_join_user_phrases(_ack(), _ask_special()), max_chars=180)
+                )
             logger.info("call=%s | takeaway pending upsell cleared for next turn | item=%s", ud.call_id, pending_item)
             _clear_pending_upsell(ud, accepted=False)
 
@@ -3172,17 +3438,39 @@ class Takeaway(BaseAgent):
             context.userdata.order_validated = False
             context.userdata.order_total = 0.0
             logger.warning("call=%s | takeaway order captured without menu validation", context.userdata.call_id)
-            return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {_ask_special()}")
+            return _voice_safe_text(
+                f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}.",
+                max_chars=180,
+            )
         normalized_items, unknown, total = _normalize_order_items(items, self.cfg.menu_items)
+        if unknown and not normalized_items:
+            # All items unknown
+            return _voice_safe_text(
+                f"معلش يا فندم، '{', '.join(unknown)}' مش موجود عندنا. {self.cfg.menu_text()} تحب تطلب إيه منهم؟",
+                max_chars=220,
+            )
         if unknown:
-            return _voice_safe_text(f"'{', '.join(unknown)}' مش في المنيو. المتاح: {self.cfg.menu_text()}", max_chars=170)
+            # Some valid, some not
+            context.userdata.order = normalized_items
+            context.userdata.order_validated = True
+            context.userdata.order_total = total
+            return _voice_safe_text(
+                f"سجلت {', '.join(normalized_items)} بس '{', '.join(unknown)}' مش في المنيو. تحب تبدلها بحاجة تانية؟",
+                max_chars=200,
+            )
         context.userdata.order = normalized_items
         context.userdata.order_validated = True
         context.userdata.order_total = total
         upsell = _get_upsell_suggestion(context.userdata, self.cfg)
         if upsell:
-            return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {upsell}")
-        return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {_ask_special()}")
+            return _voice_safe_text(
+                f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}. {upsell}",
+                max_chars=180,
+            )
+        return _voice_safe_text(
+            f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}.",
+            max_chars=180,
+        )
 
     @function_tool()
     async def update_special_requests(
@@ -3193,9 +3481,15 @@ class Takeaway(BaseAgent):
         _clear_pending_upsell(context.userdata)
         if _looks_empty_answer(requests):
             context.userdata.special_requests = None
-            return _voice_safe_text(f"{_ack()}. {_ask_name()}")
+            return _voice_safe_text(
+                _join_user_phrases("تمام يا فندم، مفيش طلب خاص", _ask_name()),
+                max_chars=180,
+            )
         context.userdata.special_requests = requests.strip()
-        return _voice_safe_text(f"{_ack()}، سجلت الطلب الخاص. {_ask_name()}")
+        return _voice_safe_text(
+            _join_user_phrases("تمام يا فندم، سجلت الملاحظة على الطلب", _ask_name()),
+            max_chars=180,
+        )
 
     @function_tool()
     async def confirm_order(self, context: RunContext_T) -> str:
@@ -3245,21 +3539,25 @@ class Delivery(BaseAgent):
         super().__init__(
             instructions=(
                 f"أنت موظف طلبات توصيل في '{cfg.name}'.\n"
-                f"{cfg.delivery_info_text()}{zones_info}\n"
-                f"أصناف: {cfg.menu_names()}\n\n"
+                f"{cfg.delivery_info_text()}{zones_info}\n\n"
                 "اتكلم زي موظف مطعم مصري حقيقي — عفوي وودود.\n"
                 "نوّع في كلامك، متقولش نفس الجمل كل مرة.\n"
                 "الترتيب العام:\n"
-                "١. خُد الطلب واستدعِ update_order.\n"
-                "٢. اسأل لو فيه طلب خاص، ولو قال لأ كمّل.\n"
-                "٣. خُد العنوان، وبعده العلامة المميزة لو محتاج توضيح.\n"
-                "٤. خُد الاسم ورقم الموبايل.\n"
-                "٥. لخّص الطلب مرة واحدة، ولو وافق استدعِ confirm_delivery.\n"
+                "١. لما العميل يقول طلبه استدعِ update_order فوراً — هو اللي بيتحقق من المنيو.\n"
+                "٢. لو update_order رجّع إن الصنف مش في المنيو، بلّغ العميل ومتسجلوش.\n"
+                "٣. اقترح إضافة مرة واحدة بس (مشروب أو طبق جانبي).\n"
+                "٤. اسأل لو فيه طلب خاص في التحضير، ولو قال لأ كمّل.\n"
+                "٥. خُد العنوان → استدعِ update_delivery_address فوراً حتى لو المنطقة مش واضحة.\n"
+                "٦. العلامة المميزة لو العنوان مش واضح كفاية.\n"
+                "٧. خُد الاسم ورقم الموبايل.\n"
+                "٨. لخّص الطلب والإجمالي مرة واحدة، ولو وافق استدعِ confirm_delivery.\n"
                 "لو العميل قال معلومة من خطوة جاية سجّلها وكمّل عادي.\n\n"
-                "- لو سأل عن سعر → get_menu\n"
+                "قواعد صارمة:\n"
+                "- لازم تستدعي update_order قبل ما تأكد أي صنف — أنت مش عارف المنيو.\n"
+                "- أول ما العميل يقول عنوانه استدعِ update_delivery_address على طول.\n"
+                "- لو سأل عن المنيو أو سعر → get_menu\n"
                 "- لو عنده شكوى → to_complaint\n"
-                "- متضيفش أصناف من عندك.\n"
-                "- اقتراح الإضافة مرة واحدة بس وبشكل عفوي.\n"
+                "- متقولش للعميل إن صنف موجود أو مش موجود من عندك — استدعِ update_order وهو يرد.\n"
                 "- 'أيوه' أو 'تمام' مش موافقة على الإضافة إلا لو ذكر الصنف."
             ),
             tools=[
@@ -3279,13 +3577,41 @@ class Delivery(BaseAgent):
             if _is_explicit_upsell_acceptance(user_text, pending_item):
                 logger.info("call=%s | delivery upsell accepted | item=%s", ud.call_id, pending_item)
                 accepted_item = _accept_pending_upsell(ud, self.cfg) or "الإضافة"
+                special_request = _extract_special_request_after_upsell_reply(user_text, pending_item)
+                if special_request:
+                    ud.special_requests = special_request
+                    await self._say_and_stop(
+                        _special_request_followup_message("delivery", ud, accepted_item=accepted_item)
+                    )
+                if _upsell_reply_negates_special(user_text):
+                    ud.special_requests = None
+                    await self._say_and_stop(
+                        _voice_safe_text(
+                            _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item}", _ask_address()),
+                            max_chars=180,
+                        )
+                    )
                 await self._say_and_stop(
-                    _voice_safe_text(f"{_ack()}، ضفت {accepted_item}. {_ask_special()}", max_chars=180)
+                    _voice_safe_text(
+                        _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item}", _ask_special()),
+                        max_chars=180,
+                    )
                 )
             if _is_positive_confirmation(user_text) or _is_explicit_upsell_rejection(user_text):
                 logger.info("call=%s | delivery upsell skipped | item=%s | text=%r", ud.call_id, pending_item, user_text)
                 _clear_pending_upsell(ud, accepted=False)
-                await self._say_and_stop(f"{_ack()}. {_ask_special()}")
+                special_request = _extract_special_request_after_upsell_reply(user_text, pending_item)
+                if special_request:
+                    ud.special_requests = special_request
+                    await self._say_and_stop(_special_request_followup_message("delivery", ud))
+                if _upsell_reply_negates_special(user_text):
+                    ud.special_requests = None
+                    await self._say_and_stop(
+                        _voice_safe_text(_join_user_phrases(_ack(), _ask_address()), max_chars=180)
+                    )
+                await self._say_and_stop(
+                    _voice_safe_text(_join_user_phrases(_ack(), _ask_special()), max_chars=180)
+                )
             logger.info("call=%s | delivery pending upsell cleared for next turn | item=%s", ud.call_id, pending_item)
             _clear_pending_upsell(ud, accepted=False)
 
@@ -3323,10 +3649,24 @@ class Delivery(BaseAgent):
             context.userdata.order_validated = False
             context.userdata.order_total = 0.0
             logger.warning("call=%s | delivery order captured without menu validation", context.userdata.call_id)
-            return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {_ask_special()}")
+            return _voice_safe_text(
+                f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}.",
+                max_chars=180,
+            )
         normalized_items, unknown, total = _normalize_order_items(items, self.cfg.menu_items)
+        if unknown and not normalized_items:
+            return _voice_safe_text(
+                f"معلش يا فندم، '{', '.join(unknown)}' مش موجود عندنا. {self.cfg.menu_text()} تحب تطلب إيه منهم؟",
+                max_chars=220,
+            )
         if unknown:
-            return _voice_safe_text(f"'{', '.join(unknown)}' مش في المنيو. المتاح: {self.cfg.menu_text()}", max_chars=170)
+            context.userdata.order = normalized_items
+            context.userdata.order_validated = True
+            context.userdata.order_total = total
+            return _voice_safe_text(
+                f"سجلت {', '.join(normalized_items)} بس '{', '.join(unknown)}' مش في المنيو. تحب تبدلها بحاجة تانية؟",
+                max_chars=200,
+            )
 
         if self.cfg.min_order > 0:
             if total < self.cfg.min_order:
@@ -3341,8 +3681,14 @@ class Delivery(BaseAgent):
         context.userdata.order_total = total
         upsell = _get_upsell_suggestion(context.userdata, self.cfg)
         if upsell:
-            return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {upsell}")
-        return _voice_safe_text(f"{_ack()}، {_ack_got(', '.join(normalized_items))}. {_ask_special()}")
+            return _voice_safe_text(
+                f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}. {upsell}",
+                max_chars=180,
+            )
+        return _voice_safe_text(
+            f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}.",
+            max_chars=180,
+        )
 
     @function_tool()
     async def update_special_requests(
@@ -3354,18 +3700,27 @@ class Delivery(BaseAgent):
         _clear_pending_upsell(context.userdata)
         if _looks_empty_answer(requests):
             context.userdata.special_requests = None
-            return _voice_safe_text(f"{_ack()}. {_ask_address()}")
+            return _voice_safe_text(
+                _join_user_phrases("تمام يا فندم، مفيش طلب خاص", _ask_address()),
+                max_chars=180,
+            )
         context.userdata.special_requests = requests.strip()
-        return _voice_safe_text(f"{_ack()}، سجلت الطلب الخاص. {_ask_address()}")
+        return _voice_safe_text(
+            _join_user_phrases("تمام يا فندم، سجلت الملاحظة على الطلب", _ask_address()),
+            max_chars=180,
+        )
 
     @function_tool()
     async def update_delivery_address(
         self,
         address: Annotated[str, Field(description="العنوان كامل: الشارع والرقم والمنطقة")],
-        zone: Annotated[str, Field(description="المنطقة أو الحي")],
+        zone: Annotated[str, Field(description="المنطقة أو الحي — لو مش واضحة كرر اسم المنطقة من العنوان")],
         context: RunContext_T,
     ) -> str:
-        """يُستدعى لما العميل يقول عنوانه. أكد العنوان قبل الاستدعاء."""
+        """يُستدعى لما العميل يقول عنوانه — استدعيه فوراً حتى لو المنطقة مش واضحة."""
+        # لو المنطقة مش متبعتة، حاول تستخرجها من العنوان
+        if not zone or not zone.strip():
+            zone = _extract_zone_from_address(address, self.cfg.delivery_zones)
         # تحقق من منطقة التوصيل — مطابقة عربية مرنة
         if self.cfg.delivery_zones:
             zone_norm = _normalize_ar(zone)
@@ -3377,7 +3732,7 @@ class Delivery(BaseAgent):
                 return _voice_safe_text(
                     f"للأسف مش بنوصل {zone} دلوقتي. "
                     f"المتاح {self.cfg.delivery_zones_text()}. "
-                    "تحب تيكاواي بدل كده؟"
+                    "تحب تيجي تاخده من عندنا؟"
                 )
 
         context.userdata.delivery_address = address.strip()
@@ -3387,9 +3742,21 @@ class Delivery(BaseAgent):
                     context.userdata.call_id, address, zone)
         if _address_seems_specific(address):
             context.userdata.landmark_asked = True
-            return _voice_safe_text(f"{_ack()}، {_ack_got('العنوان')}. {_ask_name()}", max_chars=180)
+            return _voice_safe_text(
+                _join_user_phrases(
+                    f"تمام يا فندم، سجلت العنوان: {context.userdata.delivery_address}",
+                    _ask_name(),
+                ),
+                max_chars=220,
+            )
         context.userdata.landmark_asked = False
-        return _voice_safe_text(f"{_ack()}، {_ack_got('العنوان')}. في علامة مميزة قريبة منك؟", max_chars=180)
+        return _voice_safe_text(
+            _join_user_phrases(
+                f"تمام يا فندم، سجلت العنوان: {context.userdata.delivery_address}",
+                "في علامة مميزة قريبة منك؟",
+            ),
+            max_chars=220,
+        )
 
     @function_tool()
     async def update_delivery_landmark(
@@ -3401,7 +3768,10 @@ class Delivery(BaseAgent):
         context.userdata.landmark_asked = True
         if _looks_empty_answer(landmark):
             context.userdata.delivery_landmark = None
-            return _voice_safe_text(f"{_ack()}. {_ask_name()}")
+            return _voice_safe_text(
+                _join_user_phrases("تمام يا فندم، مفيش علامة مميزة", _ask_name()),
+                max_chars=180,
+            )
         explicit_name_reply = re.match(r"^\s*(?:انا|أنا|اسمي|اسمى|الاسم|اسم|معاك|معاكي)\b", landmark, flags=re.IGNORECASE)
         if explicit_name_reply and not context.userdata.customer_name:
             name_candidate = _extract_name_candidate(landmark)
@@ -3410,7 +3780,10 @@ class Delivery(BaseAgent):
                 context.userdata.customer_name = name_candidate
                 return _voice_safe_text(f"{_ack()} يا {name_candidate}. {_ask_phone()}", max_chars=180)
         context.userdata.delivery_landmark = landmark.strip()
-        return _voice_safe_text(f"{_ack()}، سجلت العلامة. {_ask_name()}", max_chars=180)
+        return _voice_safe_text(
+            _join_user_phrases("تمام يا فندم، سجلت العلامة المميزة", _ask_name()),
+            max_chars=180,
+        )
 
     @function_tool()
     async def to_complaint(self, context: RunContext_T) -> tuple[Agent, str]:
@@ -3563,12 +3936,24 @@ class Reservation(BaseAgent):
         if _looks_empty_answer(notes):
             context.userdata.reservation_notes = None
             if len(self.cfg.branches) > 1 and not context.userdata.selected_branch:
-                return _voice_safe_text(f"{_ack()}. أي فرع تفضل؟ {self.cfg.branch_names()}")
-            return _voice_safe_text(f"{_ack()}. {_ask_name()}")
+                return _voice_safe_text(
+                    f"تمام يا فندم، مفيش ملاحظات. أي فرع تفضل؟ {self.cfg.branch_names()}",
+                    max_chars=180,
+                )
+            return _voice_safe_text(
+                _join_user_phrases("تمام يا فندم، مفيش ملاحظات", _ask_name()),
+                max_chars=180,
+            )
         context.userdata.reservation_notes = notes.strip()
         if len(self.cfg.branches) > 1 and not context.userdata.selected_branch:
-            return _voice_safe_text(f"{_ack()}، سجلت الملاحظة. أي فرع تفضل؟ {self.cfg.branch_names()}", max_chars=180)
-        return _voice_safe_text(f"{_ack()}، سجلت الملاحظة. {_ask_name()}")
+            return _voice_safe_text(
+                f"تمام يا فندم، سجلت الملاحظة. أي فرع تفضل؟ {self.cfg.branch_names()}",
+                max_chars=180,
+            )
+        return _voice_safe_text(
+            _join_user_phrases("تمام يا فندم، سجلت الملاحظة", _ask_name()),
+            max_chars=180,
+        )
 
     @function_tool()
     async def confirm_reservation(self, context: RunContext_T) -> str:
@@ -3909,9 +4294,11 @@ async def entrypoint(ctx: JobContext):
                     "call=%s | inactivity reprompt | idle_for=%.1fs | count=%d",
                     call_id, idle_for, inactivity_prompt_count,
                 )
+                flow_name = session.current_agent.__class__.__name__.lower() if session.current_agent else ""
+                reprompt_text = _inactivity_reprompt(userdata, flow_name)
                 with contextlib.suppress(Exception):
                     await session.say(
-                        "لسه معايا يا فندم؟",
+                        reprompt_text,
                         allow_interruptions=True,
                         add_to_chat_ctx=False,
                     )
