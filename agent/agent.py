@@ -14,31 +14,63 @@ import atexit
 import random as _random
 import re
 import sys
+import threading
 import time
-import unicodedata
-import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-import yaml
 from dotenv import load_dotenv
-from pydantic import Field
 
-from livekit.agents import AgentServer, JobContext, StopResponse, cli, llm
-from livekit.agents.llm import function_tool
-from livekit.agents.metrics import EOUMetrics, LLMMetrics, STTMetrics, TTSMetrics
-from livekit.agents.voice import Agent, AgentSession, RunContext
-from livekit.agents import inference
+from livekit.agents import StopResponse, cli, llm
+from livekit.agents.voice import AgentSession, RunContext
 from livekit.plugins import google, openai, silero
 try:
     from livekit.plugins import soniox
 except ImportError:
     soniox = None
+
+from backend.config import CachedConfigEntry, RestaurantConfig
+from nlp.arabic import (
+    AR_DIGITS as _AR_DIGITS,
+    contains_normalized_phrase as _contains_normalized_phrase,
+    normalize_ar as _normalize_ar,
+    normalized_phrase_present as _normalized_phrase_present,
+)
+from nlp.name_extract import (
+    extract_name_candidate as _extract_name_candidate_impl,
+    is_likely_non_name_response as _is_likely_non_name_response_impl,
+)
+from nlp.phone_extract import (
+    is_phone_like_text as _is_phone_like_text,
+    is_plausible_partial_phone_digits as _is_plausible_partial_phone_digits,
+    local_phone_digits as _local_phone_digits,
+    merge_phone_digits as _merge_phone_digits,
+    phone_digits_only as _phone_digits_only,
+    validate_phone,
+)
+from state.user_data import CallWriteHealth, UserData
+from state.worker_context import (
+    BackendCircuitState,
+    RuntimeHealth,
+    WorkerContext,
+    build_worker_context,
+)
+import backend.client as _backend_client
+from backend.client import (
+    cleanup_http_client as _cleanup_http_client_impl,
+    exc_log_fields as _exc_log_fields,
+    get_http_client as _get_http_client_base,
+    response_snippet as _response_snippet,
+    retry_delay as _retry_delay,
+    should_retry_backend_error as _should_retry_backend_error,
+)
+from utils.money import _int_to_ar, money2ar, num2ar, phone2ar
+from utils.voice import _voice_safe_text
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -49,6 +81,28 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger("restaurant.agent")
+_WORKER_HEALTH_SNAPSHOT_LOCK = threading.Lock()
+
+# ── Structured telemetry ─────────────────────────────────────────────────────
+# Emits JSON events for key call lifecycle moments.
+# Separate logger so it can be routed to a different handler (file, stdout, etc.)
+_telemetry_logger = logging.getLogger("restaurant.telemetry")
+_TELEMETRY_ENABLED = os.getenv("TELEMETRY_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+
+def _emit_event(event: str, *, call_id: str = "", flow: str = "", **kwargs: Any) -> None:
+    """Emit a structured telemetry event as JSON."""
+    if not _TELEMETRY_ENABLED:
+        return
+    payload = {
+        "event": event,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "call_id": call_id,
+    }
+    if flow:
+        payload["flow"] = flow
+    payload.update(kwargs)
+    _telemetry_logger.info(_json.dumps(payload, ensure_ascii=False))
 try:
     CAIRO_TZ = ZoneInfo("Africa/Cairo")
 except Exception:
@@ -135,6 +189,11 @@ BACKEND_RETRY_BASE_SECONDS   = _get_env_float("BACKEND_RETRY_BASE_SECONDS", 0.2,
 CONFIG_FETCH_RETRIES         = _get_env_int("CONFIG_FETCH_RETRIES", 2, min_value=1)
 CONFIG_FETCH_BACKOFF_SECONDS = _get_env_float("CONFIG_FETCH_BACKOFF_SECONDS", 0.15, min_value=0.01)
 CONFIG_FETCH_TOTAL_BUDGET_SECONDS = _get_env_float("CONFIG_FETCH_TOTAL_BUDGET_SECONDS", 0.6, min_value=0.1)
+CONFIG_REFRESH_INTERVAL_SECONDS  = _get_env_float("CONFIG_REFRESH_INTERVAL_SECONDS", 300.0, min_value=30.0)
+MAX_CONCURRENT_SESSIONS          = _get_env_int("MAX_CONCURRENT_SESSIONS", 100, min_value=1)
+MAX_TURNS_PER_SESSION            = _get_env_int("MAX_TURNS_PER_SESSION", 50, min_value=10)
+TURN_CAP_WARNING_TURNS           = _get_env_int("TURN_CAP_WARNING_TURNS", 5, min_value=1)
+TURN_CAP_GRACE_TURNS             = _get_env_int("TURN_CAP_GRACE_TURNS", 3, min_value=0)
 PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 2, min_value=2)
 TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 10, min_value=8)
 MAX_TOOL_STEPS               = _get_env_int("MAX_TOOL_STEPS", 10, min_value=6)
@@ -147,8 +206,6 @@ NO_SPEECH_PROMPT_SECONDS          = _get_env_float("NO_SPEECH_PROMPT_SECONDS", 1
 NO_SPEECH_CLOSE_SECONDS           = _get_env_float("NO_SPEECH_CLOSE_SECONDS", 28.0, min_value=2.0)
 NO_SPEECH_REPROMPT_LIMIT          = _get_env_int("NO_SPEECH_REPROMPT_LIMIT", 2, min_value=1)
 NO_SPEECH_REPROMPT_GAP_SECONDS    = _get_env_float("NO_SPEECH_REPROMPT_GAP_SECONDS", 8.0, min_value=0.5)
-VOICE_MENU_LIMIT             = _get_env_int("VOICE_MENU_LIMIT", 10, min_value=4)
-MENU_PROMPT_LIMIT            = _get_env_int("MENU_PROMPT_LIMIT", 20, min_value=6)
 SESSION_TTS_MODEL            = os.getenv("SESSION_TTS_MODEL", "xai/tts-1")
 SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "ara")
 SESSION_TTS_LANGUAGE         = os.getenv("SESSION_TTS_LANGUAGE", "ar-EG")
@@ -169,10 +226,30 @@ CONFIG_SHARED_CACHE_PATH     = os.getenv("CONFIG_SHARED_CACHE_PATH", f".runtime/
 BACKEND_WRITE_QUEUE_ENABLED  = _get_env_bool("BACKEND_WRITE_QUEUE_ENABLED", True)
 BACKEND_WRITE_QUEUE_PATH     = os.getenv("BACKEND_WRITE_QUEUE_PATH", f".runtime/{APP_ENV}/backend_write_queue.jsonl")
 BACKEND_WRITE_QUEUE_MAX_ITEMS = _get_env_int("BACKEND_WRITE_QUEUE_MAX_ITEMS", 500, min_value=1)
+BACKEND_WRITE_QUEUE_RECOVERY_MAX_LINES = _get_env_int("BACKEND_WRITE_QUEUE_RECOVERY_MAX_LINES", 500, min_value=1)
 BACKEND_WRITE_QUEUE_RETRY_INTERVAL_SECONDS = _get_env_float("BACKEND_WRITE_QUEUE_RETRY_INTERVAL_SECONDS", 5.0, min_value=0.5)
 BACKEND_WRITE_CIRCUIT_FAILURE_THRESHOLD = _get_env_int("BACKEND_WRITE_CIRCUIT_FAILURE_THRESHOLD", 3, min_value=1)
 BACKEND_WRITE_CIRCUIT_OPEN_SECONDS = _get_env_float("BACKEND_WRITE_CIRCUIT_OPEN_SECONDS", 8.0, min_value=0.5)
+BACKEND_POST_TIMEOUT_SECONDS = _get_env_float("BACKEND_POST_TIMEOUT_SECONDS", 3.0, min_value=0.05)
 AGENT_IDLE_PROCESSES         = _get_env_int("AGENT_IDLE_PROCESSES", 2 if APP_ENV == "prod" else 1, min_value=0)
+AGENT_HEALTH_SNAPSHOT_DIR    = os.getenv("AGENT_HEALTH_SNAPSHOT_DIR", f".runtime/{APP_ENV}/worker_health")
+AGENT_HEALTH_SNAPSHOT_STALE_SECONDS = _get_env_float("AGENT_HEALTH_SNAPSHOT_STALE_SECONDS", 90.0, min_value=5.0)
+
+_WORKER_CONTEXT = build_worker_context(BACKEND_WRITE_QUEUE_MAX_ITEMS)
+
+
+def worker_context() -> WorkerContext:
+    return _WORKER_CONTEXT
+
+
+def _setup_worker_process(proc: Any) -> None:
+    global _WORKER_CONTEXT
+    # Called once per worker process by LiveKit AgentServer.
+    # Replaces the module-level default context with a process-specific one.
+    _WORKER_CONTEXT = build_worker_context(BACKEND_WRITE_QUEUE_MAX_ITEMS)
+    proc.userdata["worker_context"] = _WORKER_CONTEXT
+    logger.info("worker process setup | pid=%d | context_id=%d", os.getpid(), id(_WORKER_CONTEXT))
+    _write_worker_health_snapshot_sync(reason="worker_setup")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TTS/STT/LLM — session-level فقط، مفيش per-agent overrides
@@ -258,87 +335,21 @@ SESSION_VAD = silero.VAD.load(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared httpx client — reuse TCP/TLS connections instead of per-request
+# Shared httpx client — delegates to backend.client singleton
 # ─────────────────────────────────────────────────────────────────────────────
-_http_client: httpx.AsyncClient | None = None
-_http_client_lock = asyncio.Lock()
-
 
 async def _get_http_client() -> httpx.AsyncClient:
-    global _http_client
-    if _http_client is not None and not _http_client.is_closed:
-        return _http_client
-    async with _http_client_lock:
-        if _http_client is not None and not _http_client.is_closed:
-            return _http_client
-        _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                timeout=HTTP_TIMEOUT_SECONDS,
-                connect=HTTP_CONNECT_TIMEOUT_SECONDS,
-                read=HTTP_READ_TIMEOUT_SECONDS,
-                write=HTTP_WRITE_TIMEOUT_SECONDS,
-            ),
-            limits=httpx.Limits(
-                max_connections=20,
-                max_keepalive_connections=10,
-                keepalive_expiry=30,
-            ),
-            headers={
-                "X-API-Key": BACKEND_APIKEY,
-                "User-Agent": "restaurant-voice-agent/1.0",
-            },
-        )
-        return _http_client
-
-
-def _retry_delay(attempt: int, base_seconds: float) -> float:
-    return max(0.05, base_seconds * (2 ** attempt))
-
-
-def _response_snippet(response: httpx.Response | None, *, limit: int = 300) -> str:
-    if response is None:
-        return ""
-    try:
-        body = response.text or ""
-    except Exception:
-        return ""
-    body = re.sub(r"\s+", " ", body).strip()
-    return body[:limit]
-
-
-def _exc_log_fields(exc: Exception) -> str:
-    parts = [f"type={exc.__class__.__name__}", f"repr={exc!r}"]
-    if isinstance(exc, httpx.HTTPStatusError):
-        req = exc.request
-        res = exc.response
-        parts.extend(
-            [
-                f"method={req.method}",
-                f"url={req.url}",
-                f"status_code={res.status_code}",
-            ]
-        )
-        snippet = _response_snippet(res)
-        if snippet:
-            parts.append(f"body={snippet!r}")
-    elif isinstance(exc, httpx.RequestError):
-        req = exc.request
-        parts.extend([f"method={req.method}", f"url={req.url}"])
-    return " | ".join(parts)
-
-
-def _voice_safe_text(text: str, max_sentences: int = 2, max_chars: int = 120) -> str:
-    """يقصّر النصوص الطويلة قبل الـ TTS من غير ما يغيّر المعنى الأساسي."""
-    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
-    if not cleaned:
-        return ""
-
-    sentences = [part.strip(" ،") for part in re.split(r"[.!؟\n]+", cleaned) if part.strip(" ،")]
-    if sentences:
-        cleaned = "، ".join(sentences[:max_sentences])
-    if len(cleaned) > max_chars:
-        cleaned = cleaned[: max_chars - 1].rstrip(" ،,.") + "…"
-    return cleaned
+    # Tests inject mock clients via agent._http_client — check that first
+    test_client = _backend_client._http_client
+    if test_client is not None and not test_client.is_closed:
+        return test_client
+    return await _get_http_client_base(
+        timeout=HTTP_TIMEOUT_SECONDS,
+        connect_timeout=HTTP_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=HTTP_READ_TIMEOUT_SECONDS,
+        write_timeout=HTTP_WRITE_TIMEOUT_SECONDS,
+        api_key=BACKEND_APIKEY,
+    )
 
 
 def _backend_failure_user_message(ud: "UserData") -> str:
@@ -398,117 +409,6 @@ def _delivery_unavailable_user_message(cfg: "RestaurantConfig") -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
-DAYS_AR = {
-    "saturday": "السبت", "sunday": "الأحد", "monday": "الاتنين",
-    "tuesday": "التلات", "wednesday": "الأربع",
-    "thursday": "الخميس", "friday": "الجمعة",
-}
-
-# ─── تحويل الأرقام لكلمات مصري ─────────────────────────────────────────────
-_ONES = ["", "واحد", "اتنين", "تلاتة", "أربعة", "خمسة", "ستة", "سبعة", "تمانية", "تسعة"]
-_TEENS = ["عشرة", "حداشر", "اتناشر", "تلاتاشر", "أربعتاشر", "خمستاشر",
-          "ستاشر", "سبعتاشر", "تمنتاشر", "تسعتاشر"]
-_TENS = ["", "عشرة", "عشرين", "تلاتين", "أربعين", "خمسين", "ستين", "سبعين", "تمانين", "تسعين"]
-_HUNDREDS = ["", "مية", "ميتين", "تلتمية", "ربعمية", "خمسمية",
-             "ستمية", "سبعمية", "تمنمية", "تسعمية"]
-
-
-def _int_to_ar(n: int) -> str:
-    if n == 0:
-        return "صفر"
-    if n < 0:
-        return f"سالب {_int_to_ar(-n)}"
-
-    parts = []
-    if n >= 1000:
-        thousands = n // 1000
-        if thousands == 1:
-            parts.append("ألف")
-        elif thousands == 2:
-            parts.append("ألفين")
-        elif 3 <= thousands <= 10:
-            parts.append(f"{_ONES[thousands]} تآلاف")
-        else:
-            parts.append(f"{_int_to_ar(thousands)} ألف")
-        n %= 1000
-
-    if n >= 100:
-        parts.append(_HUNDREDS[n // 100])
-        n %= 100
-
-    if n >= 20:
-        ones = n % 10
-        tens = n // 10
-        if ones:
-            parts.append(f"{_ONES[ones]} و{_TENS[tens]}")
-        else:
-            parts.append(_TENS[tens])
-    elif n >= 10:
-        parts.append(_TEENS[n - 10])
-    elif n >= 1:
-        parts.append(_ONES[n])
-
-    return " و".join(parts)
-
-
-def num2ar(n: int | float) -> str:
-    """يحوّل أرقام صحيحة وكسور بسيطة لكلمات مصرية بدون فقدان الجزء العشري."""
-    value = float(n)
-    if value.is_integer():
-        return _int_to_ar(int(value))
-
-    sign = "سالب " if value < 0 else ""
-    value = abs(value)
-    whole = int(value)
-    fractional = round(value - whole, 2)
-
-    if fractional == 0:
-        return f"{sign}{_int_to_ar(whole)}".strip()
-
-    if whole == 0:
-        if abs(fractional - 0.5) < 0.001:
-            return f"{sign}نص".strip()
-        if abs(fractional - 0.25) < 0.001:
-            return f"{sign}ربع".strip()
-
-    base = _int_to_ar(whole) if whole else ""
-    if abs(fractional - 0.5) < 0.001:
-        return f"{sign}{base} ونص".strip()
-    if abs(fractional - 0.25) < 0.001:
-        return f"{sign}{base} وربع".strip()
-
-    fraction_hundredths = int(round(fractional * 100))
-    fraction_text = _int_to_ar(fraction_hundredths)
-    return f"{sign}{base} فاصلة {fraction_text}".strip()
-
-
-def money2ar(value: float) -> str:
-    """تمثيل أوضح للأسعار والرسوم مع الحفاظ على القيم العشرية المهمة."""
-    return num2ar(float(value))
-
-
-_DIGIT_AR = ["زيرو", "واحد", "اتنين", "تلاتة", "أربعة",
-             "خمسة", "ستة", "سبعة", "تمانية", "تسعة"]
-_PHONE_PREFIX_SPOKEN = {
-    "010": "زيرو عشرة",
-    "011": "زيرو حداشر",
-    "012": "زيرو اتناشر",
-    "015": "زيرو خمستاشر",
-}
-
-def phone2ar(phone: str) -> str:
-    """ينطق رقم الموبايل بصيغة أقرب للمصريين."""
-    digits = re.sub(r"\D", "", phone)
-    if digits.startswith("20") and len(digits) == 12:
-        digits = "0" + digits[2:]
-    parts: list[str] = []
-    if len(digits) >= 3 and digits[:3] in _PHONE_PREFIX_SPOKEN:
-        parts.append(_PHONE_PREFIX_SPOKEN[digits[:3]])
-        digits = digits[3:]
-    parts.extend(_DIGIT_AR[int(d)] for d in digits)
-    return " ".join(parts)
-
-
 def spoken_phone(phone: str | None) -> str:
     valid = validate_phone(phone or "")
     return phone2ar(valid) if valid else "رقم المطعم"
@@ -517,131 +417,10 @@ def spoken_phone(phone: str | None) -> str:
 # RestaurantConfig
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
-class RestaurantConfig:
-    name:             str        = ""
-    phone:            str        = ""
-    address:          str        = ""
-    branches:         list[dict] = field(default_factory=list)
-    hours:            dict       = field(default_factory=dict)
-    menu_items:       list[dict] = field(default_factory=list)
-    upsell_rules:     list[dict] = field(default_factory=list)
-    is_open:          bool       = True
-    closed_reason:    str        = ""
-    degraded_mode:    bool       = False
-    config_source:    Literal["backend", "cache_fresh", "cache_stale", "degraded_fallback"] = "backend"
-
-    # تيكاواي
-    wait_minutes:     int        = 20
-
-    # حجز
-    min_guests:       int        = 1
-    max_guests:       int        = 20
-
-    # توصيل
-    delivery_enabled: bool       = False
-    delivery_minutes: int        = 45        # وقت التوصيل المتوقع
-    delivery_fee:     float      = 0.0       # رسوم التوصيل
-    min_order:        float      = 0.0       # أقل قيمة للطلب مع توصيل
-    delivery_zones:   list[str]  = field(default_factory=list)  # مناطق التوصيل المتاحة
-
-    # ── helpers ─────────────────────────────────────────────────────────────
-
-    def hours_text(self) -> str:
-        if self.degraded_mode and not self.hours:
-            return "مواعيد المطعم غير متاحة مؤقتًا"
-        if not self.hours:
-            return "المواعيد غير محددة"
-        parts = []
-        for day, times in self.hours.items():
-            label = DAYS_AR.get(day, day)
-            if times.get("closed"):
-                parts.append(f"{label}: مغلق")
-            else:
-                parts.append(f"{label}: {times.get('open','?')} - {times.get('close','?')}")
-        return " | ".join(parts)
-
-    def branch_names(self) -> str:
-        return " / ".join(b.get("name", "") for b in self.branches)
-
-    def delivery_zones_text(self) -> str:
-        if not self.delivery_zones:
-            return "جميع المناطق"
-        return "، ".join(self.delivery_zones)
-
-    def delivery_info_text(self) -> str:
-        if self.degraded_mode and not self.delivery_enabled:
-            return "بيانات التوصيل غير متاحة مؤقتًا"
-        parts = [f"وقت التوصيل: {num2ar(self.delivery_minutes)} دقيقة"]
-        if self.delivery_fee > 0:
-            parts.append(f"رسوم التوصيل: {money2ar(self.delivery_fee)} جنيه")
-        if self.min_order > 0:
-            parts.append(f"أقل طلب للتوصيل: {money2ar(self.min_order)} جنيه")
-        return " | ".join(parts)
-
-
-    def menu_text(self) -> str:
-        available = [i for i in self.menu_items if i.get("available", True)]
-        if not available:
-            return "المنيو مش متاح مؤقتًا دلوقتي" if self.degraded_mode else "المنيو مش متاح دلوقتي"
-        max_shown = min(3, VOICE_MENU_LIMIT, len(available))
-        extra_suffix = "، ولو عايز حاجة تانية قولهولي." if len(available) > max_shown else "."
-
-        for shown_count in range(max_shown, 0, -1):
-            shown = available[:shown_count]
-            text = "المتاح دلوقتي: " + "، ".join(
-                f"{i['name']} بـ{money2ar(i['price'])}" for i in shown
-            )
-            text += extra_suffix
-            if len(text) <= 120:
-                return text
-
-        return "المتاح دلوقتي: كوشري صغير، وكوشري وسط، وكوشري كبير. ولو عايز حاجة تانية قولهولي."
-
-    def menu_names(self) -> str:
-        available = [i["name"] for i in self.menu_items if i.get("available", True)]
-        if not available:
-            return "المنيو مش متاح مؤقتًا" if self.degraded_mode else "المنيو مش متاح"
-        shown = available[:MENU_PROMPT_LIMIT]
-        text = "، ".join(shown)
-        if len(available) > len(shown):
-            text += f"، وغيرهم {num2ar(len(available) - len(shown))} أصناف"
-        return text
-
-
-@dataclass
-class CachedConfigEntry:
-    fetched_at_monotonic: float
-    config: RestaurantConfig
-    source: str = "backend"
-
-
-@dataclass
 class ParsedReservationTime:
     raw_text: str
     scheduled_at: datetime
     normalized_text: str
-
-
-@dataclass
-class RuntimeHealth:
-    config_available: bool = False
-    last_config_error: str = ""
-
-
-@dataclass
-class CallWriteHealth:
-    write_available: bool = True
-    last_write_error: str = ""
-    last_write_failure_kind: str = ""
-    last_write_status_code: int | None = None
-    write_blocked_until_monotonic: float = 0.0
-
-
-@dataclass
-class BackendCircuitState:
-    consecutive_failures: int = 0
-    open_until_monotonic: float = 0.0
-    last_error: str = ""
 
 def _clone_config_with_source(cfg: RestaurantConfig, source: Literal["backend", "cache_fresh", "cache_stale", "degraded_fallback"]) -> RestaurantConfig:
     return replace(cfg, config_source=source)
@@ -678,8 +457,236 @@ def _runtime_file_path(raw_path: str) -> Path:
     return path
 
 
-def _ensure_parent_dir(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+async def _ensure_parent_dir(path: Path) -> None:
+    await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+
+
+def _worker_health_dir() -> Path:
+    return _runtime_file_path(AGENT_HEALTH_SNAPSHOT_DIR)
+
+
+def _worker_health_file_path(pid: int | None = None) -> Path:
+    return _worker_health_dir() / f"{pid or os.getpid()}.json"
+
+
+def _build_worker_health_snapshot(*, reason: str = "") -> dict[str, Any]:
+    ctx = worker_context()
+    now_monotonic = time.monotonic()
+    queue = ctx.backend_write_queue
+    circuits_open = sorted(
+        endpoint
+        for endpoint, state in ctx.backend_circuits.items()
+        if state.open_until_monotonic > now_monotonic
+    )
+    return {
+        "pid": os.getpid(),
+        "updated_at_epoch": time.time(),
+        "reason": reason,
+        "active_sessions": ctx.active_sessions,
+        "max_concurrent_sessions": ctx.max_concurrent_sessions,
+        "config_available": ctx.runtime_health.config_available,
+        "last_config_error": ctx.runtime_health.last_config_error,
+        "circuits_open": circuits_open,
+        "write_queue_size": queue.qsize(),
+        "write_queue_max_items": getattr(queue, "maxsize", BACKEND_WRITE_QUEUE_MAX_ITEMS),
+        "queue_worker_running": bool(ctx.backend_queue_worker and not ctx.backend_queue_worker.done()),
+        "config_refresh_worker_running": bool(ctx.config_refresh_worker and not ctx.config_refresh_worker.done()),
+        "turn_count_sessions": len(ctx.turn_counts),
+    }
+
+
+def _write_worker_health_snapshot_sync(*, reason: str = "") -> None:
+    path = _worker_health_file_path()
+    payload = _json.dumps(_build_worker_health_snapshot(reason=reason), ensure_ascii=False)
+    tmp_path = path.with_suffix(path.suffix + f".{threading.get_ident()}.tmp")
+    with _WORKER_HEALTH_SNAPSHOT_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(payload, encoding="utf-8")
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError as exc:
+                if attempt == 4:
+                    logger.warning(
+                        "worker health snapshot replace failed | path=%s | reason=%s | %s",
+                        path,
+                        reason,
+                        _exc_log_fields(exc),
+                    )
+                    with contextlib.suppress(FileNotFoundError):
+                        tmp_path.unlink()
+                    return
+                time.sleep(0.02 * (attempt + 1))
+
+
+async def _write_worker_health_snapshot(*, reason: str = "") -> None:
+    try:
+        await asyncio.to_thread(_write_worker_health_snapshot_sync, reason=reason)
+    except Exception as exc:
+        logger.warning(
+            "worker health snapshot write failed | reason=%s | %s",
+            reason,
+            _exc_log_fields(exc),
+        )
+
+
+def _schedule_worker_health_snapshot(reason: str) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(
+        _write_worker_health_snapshot(reason=reason),
+        name=f"worker_health_{reason[:24]}",
+    )
+
+
+def _remove_worker_health_snapshot_sync(pid: int | None = None) -> None:
+    with _WORKER_HEALTH_SNAPSHOT_LOCK:
+        with contextlib.suppress(FileNotFoundError):
+            _worker_health_file_path(pid).unlink()
+
+
+def _read_worker_health_snapshots() -> list[dict[str, Any]]:
+    directory = _worker_health_dir()
+    if not directory.exists():
+        return []
+
+    snapshots: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            raw = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("worker health snapshot read failed | path=%s | %s", path, _exc_log_fields(exc))
+            continue
+        if not isinstance(raw, dict):
+            continue
+        raw = dict(raw)
+        raw["path"] = str(path)
+        snapshots.append(raw)
+    return snapshots
+
+
+def _backend_recovery_queue_count() -> int:
+    path = _backend_queue_path()
+    if not path.exists():
+        return 0
+    try:
+        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+    except Exception as exc:
+        logger.warning("backend recovery queue count failed | path=%s | %s", path, _exc_log_fields(exc))
+        return 0
+
+
+def build_agent_health_report(
+    *,
+    server_connection_failed: bool = False,
+    active_jobs: int = 0,
+) -> tuple[int, dict[str, Any]]:
+    now_epoch = time.time()
+    snapshots = _read_worker_health_snapshots()
+    fresh_snapshots: list[dict[str, Any]] = []
+    stale_snapshots: list[dict[str, Any]] = []
+
+    for snapshot in snapshots:
+        updated_at = float(snapshot.get("updated_at_epoch", 0.0) or 0.0)
+        age_seconds = max(0.0, now_epoch - updated_at) if updated_at else float("inf")
+        decorated = dict(snapshot)
+        decorated["age_seconds"] = round(age_seconds, 3)
+        if updated_at and age_seconds <= AGENT_HEALTH_SNAPSHOT_STALE_SECONDS:
+            fresh_snapshots.append(decorated)
+        else:
+            stale_snapshots.append(decorated)
+
+    active_sessions = (
+        sum(int(snapshot.get("active_sessions", 0) or 0) for snapshot in fresh_snapshots)
+        if fresh_snapshots
+        else int(active_jobs)
+    )
+    circuits_open = sorted(
+        {
+            str(endpoint)
+            for snapshot in fresh_snapshots
+            for endpoint in snapshot.get("circuits_open", [])
+            if endpoint
+        }
+    )
+    config_available = (
+        all(bool(snapshot.get("config_available", False)) for snapshot in fresh_snapshots)
+        if fresh_snapshots
+        else None
+    )
+    queue_workers_running = (
+        all(bool(snapshot.get("queue_worker_running", False)) for snapshot in fresh_snapshots)
+        if fresh_snapshots
+        else None
+    )
+    config_refresh_workers_running = (
+        all(bool(snapshot.get("config_refresh_worker_running", False)) for snapshot in fresh_snapshots)
+        if fresh_snapshots
+        else None
+    )
+    in_memory_queue_size = sum(int(snapshot.get("write_queue_size", 0) or 0) for snapshot in fresh_snapshots)
+    recovery_queue_items = _backend_recovery_queue_count()
+
+    reasons: list[str] = []
+    status = "ok"
+    if server_connection_failed:
+        status = "unhealthy"
+        reasons.append("livekit_connection_failed")
+    else:
+        if fresh_snapshots:
+            if config_available is False:
+                reasons.append("config_unavailable")
+            if circuits_open:
+                reasons.append("circuits_open")
+            if queue_workers_running is False:
+                reasons.append("backend_queue_worker_stopped")
+            if config_refresh_workers_running is False:
+                reasons.append("config_refresh_worker_stopped")
+            if recovery_queue_items > 0 or in_memory_queue_size > 0:
+                reasons.append("write_queue_backlog")
+            if reasons:
+                status = "degraded"
+        elif active_jobs > 0:
+            status = "degraded"
+            reasons.append("worker_health_unavailable")
+
+    http_status = 200 if status == "ok" else 503
+    payload = {
+        "status": status,
+        "active_sessions": active_sessions,
+        "active_jobs": int(active_jobs),
+        "livekit_connected": not server_connection_failed,
+        "config_available": config_available,
+        "circuits_open": circuits_open,
+        "worker_snapshots": {
+            "fresh": len(fresh_snapshots),
+            "stale": len(stale_snapshots),
+            "stale_pids": [snapshot.get("pid") for snapshot in stale_snapshots],
+        },
+        "write_queue": {
+            "in_memory_size": in_memory_queue_size,
+            "recovery_items": recovery_queue_items,
+            "queue_worker_running": queue_workers_running,
+            "config_refresh_worker_running": config_refresh_workers_running,
+        },
+        "reasons": reasons,
+    }
+    if fresh_snapshots:
+        payload["workers"] = [
+            {
+                "pid": snapshot.get("pid"),
+                "age_seconds": snapshot.get("age_seconds"),
+                "active_sessions": snapshot.get("active_sessions"),
+                "config_available": snapshot.get("config_available"),
+                "circuits_open": snapshot.get("circuits_open", []),
+                "write_queue_size": snapshot.get("write_queue_size"),
+            }
+            for snapshot in fresh_snapshots
+        ]
+    return http_status, payload
 
 
 def _config_to_dict(cfg: RestaurantConfig) -> dict:
@@ -734,11 +741,12 @@ async def _read_shared_cache_map() -> dict:
     if not CONFIG_SHARED_CACHE_ENABLED:
         return {}
     path = _runtime_file_path(CONFIG_SHARED_CACHE_PATH)
-    if not path.exists():
+    if not await asyncio.to_thread(path.exists):
         return {}
     try:
-        raw = _json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
+        async with worker_context().shared_cache_lock:
+            raw = _json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+            return raw if isinstance(raw, dict) else {}
     except Exception as exc:
         logger.warning("shared config cache read failed | path=%s | %s", path, _exc_log_fields(exc))
         return {}
@@ -769,16 +777,24 @@ async def _write_shared_cache_entry(cache_key: str, cfg: RestaurantConfig) -> No
     if not CONFIG_SHARED_CACHE_ENABLED:
         return
     path = _runtime_file_path(CONFIG_SHARED_CACHE_PATH)
-    _ensure_parent_dir(path)
-    shared_map = await _read_shared_cache_map()
-    shared_map[cache_key] = {
-        "fetched_at_epoch": time.time(),
-        "source": "backend",
-        "config": _config_to_dict(cfg),
-    }
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    await asyncio.to_thread(tmp_path.write_text, _json.dumps(shared_map, ensure_ascii=False), encoding="utf-8")
-    await asyncio.to_thread(os.replace, tmp_path, path)
+    await _ensure_parent_dir(path)
+    async with worker_context().shared_cache_lock:
+        shared_map: dict[str, Any] = {}
+        if await asyncio.to_thread(path.exists):
+            try:
+                shared_map = _json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+                if not isinstance(shared_map, dict):
+                    shared_map = {}
+            except Exception:
+                shared_map = {}
+        shared_map[cache_key] = {
+            "fetched_at_epoch": time.time(),
+            "source": "backend",
+            "config": _config_to_dict(cfg),
+        }
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        await asyncio.to_thread(tmp_path.write_text, _json.dumps(shared_map, ensure_ascii=False), encoding="utf-8")
+        await asyncio.to_thread(os.replace, tmp_path, path)
 
 
 def _stt_context_terms_for_config(cfg: RestaurantConfig) -> list[str]:
@@ -808,10 +824,6 @@ def _stt_context_terms_for_config(cfg: RestaurantConfig) -> list[str]:
     return result
 
 
-def _stt_keyterms_for_config(cfg: RestaurantConfig) -> list[str]:
-    return _stt_context_terms_for_config(cfg)
-
-
 def _build_session_stt(cfg: RestaurantConfig, *, client_reference_id: str | None = None) -> Any:
     # Soniox uses language hints + context instead of provider-specific keyterms.
     not_ready_reason = _stt_provider_ready_reason()
@@ -829,7 +841,7 @@ def _build_session_stt(cfg: RestaurantConfig, *, client_reference_id: str | None
 
 
 def backend_config_available() -> bool:
-    return _runtime_health.config_available
+    return worker_context().runtime_health.config_available
 
 
 def backend_write_available(health: "CallWriteHealth | None" = None) -> bool:
@@ -859,175 +871,283 @@ async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfi
     جلب إعدادات المطعم مع أولوية واضحة:
     fresh cache -> stale cache -> backend fetch ضمن budget -> degraded fallback.
     """
-    global _config_cache, _runtime_health
-
+    ctx = worker_context()
     cache_key = restaurant_id or "__default__"
     endpoint = f"{BACKEND_BASE}/restaurant/config"
-    cached_entry = _config_cache.get(cache_key)
-    cache_age = _config_cache_age_seconds(cached_entry)
-    shared_entry = await _read_shared_cache_entry(cache_key)
-    shared_cfg = shared_entry[0] if shared_entry else None
-    shared_age = shared_entry[1] if shared_entry else None
-
     stale_fallback: RestaurantConfig | None = None
+    cache_age: float | None = None
 
-    if cached_entry is None:
-        logger.info("call=%s | config cache MISS | restaurant=%s", call_id, cache_key)
-    elif cache_age is not None and cache_age <= CONFIG_CACHE_TTL:
-        logger.info(
-            "call=%s | config cache HIT fresh | restaurant=%s | age=%.2fs",
-            call_id, cache_key, cache_age,
-        )
-        cfg = _clone_config_with_source(cached_entry.config, "cache_fresh")
-        _runtime_health.config_available = True
-        logger.info("call=%s | config source chosen | source=%s", call_id, cfg.config_source)
-        return cfg
-    elif cached_entry is not None:
-        logger.warning(
-            "call=%s | config cache HIT stale | restaurant=%s | age=%.2fs | action=refresh_backend",
-            call_id, cache_key, cache_age or 0.0,
-        )
-        stale_fallback = _clone_config_with_source(cached_entry.config, "cache_stale")
-
-    if shared_cfg is not None and shared_age is not None:
-        if shared_age <= CONFIG_CACHE_TTL:
+    async with ctx.config_lock:
+        cached_entry = ctx.config_cache.get(cache_key)
+        cache_age = _config_cache_age_seconds(cached_entry)
+        if cached_entry is None:
+            logger.info("call=%s | config cache MISS | restaurant=%s", call_id, cache_key)
+            _emit_event("config.cache", call_id=call_id, state="miss", restaurant=cache_key)
+        elif cache_age is not None and cache_age <= CONFIG_CACHE_TTL:
             logger.info(
-                "call=%s | shared config cache HIT fresh | restaurant=%s | age=%.2fs",
+                "call=%s | config cache HIT fresh | restaurant=%s | age=%.2fs",
+                call_id, cache_key, cache_age,
+            )
+            _emit_event("config.cache", call_id=call_id, state="hit_fresh", restaurant=cache_key, age_s=round(cache_age, 3))
+            cfg = _clone_config_with_source(cached_entry.config, "cache_fresh")
+            ctx.runtime_health.config_available = True
+            _schedule_worker_health_snapshot("config_cache_hit_fresh")
+            logger.info("call=%s | config source chosen | source=%s", call_id, cfg.config_source)
+            return cfg
+        elif cached_entry is not None:
+            logger.warning(
+                "call=%s | config cache HIT stale | restaurant=%s | age=%.2fs | action=refresh_backend",
+                call_id, cache_key, cache_age or 0.0,
+            )
+            _emit_event("config.cache", call_id=call_id, state="hit_stale", restaurant=cache_key, age_s=round(cache_age or 0.0, 3))
+            stale_fallback = _clone_config_with_source(cached_entry.config, "cache_stale")
+
+    async with ctx.config_refresh_lock:
+        async with ctx.config_lock:
+            cached_entry = ctx.config_cache.get(cache_key)
+            cache_age = _config_cache_age_seconds(cached_entry)
+            if cached_entry is not None and cache_age is not None and cache_age <= CONFIG_CACHE_TTL:
+                logger.info(
+                    "call=%s | config cache HIT fresh-after-wait | restaurant=%s | age=%.2fs",
+                    call_id, cache_key, cache_age,
+                )
+                _emit_event("config.cache", call_id=call_id, state="hit_fresh_after_wait", restaurant=cache_key, age_s=round(cache_age, 3))
+                cfg = _clone_config_with_source(cached_entry.config, "cache_fresh")
+                ctx.runtime_health.config_available = True
+                _schedule_worker_health_snapshot("config_cache_hit_after_wait")
+                logger.info("call=%s | config source chosen | source=%s", call_id, cfg.config_source)
+                return cfg
+
+        shared_entry = await _read_shared_cache_entry(cache_key)
+        shared_cfg = shared_entry[0] if shared_entry else None
+        shared_age = shared_entry[1] if shared_entry else None
+
+        if shared_cfg is not None and shared_age is not None:
+            if shared_age <= CONFIG_CACHE_TTL:
+                logger.info(
+                    "call=%s | shared config cache HIT fresh | restaurant=%s | age=%.2fs",
+                    call_id, cache_key, shared_age,
+                )
+                _emit_event("config.cache", call_id=call_id, state="shared_hit_fresh", restaurant=cache_key, age_s=round(shared_age, 3))
+                cfg = _clone_config_with_source(shared_cfg, "cache_fresh")
+                async with ctx.config_lock:
+                    ctx.config_cache[cache_key] = CachedConfigEntry(
+                        fetched_at_monotonic=time.monotonic() - shared_age,
+                        config=_clone_config_with_source(shared_cfg, "backend"),
+                        source="shared_cache",
+                    )
+                    ctx.runtime_health.config_available = True
+                _schedule_worker_health_snapshot("config_shared_cache_hit_fresh")
+                logger.info("call=%s | config source chosen | source=%s", call_id, cfg.config_source)
+                return cfg
+            logger.warning(
+                "call=%s | shared config cache HIT stale | restaurant=%s | age=%.2fs | action=refresh_backend",
                 call_id, cache_key, shared_age,
             )
-            cfg = _clone_config_with_source(shared_cfg, "cache_fresh")
-            _config_cache[cache_key] = CachedConfigEntry(
-                fetched_at_monotonic=time.monotonic() - shared_age,
-                config=_clone_config_with_source(shared_cfg, "backend"),
-                source="shared_cache",
-            )
-            _runtime_health.config_available = True
-            logger.info("call=%s | config source chosen | source=%s", call_id, cfg.config_source)
-            return cfg
-        logger.warning(
-            "call=%s | shared config cache HIT stale | restaurant=%s | age=%.2fs | action=refresh_backend",
-            call_id, cache_key, shared_age,
-        )
-        if stale_fallback is None or (cache_age is not None and shared_age < cache_age):
-            stale_fallback = _clone_config_with_source(shared_cfg, "cache_stale")
+            _emit_event("config.cache", call_id=call_id, state="shared_hit_stale", restaurant=cache_key, age_s=round(shared_age, 3))
+            if stale_fallback is None or (cache_age is not None and shared_age < cache_age):
+                stale_fallback = _clone_config_with_source(shared_cfg, "cache_stale")
 
-    headers: dict[str, str] = {"X-Runtime-Source": "voice-agent"}
-    params: dict[str, str] = {}
-    if restaurant_id:
-        headers["X-Restaurant-ID"] = restaurant_id
-        params["restaurant_id"] = restaurant_id
+        headers: dict[str, str] = {"X-Runtime-Source": "voice-agent"}
+        params: dict[str, str] = {}
+        if restaurant_id:
+            headers["X-Restaurant-ID"] = restaurant_id
+            params["restaurant_id"] = restaurant_id
 
-    deadline = time.monotonic() + CONFIG_FETCH_TOTAL_BUDGET_SECONDS
-    last_exc: Exception | None = None
-    for attempt in range(CONFIG_FETCH_RETRIES):
-        remaining_budget = deadline - time.monotonic()
-        if remaining_budget <= 0:
-            logger.warning(
-                "call=%s | config fetch budget exhausted | budget=%.2fs | attempts=%d",
-                call_id, CONFIG_FETCH_TOTAL_BUDGET_SECONDS, attempt,
-            )
-            break
-
-        try:
-            t0 = time.monotonic()
-            client = await _get_http_client()
-            logger.info(
-                "call=%s | config fetch start | attempt=%d | endpoint=%s | budget_left=%.2fs",
-                call_id, attempt + 1, endpoint, remaining_budget,
-            )
-            res = await client.get(
-                endpoint,
-                headers=headers,
-                params=params,
-                timeout=httpx.Timeout(timeout=max(0.05, min(HTTP_TIMEOUT_SECONDS, remaining_budget))),
-            )
-            res.raise_for_status()
-            d = res.json()
-            latency_ms = int((time.monotonic() - t0) * 1000)
-
-            cfg = RestaurantConfig(
-                name=d["name"],
-                phone=d.get("phone", ""),
-                address=d.get("address", ""),
-                branches=d.get("branches", []),
-                hours=d.get("hours", {}),
-                menu_items=d.get("menu_items", []),
-                upsell_rules=d.get("upsell_rules", []),
-                is_open=d.get("is_open", True),
-                closed_reason=d.get("closed_reason", ""),
-                wait_minutes=d.get("wait_minutes", 20),
-                min_guests=d.get("min_guests", 1),
-                max_guests=d.get("max_guests", 20),
-                delivery_enabled=d.get("delivery_enabled", False),
-                delivery_minutes=d.get("delivery_minutes", 45),
-                delivery_fee=float(d.get("delivery_fee", 0.0)),
-                min_order=float(d.get("min_order", 0.0)),
-                delivery_zones=d.get("delivery_zones", []),
-                degraded_mode=False,
-                config_source="backend",
-            )
-            _config_cache[cache_key] = CachedConfigEntry(
-                fetched_at_monotonic=time.monotonic(),
-                config=cfg,
-                source="backend",
-            )
-            try:
-                await _write_shared_cache_entry(cache_key, cfg)
-            except Exception as exc:
+        deadline = time.monotonic() + CONFIG_FETCH_TOTAL_BUDGET_SECONDS
+        last_exc: Exception | None = None
+        for attempt in range(CONFIG_FETCH_RETRIES):
+            remaining_budget = deadline - time.monotonic()
+            if remaining_budget <= 0:
                 logger.warning(
-                    "call=%s | shared cache write skipped | restaurant=%s | %s",
-                    call_id, cache_key, _exc_log_fields(exc),
+                    "call=%s | config fetch budget exhausted | budget=%.2fs | attempts=%d",
+                    call_id, CONFIG_FETCH_TOTAL_BUDGET_SECONDS, attempt,
                 )
-            _runtime_health.config_available = True
-            _runtime_health.last_config_error = ""
-            logger.info(
-                "call=%s | config loaded | restaurant=%s | source=backend | open=%s | delivery=%s | items=%d | latency=%dms",
-                call_id, cache_key, cfg.is_open, cfg.delivery_enabled, len(cfg.menu_items), latency_ms,
-            )
-            logger.info("call=%s | config source chosen | source=%s", call_id, cfg.config_source)
-            return cfg
+                break
 
-        except Exception as exc:
-            last_exc = exc
-            _runtime_health.last_config_error = _exc_log_fields(exc)
-            wait = _retry_delay(attempt, CONFIG_FETCH_BACKOFF_SECONDS)
+            try:
+                t0 = time.monotonic()
+                client = await _get_http_client()
+                logger.info(
+                    "call=%s | config fetch start | attempt=%d | endpoint=%s | budget_left=%.2fs",
+                    call_id, attempt + 1, endpoint, remaining_budget,
+                )
+                res = await client.get(
+                    endpoint,
+                    headers=headers,
+                    params=params,
+                    timeout=httpx.Timeout(timeout=max(0.05, min(HTTP_TIMEOUT_SECONDS, remaining_budget))),
+                )
+                res.raise_for_status()
+                d = res.json()
+                latency_ms = int((time.monotonic() - t0) * 1000)
+
+                cfg = RestaurantConfig(
+                    name=d["name"],
+                    phone=d.get("phone", ""),
+                    address=d.get("address", ""),
+                    branches=d.get("branches", []),
+                    hours=d.get("hours", {}),
+                    menu_items=d.get("menu_items", []),
+                    upsell_rules=d.get("upsell_rules", []),
+                    is_open=d.get("is_open", True),
+                    closed_reason=d.get("closed_reason", ""),
+                    wait_minutes=d.get("wait_minutes", 20),
+                    min_guests=d.get("min_guests", 1),
+                    max_guests=d.get("max_guests", 20),
+                    delivery_enabled=d.get("delivery_enabled", False),
+                    delivery_minutes=d.get("delivery_minutes", 45),
+                    delivery_fee=float(d.get("delivery_fee", 0.0)),
+                    min_order=float(d.get("min_order", 0.0)),
+                    delivery_zones=d.get("delivery_zones", []),
+                    degraded_mode=False,
+                    config_source="backend",
+                )
+                async with ctx.config_lock:
+                    ctx.config_cache[cache_key] = CachedConfigEntry(
+                        fetched_at_monotonic=time.monotonic(),
+                        config=cfg,
+                        source="backend",
+                    )
+                    ctx.runtime_health.config_available = True
+                    ctx.runtime_health.last_config_error = ""
+                _emit_event(
+                    "config.cache",
+                    call_id=call_id,
+                    state="backend_loaded",
+                    restaurant=cache_key,
+                    latency_ms=latency_ms,
+                )
+                _schedule_worker_health_snapshot("config_backend_loaded")
+                try:
+                    await _write_shared_cache_entry(cache_key, cfg)
+                except Exception as exc:
+                    logger.warning(
+                        "call=%s | shared cache write skipped | restaurant=%s | %s",
+                        call_id, cache_key, _exc_log_fields(exc),
+                    )
+                logger.info(
+                    "call=%s | config loaded | restaurant=%s | source=backend | open=%s | delivery=%s | items=%d | latency=%dms",
+                    call_id, cache_key, cfg.is_open, cfg.delivery_enabled, len(cfg.menu_items), latency_ms,
+                )
+                logger.info("call=%s | config source chosen | source=%s", call_id, cfg.config_source)
+                return cfg
+
+            except Exception as exc:
+                last_exc = exc
+                ctx.runtime_health.last_config_error = _exc_log_fields(exc)
+                _schedule_worker_health_snapshot("config_backend_failed")
+                wait = _retry_delay(attempt, CONFIG_FETCH_BACKOFF_SECONDS)
+                logger.warning(
+                    "call=%s | config fetch failed | attempt=%d | endpoint=%s | %s | retry in %.2fs",
+                    call_id, attempt + 1, endpoint, _exc_log_fields(exc), wait,
+                )
+                if attempt < CONFIG_FETCH_RETRIES - 1 and (deadline - time.monotonic()) > wait:
+                    await asyncio.sleep(wait)
+
+        if stale_fallback is not None:
+            ctx.runtime_health.config_available = True
+            _emit_event(
+                "config.cache",
+                call_id=call_id,
+                state="stale_fallback",
+                restaurant=cache_key,
+                last_error=_exc_log_fields(last_exc) if last_exc else "",
+            )
+            _schedule_worker_health_snapshot("config_stale_fallback")
             logger.warning(
-                "call=%s | config fetch failed | attempt=%d | endpoint=%s | %s | retry in %.2fs",
-                call_id, attempt + 1, endpoint, _exc_log_fields(exc), wait,
+                "call=%s | stale cache used fallback | restaurant=%s | age=%.2fs | last_error=%s",
+                call_id, cache_key, cache_age or 0.0,
+                _exc_log_fields(last_exc) if last_exc else "none",
             )
-            if attempt < CONFIG_FETCH_RETRIES - 1 and (deadline - time.monotonic()) > wait:
-                await asyncio.sleep(wait)
+            logger.info("call=%s | config source chosen | source=%s", call_id, stale_fallback.config_source)
+            return stale_fallback
 
-    if stale_fallback is not None:
-        _runtime_health.config_available = True
-        logger.warning(
-            "call=%s | stale cache used fallback | restaurant=%s | age=%.2fs | last_error=%s",
-            call_id, cache_key, cache_age or 0.0,
+        degraded_cfg = _degraded_config()
+        ctx.runtime_health.config_available = False
+        _emit_event(
+            "config.cache",
+            call_id=call_id,
+            state="degraded_fallback",
+            restaurant=cache_key,
+            last_error=_exc_log_fields(last_exc) if last_exc else "",
+        )
+        _schedule_worker_health_snapshot("config_degraded")
+        logger.error(
+            "call=%s | degraded mode entered | restaurant=%s | source=%s | last_error=%s",
+            call_id, cache_key, degraded_cfg.config_source,
             _exc_log_fields(last_exc) if last_exc else "none",
         )
-        logger.info("call=%s | config source chosen | source=%s", call_id, stale_fallback.config_source)
-        return stale_fallback
-
-    degraded_cfg = _degraded_config()
-    _runtime_health.config_available = False
-    logger.error(
-        "call=%s | degraded mode entered | restaurant=%s | source=%s | last_error=%s",
-        call_id, cache_key, degraded_cfg.config_source,
-        _exc_log_fields(last_exc) if last_exc else "none",
-    )
-    logger.info("call=%s | config source chosen | source=%s", call_id, degraded_cfg.config_source)
-    return degraded_cfg
+        logger.info("call=%s | config source chosen | source=%s", call_id, degraded_cfg.config_source)
+        return degraded_cfg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Backend helpers — retry + idempotency + latency logging
 # ─────────────────────────────────────────────────────────────────────────────
 def _backend_queue_lock_instance() -> asyncio.Lock:
-    return _backend_queue_lock
+    return worker_context().backend_queue_lock
+
+
+def _backend_queue_instance() -> asyncio.Queue[dict[str, Any]]:
+    return worker_context().backend_write_queue
 
 
 def _backend_queue_path() -> Path:
     return _runtime_file_path(BACKEND_WRITE_QUEUE_PATH)
+
+
+def _normalize_backend_queue_item(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(item)
+    idempotency_key = str(normalized.get("idempotency_key", "")).strip()
+    if not idempotency_key:
+        call_id = str(normalized.get("call_id", "")).strip()
+        action = str(normalized.get("idempotency_action", "")).strip()
+        payload = normalized.get("payload", {})
+        if call_id and action and isinstance(payload, dict):
+            idempotency_key = _idempotency_key(call_id, action, payload)
+    if idempotency_key:
+        normalized["idempotency_key"] = idempotency_key
+    return normalized
+
+
+def _dedupe_backend_queue_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    deduped: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    skipped = 0
+    for item in items:
+        normalized = _normalize_backend_queue_item(item)
+        key = str(normalized.get("idempotency_key", "")).strip()
+        if key:
+            if key in seen_keys:
+                skipped += 1
+                continue
+            seen_keys.add(key)
+        deduped.append(normalized)
+    return deduped, skipped
+
+
+def _parse_backend_queue_recovery_lines(lines: list[str]) -> tuple[list[dict[str, Any]], int]:
+    items: list[dict[str, Any]] = []
+    invalid = 0
+    for line in lines:
+        try:
+            parsed = _json.loads(line)
+        except Exception:
+            invalid += 1
+            continue
+        if isinstance(parsed, dict):
+            items.append(_normalize_backend_queue_item(parsed))
+        else:
+            invalid += 1
+    return items, invalid
+
+
+def _cap_backend_queue_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    limit = max(1, BACKEND_WRITE_QUEUE_RECOVERY_MAX_LINES)
+    if len(items) <= limit:
+        return items, 0
+    return items[:limit], len(items) - limit
 
 
 def _backend_endpoint_class(endpoint: str) -> str:
@@ -1035,38 +1155,60 @@ def _backend_endpoint_class(endpoint: str) -> str:
 
 
 def _get_backend_circuit(endpoint: str) -> BackendCircuitState:
+    """Get or create circuit state for an endpoint class.
+
+    SAFETY: must only be called while holding ``ctx.circuit_lock``.
+    """
+    ctx = worker_context()
     key = _backend_endpoint_class(endpoint)
-    state = _backend_circuits.get(key)
+    state = ctx.backend_circuits.get(key)
     if state is None:
         state = BackendCircuitState()
-        _backend_circuits[key] = state
+        ctx.backend_circuits[key] = state
     return state
 
 
-def _backend_circuit_is_open(endpoint: str) -> bool:
-    state = _get_backend_circuit(endpoint)
-    return state.open_until_monotonic > time.monotonic()
+async def _backend_circuit_is_open(endpoint: str) -> bool:
+    async with worker_context().circuit_lock:
+        state = _get_backend_circuit(endpoint)
+        return state.open_until_monotonic > time.monotonic()
 
 
-def _record_backend_circuit_success(endpoint: str) -> None:
-    state = _get_backend_circuit(endpoint)
-    state.consecutive_failures = 0
-    state.open_until_monotonic = 0.0
-    state.last_error = ""
+async def _record_backend_circuit_success(endpoint: str) -> None:
+    async with worker_context().circuit_lock:
+        state = _get_backend_circuit(endpoint)
+        was_open = state.open_until_monotonic > time.monotonic()
+        had_failures = state.consecutive_failures > 0
+        state.consecutive_failures = 0
+        state.open_until_monotonic = 0.0
+        state.last_error = ""
+    if was_open or had_failures:
+        _emit_event("backend.circuit", endpoint=endpoint, state="closed")
+        _schedule_worker_health_snapshot("circuit_closed")
 
 
-def _record_backend_circuit_failure(endpoint: str, exc: Exception) -> None:
+async def _record_backend_circuit_failure(endpoint: str, exc: Exception) -> None:
     if not _should_retry_backend_error(exc):
         return
-    state = _get_backend_circuit(endpoint)
-    state.consecutive_failures += 1
-    state.last_error = _exc_log_fields(exc)
-    if state.consecutive_failures >= BACKEND_WRITE_CIRCUIT_FAILURE_THRESHOLD:
-        state.open_until_monotonic = time.monotonic() + BACKEND_WRITE_CIRCUIT_OPEN_SECONDS
-        logger.warning(
-            "backend circuit opened | endpoint=%s | failures=%d | open_for=%.2fs | %s",
-            endpoint, state.consecutive_failures, BACKEND_WRITE_CIRCUIT_OPEN_SECONDS, state.last_error,
-        )
+    async with worker_context().circuit_lock:
+        state = _get_backend_circuit(endpoint)
+        state.consecutive_failures += 1
+        state.last_error = _exc_log_fields(exc)
+        if state.consecutive_failures >= BACKEND_WRITE_CIRCUIT_FAILURE_THRESHOLD:
+            state.open_until_monotonic = time.monotonic() + BACKEND_WRITE_CIRCUIT_OPEN_SECONDS
+            logger.warning(
+                "backend circuit opened | endpoint=%s | failures=%d | open_for=%.2fs | %s",
+                endpoint, state.consecutive_failures, BACKEND_WRITE_CIRCUIT_OPEN_SECONDS, state.last_error,
+            )
+            _emit_event(
+                "backend.circuit",
+                endpoint=endpoint,
+                state="open",
+                failures=state.consecutive_failures,
+                open_for_s=BACKEND_WRITE_CIRCUIT_OPEN_SECONDS,
+                error=state.last_error,
+            )
+            _schedule_worker_health_snapshot("circuit_open")
 
 
 def _mark_backend_circuit_open(health: CallWriteHealth | None) -> None:
@@ -1077,6 +1219,7 @@ def _mark_backend_circuit_open(health: CallWriteHealth | None) -> None:
     health.last_write_failure_kind = "CircuitOpen"
     health.last_write_status_code = None
     health.write_blocked_until_monotonic = time.monotonic() + BACKEND_WRITE_CIRCUIT_OPEN_SECONDS
+    _schedule_worker_health_snapshot("circuit_blocked")
 
 
 async def _enqueue_backend_write(
@@ -1085,100 +1228,363 @@ async def _enqueue_backend_write(
     call_id: str,
     *,
     idempotency_action: str,
+    idempotency_key: str = "",
 ) -> bool:
     if not BACKEND_WRITE_QUEUE_ENABLED:
         return False
 
-    queue_path = _backend_queue_path()
-    _ensure_parent_dir(queue_path)
     item = {
         "endpoint": endpoint,
         "payload": payload,
         "call_id": call_id,
         "idempotency_action": idempotency_action,
+        "idempotency_key": idempotency_key,
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
-    lock = _backend_queue_lock_instance()
-    async with lock:
-        existing_lines: list[str] = []
-        if queue_path.exists():
-            existing_lines = queue_path.read_text(encoding="utf-8").splitlines()
-        if len(existing_lines) >= BACKEND_WRITE_QUEUE_MAX_ITEMS:
-            logger.error("backend queue full | path=%s | size=%d", queue_path, len(existing_lines))
-            return False
-        with queue_path.open("a", encoding="utf-8") as fh:
-            fh.write(_json.dumps(item, ensure_ascii=False) + "\n")
-    logger.warning("call=%s | backend write queued | endpoint=%s", call_id, endpoint)
-    return True
+    queue = _backend_queue_instance()
+    try:
+        queue.put_nowait(item)
+        logger.warning("call=%s | backend write queued | endpoint=%s", call_id, endpoint)
+        _emit_event(
+            "backend.queue",
+            call_id=call_id,
+            endpoint=endpoint,
+            target="memory",
+            size=queue.qsize(),
+        )
+        _schedule_worker_health_snapshot("queue_memory")
+        return True
+    except asyncio.QueueFull:
+        logger.error("backend in-memory queue full | endpoint=%s | size=%d", endpoint, queue.qsize())
+        return await _append_backend_queue_recovery_items([item], call_id=call_id, endpoint=endpoint)
+
+
+async def _read_backend_queue_recovery_lines() -> list[str]:
+    queue_path = _backend_queue_path()
+    if not await asyncio.to_thread(queue_path.exists):
+        return []
+    async with _backend_queue_lock_instance():
+        if not await asyncio.to_thread(queue_path.exists):
+            return []
+        raw = await asyncio.to_thread(queue_path.read_text, encoding="utf-8")
+    return [line for line in raw.splitlines() if line.strip()]
+
+
+async def _rewrite_backend_queue_recovery_lines(lines: list[str]) -> None:
+    queue_path = _backend_queue_path()
+    async with _backend_queue_lock_instance():
+        if not lines:
+            with contextlib.suppress(FileNotFoundError):
+                await asyncio.to_thread(queue_path.unlink)
+            return
+        await _ensure_parent_dir(queue_path)
+        tmp_path = queue_path.with_suffix(queue_path.suffix + ".tmp")
+        payload = "\n".join(lines) + "\n"
+        await asyncio.to_thread(tmp_path.write_text, payload, encoding="utf-8")
+        await asyncio.to_thread(os.replace, tmp_path, queue_path)
+
+
+async def _append_backend_queue_recovery_items(
+    items: list[dict[str, Any]],
+    *,
+    call_id: str,
+    endpoint: str,
+) -> bool:
+    if not items:
+        return True
+    queue_path = _backend_queue_path()
+    async with _backend_queue_lock_instance():
+        existing_items: list[dict[str, Any]] = []
+        invalid_existing = 0
+        if await asyncio.to_thread(queue_path.exists):
+            raw = await asyncio.to_thread(queue_path.read_text, encoding="utf-8")
+            existing_items, invalid_existing = _parse_backend_queue_recovery_lines(
+                [line for line in raw.splitlines() if line.strip()]
+            )
+        if invalid_existing:
+            logger.warning(
+                "backend recovery queue dropped invalid lines during append | path=%s | count=%d",
+                queue_path,
+                invalid_existing,
+            )
+        await _ensure_parent_dir(queue_path)
+        combined_items, skipped_duplicates = _dedupe_backend_queue_items(existing_items + items)
+        capped_items, dropped_due_cap = _cap_backend_queue_items(combined_items)
+        if skipped_duplicates:
+            logger.warning(
+                "backend recovery queue skipped duplicates | path=%s | count=%d",
+                queue_path,
+                skipped_duplicates,
+            )
+        if dropped_due_cap:
+            logger.error(
+                "backend recovery queue cap reached | path=%s | cap=%d | dropped=%d",
+                queue_path,
+                BACKEND_WRITE_QUEUE_RECOVERY_MAX_LINES,
+                dropped_due_cap,
+            )
+        new_lines = [_json.dumps(item, ensure_ascii=False) for item in capped_items]
+        tmp_path = queue_path.with_suffix(queue_path.suffix + ".tmp")
+        payload = "\n".join(new_lines) + "\n"
+        await asyncio.to_thread(tmp_path.write_text, payload, encoding="utf-8")
+        await asyncio.to_thread(os.replace, tmp_path, queue_path)
+    logger.warning("call=%s | backend write queued to recovery file | endpoint=%s", call_id, endpoint)
+    _emit_event(
+        "backend.queue",
+        call_id=call_id,
+        endpoint=endpoint,
+        target="recovery_file",
+        queued_items=len(capped_items),
+        skipped_duplicates=skipped_duplicates,
+        dropped=dropped_due_cap,
+    )
+    _schedule_worker_health_snapshot("queue_recovery")
+    return dropped_due_cap == 0
+
+
+async def _submit_queued_backend_write(item: dict[str, Any]) -> bool:
+    endpoint = str(item.get("endpoint", "")).strip()
+    if not endpoint or await _backend_circuit_is_open(endpoint):
+        return False
+    result = await _post(
+        endpoint,
+        item.get("payload", {}),
+        str(item.get("call_id", "queued-write")),
+        idempotency_action=str(item.get("idempotency_action", "")),
+        max_retries=1,
+        write_health=None,
+        enqueue_on_retryable_failure=False,
+    )
+    return result is not None
 
 
 async def _drain_backend_write_queue_once() -> None:
     if not BACKEND_WRITE_QUEUE_ENABLED:
         return
-    queue_path = _backend_queue_path()
-    if not queue_path.exists():
-        return
+    queue = _backend_queue_instance()
+    in_memory_items: list[dict[str, Any]] = []
+    while True:
+        try:
+            in_memory_items.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
 
-    lock = _backend_queue_lock_instance()
-    async with lock:
-        lines = [line for line in queue_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if not lines:
-            return
-        remaining: list[str] = []
-        for line in lines:
-            try:
-                item = _json.loads(line)
-            except Exception:
-                logger.warning("backend queue dropped invalid line | path=%s", queue_path)
-                continue
-            endpoint = str(item.get("endpoint", "")).strip()
-            if not endpoint or _backend_circuit_is_open(endpoint):
-                remaining.append(line)
-                continue
-            result = await _post(
-                endpoint,
-                item.get("payload", {}),
-                str(item.get("call_id", "queued-write")),
-                idempotency_action=str(item.get("idempotency_action", "")),
-                max_retries=1,
-                write_health=None,
-                enqueue_on_retryable_failure=False,
-            )
-            if result is None:
-                remaining.append(line)
-                break
+    recovery_lines = await _read_backend_queue_recovery_lines()
+    recovery_items, invalid_recovery_lines = _parse_backend_queue_recovery_lines(recovery_lines)
+    if invalid_recovery_lines:
+        logger.warning(
+            "backend queue dropped invalid recovery lines | path=%s | count=%d",
+            _backend_queue_path(),
+            invalid_recovery_lines,
+        )
 
-        tmp_path = queue_path.with_suffix(queue_path.suffix + ".tmp")
-        if remaining:
-            tmp_path.write_text("\n".join(remaining) + "\n", encoding="utf-8")
-            os.replace(tmp_path, queue_path)
-        else:
-            with contextlib.suppress(FileNotFoundError):
-                queue_path.unlink()
+    remaining_items: list[dict[str, Any]] = []
+    pending_items, skipped_duplicates = _dedupe_backend_queue_items(recovery_items + in_memory_items)
+    if skipped_duplicates:
+        logger.warning(
+            "backend queue replay skipped duplicates | count=%d",
+            skipped_duplicates,
+        )
+    for item in pending_items:
+        try:
+            success = await _submit_queued_backend_write(item)
+        except Exception:
+            logger.exception("backend queue worker submit error")
+            success = False
+        if not success:
+            remaining_items.append(item)
+
+    for _ in in_memory_items:
+        with contextlib.suppress(ValueError):
+            queue.task_done()
+
+    deduped_remaining_items, skipped_remaining_duplicates = _dedupe_backend_queue_items(remaining_items)
+    if skipped_remaining_duplicates:
+        logger.warning(
+            "backend queue remaining-items dedupe skipped duplicates | count=%d",
+            skipped_remaining_duplicates,
+        )
+    capped_remaining_items, dropped_remaining_due_cap = _cap_backend_queue_items(deduped_remaining_items)
+    if dropped_remaining_due_cap:
+        logger.error(
+            "backend recovery queue cap reached during rewrite | path=%s | cap=%d | dropped=%d",
+            _backend_queue_path(),
+            BACKEND_WRITE_QUEUE_RECOVERY_MAX_LINES,
+            dropped_remaining_due_cap,
+        )
+    recovery_remaining_lines = [_json.dumps(item, ensure_ascii=False) for item in capped_remaining_items]
+    await _rewrite_backend_queue_recovery_lines(recovery_remaining_lines)
+    _schedule_worker_health_snapshot("queue_drain")
 
 
 async def _backend_queue_worker_loop() -> None:
+    _BATCH_SIZE = 10
+    _MAX_BACKOFF = 60.0
+    backoff = BACKEND_WRITE_QUEUE_RETRY_INTERVAL_SECONDS
     while True:
-        await asyncio.sleep(BACKEND_WRITE_QUEUE_RETRY_INTERVAL_SECONDS)
         try:
+            queue = _backend_queue_instance()
+            # Wait for at least one item
+            first_item = await queue.get()
+            batch: list[dict[str, Any]] = [first_item]
+            # Drain up to _BATCH_SIZE more items that are already queued
+            for _ in range(_BATCH_SIZE - 1):
+                try:
+                    batch.append(queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+
+            failed_items: list[dict[str, Any]] = []
+            for item in batch:
+                try:
+                    success = await _submit_queued_backend_write(item)
+                except Exception:
+                    logger.exception("backend queue worker submit error")
+                    success = False
+                if not success:
+                    failed_items.append(item)
+                with contextlib.suppress(ValueError):
+                    queue.task_done()
+
+            if failed_items:
+                await _append_backend_queue_recovery_items(
+                    failed_items,
+                    call_id="batch-retry",
+                    endpoint="batch",
+                )
+
+            # Also drain recovery file items
             await _drain_backend_write_queue_once()
+            # Reset backoff on successful cycle
+            backoff = BACKEND_WRITE_QUEUE_RETRY_INTERVAL_SECONDS
         except asyncio.CancelledError:
+            # Graceful shutdown — flush remaining queue to recovery file
+            leftovers: list[dict[str, Any]] = []
+            queue = _backend_queue_instance()
+            while True:
+                try:
+                    leftovers.append(queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            if leftovers:
+                with contextlib.suppress(Exception):
+                    await _append_backend_queue_recovery_items(
+                        leftovers,
+                        call_id="worker-shutdown",
+                        endpoint="batch",
+                    )
+            logger.info("backend queue worker shutting down | flushed=%d items", len(leftovers))
             raise
         except Exception:
-            logger.exception("backend queue worker error")
+            logger.exception("backend queue worker error | backoff=%.1fs", backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, _MAX_BACKOFF)
 
 
 async def _ensure_backend_queue_worker_started() -> None:
-    global _backend_queue_worker
+    ctx = worker_context()
     if not BACKEND_WRITE_QUEUE_ENABLED:
         return
-    if _backend_queue_worker is not None and not _backend_queue_worker.done():
+    if ctx.backend_queue_worker is not None and not ctx.backend_queue_worker.done():
         return
-    _backend_queue_worker = asyncio.create_task(
+    ctx.backend_queue_worker = asyncio.create_task(
         _backend_queue_worker_loop(),
         name="backend_write_queue_worker",
     )
     logger.info("backend queue worker started | path=%s", _backend_queue_path())
+    _schedule_worker_health_snapshot("queue_worker_started")
+    await _drain_backend_write_queue_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config auto-refresh — proactively keeps cache warm so calls never wait
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _config_refresh_loop() -> None:
+    """Background task that refreshes the config cache at regular intervals."""
+    while True:
+        try:
+            await asyncio.sleep(CONFIG_REFRESH_INTERVAL_SECONDS)
+            ctx = worker_context()
+            async with ctx.config_lock:
+                keys = list(ctx.config_cache.keys())
+            for key in keys:
+                try:
+                    restaurant_id = key if key != "__default__" else ""
+                    cfg = await fetch_config(f"refresh-{key}", restaurant_id=restaurant_id)
+                    logger.info("config refresh | key=%s | source=%s", key, cfg.config_source)
+                except Exception:
+                    logger.warning("config refresh failed | key=%s", key, exc_info=True)
+        except asyncio.CancelledError:
+            logger.info("config refresh worker shutting down")
+            raise
+        except Exception:
+            logger.exception("config refresh loop error")
+            await asyncio.sleep(60.0)
+
+
+async def _ensure_config_refresh_started() -> None:
+    ctx = worker_context()
+    if ctx.config_refresh_worker is not None and not ctx.config_refresh_worker.done():
+        return
+    ctx.config_refresh_worker = asyncio.create_task(
+        _config_refresh_loop(),
+        name="config_refresh_worker",
+    )
+    logger.info("config refresh worker started | interval=%.0fs", CONFIG_REFRESH_INTERVAL_SECONDS)
+    _schedule_worker_health_snapshot("config_refresh_started")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rate limiting — protect against session floods and runaway loops
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _acquire_session_slot(call_id: str) -> bool:
+    """Try to acquire a session slot. Returns False if at capacity."""
+    ctx = worker_context()
+    async with ctx.active_sessions_lock:
+        if ctx.active_sessions >= MAX_CONCURRENT_SESSIONS:
+            logger.warning(
+                "call=%s | session rejected | reason=at_capacity | active=%d | max=%d",
+                call_id, ctx.active_sessions, MAX_CONCURRENT_SESSIONS,
+            )
+            return False
+        ctx.active_sessions += 1
+        logger.info("call=%s | session acquired | active=%d", call_id, ctx.active_sessions)
+        _schedule_worker_health_snapshot("session_acquired")
+        return True
+
+
+async def _release_session_slot(call_id: str) -> None:
+    """Release a session slot."""
+    ctx = worker_context()
+    async with ctx.active_sessions_lock:
+        ctx.active_sessions = max(0, ctx.active_sessions - 1)
+        logger.info("call=%s | session released | active=%d", call_id, ctx.active_sessions)
+        _schedule_worker_health_snapshot("session_released")
+
+
+def _increment_turn_count(call_id: str) -> int:
+    """Increment and return turn count for a session. Returns new count.
+
+    SAFETY: atomic under CPython GIL — no awaits or yields between the dict
+    read and write.  Do NOT insert async operations between the ``get()``
+    and ``[call_id] = count`` lines; doing so would create a race condition
+    under concurrent coroutines.
+    """
+    ctx = worker_context()
+    count = ctx.turn_counts.get(call_id, 0) + 1
+    ctx.turn_counts[call_id] = count
+    return count
+
+
+def _cleanup_turn_count(call_id: str) -> None:
+    """Remove turn count tracking for a finished session.
+
+    SAFETY: single dict operation — atomic under CPython GIL.
+    """
+    ctx = worker_context()
+    ctx.turn_counts.pop(call_id, None)
 
 
 def _mark_backend_write_success(health: CallWriteHealth | None) -> None:
@@ -1209,14 +1615,6 @@ def _mark_backend_write_failure(exc: Exception, health: CallWriteHealth | None) 
     health.write_blocked_until_monotonic = time.monotonic() + 5.0
 
 
-def _should_retry_backend_error(exc: Exception) -> bool:
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code >= 500
-    return isinstance(
-        exc,
-        (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError),
-    )
-
 
 async def _post(
     endpoint: str,
@@ -1224,6 +1622,7 @@ async def _post(
     call_id: str,
     *,
     idempotency_action: str = "",
+    tool_timeout: float | None = None,
     max_retries: int = BACKEND_MAX_RETRIES,
     write_health: CallWriteHealth | None = None,
     enqueue_on_retryable_failure: bool = True,
@@ -1235,10 +1634,13 @@ async def _post(
     """
     full_url = f"{BACKEND_BASE}{endpoint}"
     headers: dict[str, str] = {"X-Runtime-Source": "voice-agent"}
+    effective_timeout = BACKEND_POST_TIMEOUT_SECONDS if tool_timeout is None else max(0.05, float(tool_timeout))
+    idempotency_key = ""
     if idempotency_action:
-        headers["Idempotency-Key"] = _idempotency_key(call_id, idempotency_action, payload)
+        idempotency_key = _idempotency_key(call_id, idempotency_action, payload)
+        headers["Idempotency-Key"] = idempotency_key
 
-    if _backend_circuit_is_open(endpoint):
+    if await _backend_circuit_is_open(endpoint):
         _mark_backend_circuit_open(write_health)
         logger.warning("call=%s | POST blocked by circuit | endpoint=%s", call_id, endpoint)
         if enqueue_on_retryable_failure:
@@ -1247,6 +1649,7 @@ async def _post(
                 payload,
                 call_id,
                 idempotency_action=idempotency_action,
+                idempotency_key=idempotency_key,
             )
             if queued:
                 return {"queued": True}
@@ -1268,12 +1671,13 @@ async def _post(
                 full_url,
                 json=payload,
                 headers=headers,
+                timeout=effective_timeout,
             )
             res.raise_for_status()
             data = res.json()
             latency_ms = int((time.monotonic() - t0) * 1000)
             _mark_backend_write_success(write_health)
-            _record_backend_circuit_success(endpoint)
+            await _record_backend_circuit_success(endpoint)
             logger.info(
                 "call=%s | POST end | endpoint=%s | attempt=%d | latency=%dms | status_code=%d | ref=%s",
                 call_id, endpoint, attempt + 1, latency_ms,
@@ -1292,19 +1696,20 @@ async def _post(
                 f" | retry in {wait:.2f}s" if should_retry and attempt < retries - 1 else "",
             )
             if not should_retry:
-                _record_backend_circuit_success(endpoint)
+                await _record_backend_circuit_success(endpoint)
                 break
             if attempt < retries - 1:
                 await asyncio.sleep(wait)
 
     if last_exc is not None:
-        _record_backend_circuit_failure(endpoint, last_exc)
+        await _record_backend_circuit_failure(endpoint, last_exc)
         if enqueue_on_retryable_failure and _should_retry_backend_error(last_exc):
             queued = await _enqueue_backend_write(
                 endpoint,
                 payload,
                 call_id,
                 idempotency_action=idempotency_action,
+                idempotency_key=idempotency_key,
             )
             if queued:
                 logger.warning("call=%s | POST deferred to queue | endpoint=%s", call_id, endpoint)
@@ -1379,115 +1784,6 @@ async def submit_complaint(ud: "UserData", text: str, ctype: str) -> dict | None
 # ─────────────────────────────────────────────────────────────────────────────
 # Validators
 # ─────────────────────────────────────────────────────────────────────────────
-_AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
-
-_PHONE_PREFIXES = ("010", "011", "012", "015")
-
-def validate_phone(phone: str) -> str | None:
-    """يتحقق من صحة رقم الموبايل المصري — يقبل أرقام عربية/إنجليزية مع مسافات."""
-    # حوّل الأرقام العربية للإنجليزية
-    cleaned = phone.translate(_AR_DIGITS)
-    # شيل أي حاجة مش رقم ومش + (مسافات، شرط، أقواس، حروف)
-    cleaned = re.sub(r"[^\d+]", "", cleaned)
-    # لو بيبدأ بـ 2010/2011/2012/2015 بدون + ضيف +
-    if re.fullmatch(r"201[0125]\d{8}", cleaned):
-        cleaned = "+" + cleaned
-    return cleaned if re.fullmatch(r"(01[0125]\d{8}|\+201[0125]\d{8})", cleaned) else None
-
-
-_SPOKEN_DIGIT_MAP = {
-    "صفر": "0", "زيرو": "0", "zero": "0",
-    "واحد": "1", "واحده": "1",
-    "اتنين": "2", "اثنين": "2", "اتنان": "2",
-    "تلاته": "3", "تلاتة": "3", "ثلاثة": "3", "ثلاثه": "3",
-    "اربعه": "4", "أربعة": "4", "اربعة": "4", "أربعه": "4",
-    "خمسه": "5", "خمسة": "5",
-    "سته": "6", "ستة": "6",
-    "سبعه": "7", "سبعة": "7",
-    "تمنيه": "8", "تمانيه": "8", "تمانية": "8", "ثمانية": "8", "ثمانيه": "8",
-    "تسعه": "9", "تسعة": "9",
-    "عشره": "10", "عشرة": "10", "عشر": "10",
-    "حداشر": "11", "إحداشر": "11",
-    "اتناشر": "12", "إتناشر": "12",
-    "تلتاشر": "13", "ثلاثتاشر": "13",
-    "أربعتاشر": "14", "اربعتاشر": "14",
-    "خمستاشر": "15",
-}
-
-
-def _spoken_words_to_digits(text: str) -> str:
-    """Convert Arabic spoken number words to digit string."""
-    result = text
-    normalized = _normalize_ar(text)
-    tokens = normalized.split()
-    digit_parts = []
-    non_digit_parts = []
-    for token in tokens:
-        mapped = _SPOKEN_DIGIT_MAP.get(token)
-        if mapped is not None:
-            digit_parts.append(mapped)
-        elif re.fullmatch(r"\d+", token):
-            digit_parts.append(token)
-        else:
-            non_digit_parts.append(token)
-    if digit_parts:
-        return "".join(digit_parts)
-    return re.sub(r"\D", "", text.translate(_AR_DIGITS))
-
-
-def _phone_digits_only(phone: str) -> str:
-    spoken = _spoken_words_to_digits(phone)
-    if spoken:
-        return spoken
-    return re.sub(r"\D", "", phone.translate(_AR_DIGITS))
-
-
-def _is_phone_like_text(text: str) -> bool:
-    translated = (text or "").translate(_AR_DIGITS)
-    digits = re.sub(r"\D", "", translated)
-    # Also check for spoken digit words
-    spoken_digits = _spoken_words_to_digits(text or "")
-    all_digits = spoken_digits or digits
-    if not all_digits:
-        return False
-    if spoken_digits and len(spoken_digits) >= 2:
-        return True
-    non_phone = re.sub(r"[\d\s()+\-]", "", translated).strip()
-    return len(non_phone) <= 4
-
-
-def _is_plausible_partial_phone_digits(digits: str) -> bool:
-    if not digits:
-        return False
-    local_digits = _local_phone_digits(digits)
-    if not local_digits:
-        return False
-    if len(local_digits) >= 11:
-        return bool(validate_phone(local_digits))
-    if any(prefix.startswith(local_digits) for prefix in _PHONE_PREFIXES):
-        return True
-    if len(local_digits) >= 3 and any(local_digits.startswith(prefix) for prefix in _PHONE_PREFIXES):
-        return True
-    return False
-
-
-def _merge_phone_digits(buffered: str, incoming: str) -> str:
-    if not buffered:
-        return incoming
-    if not incoming:
-        return buffered
-    if incoming.startswith("01") or incoming.startswith("20") or incoming.startswith("201"):
-        return incoming
-    return buffered + incoming
-
-
-def _local_phone_digits(digits: str) -> str:
-    normalized = re.sub(r"\D", "", (digits or "").translate(_AR_DIGITS))
-    if normalized.startswith("20") and len(normalized) >= 12:
-        normalized = "0" + normalized[2:]
-    return normalized
-
-
 def _phone_capture_short_reply(ud: "UserData", partial_digits: str) -> str:
     local_digits = _local_phone_digits(partial_digits)
     remaining = max(0, 11 - len(local_digits))
@@ -1610,6 +1906,14 @@ def _reservation_confirmation_prompt(ud: "UserData") -> str:
     return f"حجز {num2ar(ud.guests_count or 0)} ضيوف يوم {ud.reservation_time} باسم {ud.customer_name}، صح؟"
 
 
+def _is_confirmation_prompt(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return False
+    normalized = _normalize_ar(cleaned)
+    return cleaned.endswith("صح؟") or (" باسم " in f" {normalized} " and " صح " in f" {normalized} ")
+
+
 def _clean_followup_note(note: str) -> str:
     return re.sub(r"\s+", " ", (note or "")).strip(" .")
 
@@ -1677,6 +1981,7 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
     if not incoming_digits:
         ud.phone_capture_failures += 1
         _set_phone_capture_mode(ud, True)
+        _emit_event("phone.capture", call_id=ud.call_id, flow=flow_name, result="failure", reason="no_digits")
         return _phone_capture_failure_reply(ud)
 
     direct_valid = validate_phone(incoming_digits)
@@ -1690,14 +1995,30 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
         ud.pending_phone_digits = ""
         _set_phone_capture_mode(ud, False)
         logger.info("call=%s | phone set", ud.call_id)
+        _emit_event(
+            "phone.capture",
+            call_id=ud.call_id,
+            flow=flow_name,
+            result="success",
+            chunked=was_chunked,
+        )
         complaint_note = await _maybe_submit_pending_complaint_for_flow(ud, flow_name)
         note = _clean_followup_note(complaint_note)
         followup = _followup_after_phone(flow_name, ud)
+        critical_followup = _is_confirmation_prompt(followup)
         phone_confirm = f"تمام، {phone2ar(cleaned)}" if was_chunked else _ack()
         if note:
-            return _voice_safe_text(_join_user_phrases(note, followup), max_chars=200)
+            return _voice_safe_text(
+                _join_user_phrases(note, followup),
+                max_chars=200,
+                critical=critical_followup,
+            )
         if followup:
-            return _voice_safe_text(_join_user_phrases(phone_confirm, followup), max_chars=200)
+            return _voice_safe_text(
+                _join_user_phrases(phone_confirm, followup),
+                max_chars=200,
+                critical=critical_followup,
+            )
         return _voice_safe_text(f"{phone_confirm}.")
 
     partial_digits = combined_digits if _is_plausible_partial_phone_digits(combined_digits) else ""
@@ -1706,20 +2027,30 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
         ud.phone_capture_turns += 1
         _set_phone_capture_mode(ud, True)
         logger.info("call=%s | phone_partial_buffered | digits=%d", ud.call_id, len(partial_digits))
+        _emit_event(
+            "phone.capture",
+            call_id=ud.call_id,
+            flow=flow_name,
+            result="partial",
+            buffered_digits=len(partial_digits),
+        )
         return _phone_capture_short_reply(ud, partial_digits)
 
     ud.pending_phone_digits = ""
     ud.phone_capture_failures += 1
     _set_phone_capture_mode(ud, True)
+    _emit_event("phone.capture", call_id=ud.call_id, flow=flow_name, result="failure", reason="invalid_number")
     return _phone_capture_failure_reply(ud)
 
 
 async def _apply_name_update(ud: "UserData", name_text: str, *, flow_name: str) -> str:
     cleaned = _extract_name_candidate(name_text)
     if not cleaned:
+        _emit_event("name.capture", call_id=ud.call_id, flow=flow_name, result="failure")
         return _voice_safe_text("الاسم مش واضح، قولي الاسم بس يا فندم.")
     ud.customer_name = cleaned
     logger.info("call=%s | name=%s", ud.call_id, cleaned)
+    _emit_event("name.capture", call_id=ud.call_id, flow=flow_name, result="success")
     complaint_note = await _maybe_submit_pending_complaint_for_flow(ud, flow_name)
     note = _clean_followup_note(complaint_note)
     _set_phone_capture_mode(ud, _flow_missing_phone(flow_name, ud))
@@ -1794,45 +2125,10 @@ def _resolve_branch_name(branch: str, branches: list[dict]) -> str | None:
     return best_partial[1] if best_partial else None
 
 
-def _looks_like_reservation_time(value: str) -> bool:
-    # Heuristic validator only: بنقوي اكتشاف التاريخ/الساعة من غير parser كامل.
-    raw = (value or "").translate(_AR_DIGITS).strip()
-    if len(raw) < 3:
-        return False
-
-    norm = _normalize_ar(raw)
-    has_day_hint = any(_normalize_ar(hint) in norm for hint in _DATE_HINTS)
-    has_time_hint = any(_normalize_ar(hint) in norm for hint in _TIME_HINTS)
-    has_clock = bool(re.search(r"\b\d{1,2}(:\d{2})?\b", raw))
-    has_date = bool(re.search(r"\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b", raw))
-    has_iso = bool(re.search(r"\b\d{4}-\d{2}-\d{2}(?:[ t]\d{1,2}:\d{2})?\b", raw))
-    has_relative_combo = any(word in norm for word in ["بعد", "بكره", "بكرة", "النهارده", "اليوم"])
-    has_day_period = any(word in norm for word in ["الصبح", "العصر", "بالليل", "مساء", "الظهر"])
-    return has_iso or has_date or ((has_day_hint or has_relative_combo) and (has_time_hint or has_clock or has_day_period))
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Arabic text normalization + fuzzy menu matching
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _menu_match(item_name: str, available_names: set[str]) -> bool:
-    """يتحقق من وجود صنف في المنيو مع مطابقة مرنة للعربي."""
-    norm = _normalize_ar(item_name)
-    for a in available_names:
-        norm_a = _normalize_ar(a)
-        if norm in norm_a or norm_a in norm:
-            return True
-    return False
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Config cache + runtime health
 # ─────────────────────────────────────────────────────────────────────────────
-_config_cache: dict[str, CachedConfigEntry] = {}
-_runtime_health = RuntimeHealth()
 CONFIG_CACHE_TTL = _get_env_float("CONFIG_CACHE_TTL", 60.0, min_value=1.0)
-_backend_circuits: dict[str, BackendCircuitState] = {}
-_backend_queue_worker: asyncio.Task | None = None
-_backend_queue_lock = asyncio.Lock()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Idempotency key
@@ -1846,77 +2142,6 @@ def _idempotency_key(call_id: str, action: str, payload: dict) -> str:
     return f"{call_id}-{action}-{h}"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UserData
-# ─────────────────────────────────────────────────────────────────────────────
-@dataclass
-class UserData:
-    # بيانات العميل
-    customer_name:         str | None       = None
-    customer_phone:        str | None       = None
-    pending_phone_digits:  str              = ""
-    phone_capture_mode:    bool             = False
-    phone_capture_turns:   int              = 0
-    phone_capture_failures: int             = 0
-
-    # طلب (مشترك بين تيكاواي وتوصيل)
-    order:                 list[str] | None = None
-    order_validated:       bool             = False
-    order_total:           float            = 0.0
-    special_requests:      str | None       = None
-    upsell_offered:        bool             = False
-    upsell_accepted:       bool             = False
-    pending_upsell_item:   str | None       = None
-    pending_upsell_price:  float | None     = None
-    order_confirmed:       bool             = False
-    order_id:              str | None       = None
-    order_submit_in_flight: bool           = False
-
-    # توصيل
-    delivery_address:      str | None       = None   # العنوان كامل
-    delivery_zone:         str | None       = None   # المنطقة / الحي
-    delivery_landmark:     str | None       = None   # علامة مميزة
-    landmark_asked:        bool             = False  # هل اتسأل عن العلامة
-
-    # حجز
-    reservation_time:      str | None       = None
-    reservation_time_iso:  str | None       = None
-    guests_count:          int | None       = None
-    selected_branch:       str | None       = None
-    reservation_notes:     str | None       = None
-    reservation_confirmed: bool             = False
-    reservation_id:        str | None       = None
-    reservation_submit_in_flight: bool     = False
-
-    # شكوى
-    complaint_text:        str | None       = None
-    complaint_type:        str | None       = None
-    complaint_logged:      bool             = False
-    complaint_submit_in_flight: bool       = False
-
-    # session internals
-    agents:     dict[str, Agent] = field(default_factory=dict)
-    prev_agent: Agent | None     = None
-    call_id:    str | None       = None
-    restaurant: RestaurantConfig = field(default_factory=RestaurantConfig)
-    write_health: CallWriteHealth = field(default_factory=CallWriteHealth)
-    session_transitional_state: bool = False
-
-    def summarize(self) -> str:
-        return yaml.dump({
-            "name":             self.customer_name     or "—",
-            "phone":            self.customer_phone    or "—",
-            "order":            self.order             or "—",
-            "special_requests": self.special_requests  or "—",
-            "pending_upsell":   self.pending_upsell_item or "—",
-            "upsell_accepted":  self.upsell_accepted,
-            "delivery_address": self.delivery_address  or "—",
-            "delivery_zone":    self.delivery_zone     or "—",
-            "reservation_time": self.reservation_time  or "—",
-            "guests_count":     self.guests_count      or "—",
-            "branch":           self.selected_branch   or "—",
-        }, allow_unicode=True)
-
-
 RunContext_T = RunContext[UserData]
 
 NEGATIVE_WORDS = {
@@ -1926,6 +2151,8 @@ NEGATIVE_WORDS = {
     "آه لا", "اه لا", "آه لأ", "اه لأ", "لا مفيش", "لا خلاص", "لا كده تمام",
     "لا تمام كده", "آه مفيش", "اه مفيش",
 }
+
+_NEGATIVE_FORMS = frozenset(_normalize_ar(word) for word in NEGATIVE_WORDS)
 
 POSITIVE_CONFIRMATION_WORDS = {
     "صح", "صح كده", "ايوه", "أيوه", "ماشي", "مظبوط", "تمام", "تمام كده",
@@ -1965,8 +2192,7 @@ def _looks_empty_answer(text: str | None) -> bool:
     normalized = _normalize_ar(text or "")
     if not normalized:
         return True
-    negative_forms = {_normalize_ar(word) for word in NEGATIVE_WORDS}
-    for word in negative_forms:
+    for word in _NEGATIVE_FORMS:
         if normalized == word:
             return True
         if normalized.startswith(f"{word} "):
@@ -1978,12 +2204,27 @@ def _looks_empty_answer(text: str | None) -> bool:
     return False
 
 
-_ACK_PHRASES = ["تمام يا فندم", "حاضر يا فندم", "ماشي يا فندم", "تمام"]
-_ACK_GOT_IT = ["معايا", "سجلت", "أخدت"]
-_NEXT_NAME = ["اسمك إيه يا فندم؟", "الاسم إيه يا فندم؟", "ممكن اسم حضرتك؟"]
-_NEXT_PHONE = ["ورقم موبايلك؟", "رقم الموبايل يا فندم؟", "ورقم حضرتك؟", "ممكن رقم الموبايل؟"]
-_NEXT_SPECIAL = ["في أي طلب خاص في التحضير؟", "حابب تضيف أي ملاحظة على الطلب؟", "عندك أي طلب خاص؟"]
-_NEXT_ADDRESS = ["عنوانك إيه يا فندم؟", "العنوان إيه يا فندم؟", "ممكن العنوان؟"]
+_ACK_PHRASES = [
+    "تمام يا فندم", "حاضر يا فندم", "ماشي يا فندم", "تمام",
+    "أكيد", "حاضر", "طبعاً", "ماشي",
+]
+_ACK_GOT_IT = ["معايا", "سجلت", "أخدت", "تمام معايا", "حلو"]
+_NEXT_NAME = [
+    "اسمك إيه يا فندم؟", "الاسم إيه يا فندم؟", "ممكن اسم حضرتك؟",
+    "والاسم إيه؟", "اسمك إيه؟",
+]
+_NEXT_PHONE = [
+    "ورقم موبايلك؟", "رقم الموبايل يا فندم؟", "ورقم حضرتك؟",
+    "ممكن رقم الموبايل؟", "ورقمك إيه؟", "والموبايل؟",
+]
+_NEXT_SPECIAL = [
+    "في أي طلب خاص في التحضير؟", "حابب تضيف أي ملاحظة على الطلب؟",
+    "عندك أي طلب خاص؟", "في حاجة معينة في التحضير؟",
+]
+_NEXT_ADDRESS = [
+    "عنوانك إيه يا فندم؟", "العنوان إيه يا فندم؟", "ممكن العنوان؟",
+    "فين هنوصلك؟", "العنوان إيه؟",
+]
 _EMPTY_TAIL_WORDS = {
     "تمام", "خلاص", "كده", "بس", "شكرا", "شكرًا", "ميرسي", "متشكر",
     "يا", "فندم", "لو", "سمحت", "حضرتك", "اوكي", "أوكي", "ماشي", "حاضر",
@@ -2017,32 +2258,6 @@ def _ask_address() -> str:
 
 def _format_order_item(name: str, qty: int) -> str:
     return name if qty <= 1 else f"{name} × {qty}"
-
-
-def _normalize_ar(text: str) -> str:
-    text = (text or "").translate(_AR_DIGITS)
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
-    text = re.sub(r"[إأآا]", "ا", text)
-    text = re.sub(r"[ى]", "ي", text)
-    text = re.sub(r"ة", "ه", text)
-    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
-    text = re.sub(r"\s+", " ", text).strip().lower()
-    return text
-
-
-def _contains_normalized_phrase(text: str, phrases: set[str]) -> bool:
-    normalized = _normalize_ar(text)
-    if not normalized:
-        return False
-    wrapped = f" {normalized} "
-    return any(f" {_normalize_ar(phrase)} " in wrapped for phrase in phrases)
-
-
-def _normalized_phrase_present(normalized_text: str, phrase: str) -> bool:
-    if not normalized_text:
-        return False
-    return f" {_normalize_ar(phrase)} " in f" {normalized_text} "
 
 
 def _is_thanks_message(text: str) -> bool:
@@ -2196,6 +2411,14 @@ _DELIVERY_ZONE_HINTS = {
 }
 _RESERVATION_HINTS = {"حجز", "احجز", "ترابيزة", "ترابيزه", "رزيرفيشن"}
 _COMPLAINT_HINTS = {"شكوى", "مشكلة", "المشكله", "اعتراض", "complaint"}
+_NAME_INTENT_HINT_GROUPS = (
+    _DELIVERY_HINTS,
+    _TAKEAWAY_HINTS,
+    _ORDER_HINTS,
+    _MENU_HINTS,
+    _RESERVATION_HINTS,
+    _COMPLAINT_HINTS,
+)
 _TOTAL_HINTS = {
     "الحساب", "الإجمالي", "الاجمالي", "التوتال", "توتال", "التوتل",
     "التوتر", "التتر", "total", "بكام كله", "كام كله", "المجموع", "السعر كله",
@@ -2216,6 +2439,137 @@ def _chat_message_text(message: llm.ChatMessage | None) -> str:
     with contextlib.suppress(Exception):
         return (message.text_content or "").strip()
     return ""
+
+
+_FLOW_STYLE_PROMPT_MARKER = "[FLOW_STYLE_PROMPT]"
+_FLOW_CONTEXT_PROMPT_MARKER = "[FLOW_CONTEXT_PROMPT]"
+_TURN_GUARD_PROMPT_MARKER = "[TURN_GUARD_PROMPT]"
+_TURN_CAP_PROMPT_MARKER = "[TURN_CAP_PROMPT]"
+
+_NON_ORDER_QUANTITY_TOKENS = frozenset(
+    {
+        "street",
+        "road",
+        "avenue",
+        "building",
+        "floor",
+        "apartment",
+        "apt",
+        "block",
+        "tower",
+        "district",
+        "zone",
+        "area",
+        "unit",
+        "house",
+        "address",
+        "شارع",
+        "طريق",
+        "ميدان",
+        "عماره",
+        "عمارة",
+        "بنايه",
+        "بناية",
+        "شقه",
+        "شقة",
+        "دور",
+        "بلوك",
+        "برج",
+        "حي",
+        "منطقه",
+        "منطقة",
+        "عنوان",
+    }
+)
+
+
+def _chat_message_role(message: llm.ChatMessage | None) -> str:
+    if message is None:
+        return ""
+    with contextlib.suppress(Exception):
+        return str(message.role or "").strip().lower()
+    return ""
+
+
+def _is_marked_system_message(message: llm.ChatMessage | None, *markers: str) -> bool:
+    if _chat_message_role(message) != "system":
+        return False
+    text = _chat_message_text(message)
+    return any(text.startswith(marker) for marker in markers)
+
+
+def _strip_marked_system_messages(chat_ctx: llm.ChatContext, *markers: str) -> None:
+    if not markers:
+        return
+    chat_ctx.items[:] = [
+        item
+        for item in chat_ctx.items
+        if not _is_marked_system_message(item, *markers)
+    ]
+
+
+def _chat_ctx_item_key(message: llm.ChatMessage | None) -> tuple[str, str]:
+    message_id = getattr(message, "id", None)
+    if message_id:
+        return ("id", str(message_id))
+    return ("object", str(id(message)))
+
+
+def _recent_chat_ctx_non_system_items(
+    chat_ctx: llm.ChatContext,
+    *,
+    max_items: int,
+) -> list[llm.ChatMessage]:
+    if max_items <= 0:
+        return []
+    non_system_items = [
+        item for item in chat_ctx.items if _chat_message_role(item) != "system"
+    ]
+    if len(non_system_items) <= max_items:
+        return non_system_items
+    return non_system_items[-max_items:]
+
+
+def _limit_chat_ctx_preserving_system(
+    chat_ctx: llm.ChatContext,
+    *,
+    max_items: int | None = None,
+    max_non_system_items: int | None = None,
+) -> None:
+    if max_items is None and max_non_system_items is None:
+        return
+
+    system_items = [item for item in chat_ctx.items if _chat_message_role(item) == "system"]
+    non_system_items = [
+        item for item in chat_ctx.items if _chat_message_role(item) != "system"
+    ]
+    keep_system = system_items
+    keep_non_system = non_system_items
+
+    if max_non_system_items is not None:
+        if max_non_system_items <= 0:
+            keep_non_system = []
+        elif len(keep_non_system) > max_non_system_items:
+            keep_non_system = keep_non_system[-max_non_system_items:]
+
+    if max_items is not None:
+        if max_items <= 0:
+            keep_system = []
+            keep_non_system = []
+        elif len(keep_system) >= max_items:
+            keep_system = keep_system[-max_items:]
+            keep_non_system = []
+        else:
+            available_non_system_slots = max_items - len(keep_system)
+            if available_non_system_slots <= 0:
+                keep_non_system = []
+            elif len(keep_non_system) > available_non_system_slots:
+                keep_non_system = keep_non_system[-available_non_system_slots:]
+
+    keep_keys = {_chat_ctx_item_key(item) for item in keep_system + keep_non_system}
+    chat_ctx.items[:] = [
+        item for item in chat_ctx.items if _chat_ctx_item_key(item) in keep_keys
+    ]
 
 
 def _is_greeting_only(text: str) -> bool:
@@ -2261,91 +2615,21 @@ def _delivery_zone_user_message(cfg: "RestaurantConfig") -> str:
     return _delivery_unavailable_user_message(cfg)
 
 
-_FILLER_STARTS = {"آ", "آآ", "آه", "اه", "أه", "امم", "ام", "ممم", "هم", "اهم"}
-
-_NON_NAME_PATTERNS = {
-    "آه لا", "اه لا", "آه لأ", "اه لأ", "آه مفيش", "اه مفيش",
-    "آآ لا", "آآ لأ", "آآ مفيش", "آآ تمام",
-    "لا مفيش", "مفيش", "لا خلاص", "خلاص", "تمام", "تمام كده",
-    "لا تمام", "بس كده", "كده تمام", "اوكي", "أوكي", "ماشي",
-}
-
 def _is_likely_non_name_response(text: str) -> bool:
-    """Detect filler/negative responses that should not be captured as names."""
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return True
-    normalized = _normalize_ar(cleaned)
-    if not normalized:
-        return True
-    # Check against known non-name patterns
-    for pattern in _NON_NAME_PATTERNS:
-        np = _normalize_ar(pattern)
-        if normalized == np or normalized.startswith(np + " "):
-            return True
-    # Starts with filler sound (آ, آآ, آه, اه, امم...) followed by anything
-    first_token = cleaned.split()[0]
-    if first_token in _FILLER_STARTS or _normalize_ar(first_token) in {_normalize_ar(f) for f in _FILLER_STARTS}:
-        return True
-    # Also reject if it's just a negative word
-    if _looks_empty_answer(cleaned):
-        return True
-    return False
+    return _is_likely_non_name_response_impl(
+        text,
+        looks_empty_answer=_looks_empty_answer,
+    )
 
 
 def _extract_name_candidate(text: str) -> str | None:
-    cleaned = re.sub(r"[.!؟،,]+", " ", (text or "").translate(_AR_DIGITS)).strip()
-    if not cleaned or _is_phone_like_text(cleaned):
-        return None
-
-    # Strip common intro phrases before the spoken name.
-    for pattern in (
-        r"^(?:انا|أنا)\s+(?:اسمي|اسمى)\s+",
-        r"^(?:اسمي|اسمى|الاسم|اسم)\s+",
-        r"^(?:انا|أنا)\s+",
-        r"^(?:معاك|معاكي)\s+",
-    ):
-        updated = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
-        if updated != cleaned:
-            cleaned = updated
-            break
-
-    cleaned = re.sub(r"\s+(?:يا\s*فندم|لو\s*سمحت|من\s*فضلك)\s*$", "", cleaned, flags=re.IGNORECASE).strip()
-    normalized = _normalize_ar(cleaned)
-    if not normalized or _looks_empty_answer(cleaned):
-        return None
-    if any(
-        _contains_any_hint(normalized, hints)
-        for hints in (
-            _DELIVERY_HINTS,
-            _TAKEAWAY_HINTS,
-            _ORDER_HINTS,
-            _MENU_HINTS,
-            _RESERVATION_HINTS,
-            _COMPLAINT_HINTS,
-        )
-    ):
-        return None
-
-    tokens = cleaned.split()
-    if not tokens or len(tokens) > 3:
-        return None
-    if any(re.search(r"\d", token) for token in tokens):
-        return None
-
-    blocked_tokens = {
-        _normalize_ar(word)
-        for word in (
-            "تمام", "صح", "ماشي", "أيوه", "ايوه", "عنوان", "شارع", "منطقة", "مدينه", "مدينة",
-            "كويس", "حلو", "طيب", "خلاص", "حاضر", "اوكي", "أوكي", "شكرا", "بس",
-            "فراخ", "لحمه", "لحمة", "جبنه", "جبنة", "بيتزا", "برجر", "كشري", "سلطه", "سلطة",
-            "كبير", "كبيره", "كبيرة", "صغير", "صغيره", "صغيرة", "وسط", "لارج", "ميديم",
-            "مشروب", "عصير", "كولا", "بيبسي", "مياه", "شاي", "قهوه", "قهوة",
-        )
-    }
-    if any(_normalize_ar(token) in blocked_tokens for token in tokens):
-        return None
-    return cleaned
+    return _extract_name_candidate_impl(
+        text,
+        looks_empty_answer=_looks_empty_answer,
+        is_phone_like_text=_is_phone_like_text,
+        contains_any_hint=_contains_any_hint,
+        intent_hint_groups=_NAME_INTENT_HINT_GROUPS,
+    )
 
 
 def _menu_response_for_flow(flow: str, cfg: RestaurantConfig) -> str:
@@ -2410,12 +2694,6 @@ def _greeter_turn_decision(
     *,
     has_delivery_agent: bool,
 ) -> GreeterTurnDecision:
-    if _is_greeting_only(text):
-        return GreeterTurnDecision(
-            message="أهلاً بيك يا فندم. تحب تطلب أكل، تحجز، ولا في حاجة تانية؟",
-            reason="greeting_only",
-        )
-
     intent = _guess_request_intent(text, cfg)
     if intent == "menu":
         message = cfg.menu_text() if _available_menu_items(cfg) else _menu_unavailable_user_message(cfg)
@@ -2440,12 +2718,13 @@ def _greeter_turn_decision(
         )
     if intent == "order_ambiguous":
         return GreeterTurnDecision(
-            message="حضرتك هتيجي تاخده ولا توصيل يا فندم؟",
+            message="",
             reason="order_ambiguous",
         )
+    # Unknown intent or greeting — let the LLM respond naturally
     return GreeterTurnDecision(
-        message="تحب تطلب أكل، تحجز، ولا حاجة تانية يا فندم؟",
-        reason="unknown",
+        message="",
+        reason="unknown_passthrough",
     )
 
 
@@ -2592,7 +2871,9 @@ def _parse_order_item(item: str) -> tuple[str, int]:
     if not text:
         return "", 1
 
+    original_text = text
     qty = 1
+    implicit_numeric_match = False
     patterns = [
         r"(?:[×xX*]\s*(\d+))$",
         r"^(\d+)\s+(.+)$",
@@ -2600,11 +2881,12 @@ def _parse_order_item(item: str) -> tuple[str, int]:
         r"^(.+?)\s+(\d+)$",
     ]
 
-    for pattern in patterns:
+    for idx, pattern in enumerate(patterns):
         match = re.match(pattern, text)
         if not match:
             continue
         groups = [g for g in match.groups() if g is not None]
+        implicit_numeric_match = idx in {1, 3}
         if len(groups) == 1:
             qty = int(groups[0])
             text = re.sub(pattern, "", text).strip()
@@ -2617,7 +2899,29 @@ def _parse_order_item(item: str) -> tuple[str, int]:
         break
 
     text = re.sub(r"\s+[×xX*]\s*\d+$", "", text).strip(" -،,")
+    if implicit_numeric_match:
+        normalized_tokens = set(_normalize_ar(original_text).split())
+        if normalized_tokens & _NON_ORDER_QUANTITY_TOKENS:
+            return original_text.strip(" -،,"), 1
     return text, max(1, qty)
+
+
+def _token_overlap_score(target_tokens: set[str], menu_tokens: set[str]) -> float:
+    """Score how well target tokens match menu item tokens.
+    Returns 0.0-1.0 where 1.0 = perfect match. Returns 0 if no overlap."""
+    if not target_tokens or not menu_tokens:
+        return 0.0
+    overlap = target_tokens & menu_tokens
+    if not overlap:
+        return 0.0
+    # Jaccard-like: overlap / union, but weighted toward the menu item
+    # so "بيتزا" alone doesn't strongly match "بيتزا مارجريتا"
+    return len(overlap) / max(len(target_tokens), len(menu_tokens))
+
+
+# Minimum token overlap score to accept a fuzzy match
+_MENU_MATCH_THRESHOLD = 0.5
+_SHORT_MENU_MATCH_THRESHOLD = 0.8
 
 
 def _resolve_menu_item(item_name: str, menu_items: list[dict]) -> dict | None:
@@ -2625,8 +2929,10 @@ def _resolve_menu_item(item_name: str, menu_items: list[dict]) -> dict | None:
     if not target:
         return None
 
+    target_tokens = set(target.split())
+    threshold = _SHORT_MENU_MATCH_THRESHOLD if len(target_tokens) <= 1 else _MENU_MATCH_THRESHOLD
     exact_match: dict | None = None
-    best_partial: tuple[int, dict] | None = None
+    best_match: tuple[float, dict] | None = None
 
     for item in menu_items:
         if not item.get("available", True):
@@ -2634,31 +2940,40 @@ def _resolve_menu_item(item_name: str, menu_items: list[dict]) -> dict | None:
         norm_name = _normalize_ar(item.get("name", ""))
         if not norm_name:
             continue
+        # Exact normalized match — highest priority
         if norm_name == target:
             exact_match = item
             break
-        if target in norm_name or norm_name in target:
-            score = abs(len(norm_name) - len(target))
-            if best_partial is None or score < best_partial[0]:
-                best_partial = (score, item)
+        # Token-level scoring instead of substring matching
+        menu_tokens = set(norm_name.split())
+        score = _token_overlap_score(target_tokens, menu_tokens)
+        if score >= threshold:
+            if best_match is None or score > best_match[0]:
+                best_match = (score, item)
 
     if exact_match:
         return exact_match
-    return best_partial[1] if best_partial else None
+    return best_match[1] if best_match else None
 
 
 def _get_upsell_suggestion(ud: "UserData", cfg: "RestaurantConfig") -> str | None:
     """Pick an upsell item not already in the order."""
     if ud.upsell_offered or not cfg.upsell_rules:
         return None
-    order_lower = {(item or "").lower() for item in (ud.order or [])}
+    order_normalized = {_normalize_ar(item or "") for item in (ud.order or [])}
     for rule in cfg.upsell_rules:
         item_name = rule.get("item", "")
-        if item_name.lower() not in order_lower:
+        if _normalize_ar(item_name) not in order_normalized:
             price = rule.get("price")
             ud.upsell_offered = True
             ud.pending_upsell_item = item_name
             ud.pending_upsell_price = float(price) if price is not None else None
+            _emit_event(
+                "upsell.offer",
+                call_id=ud.call_id,
+                item=item_name,
+                price=float(price) if price is not None else None,
+            )
             if price:
                 return f"ولو تحب، أزودلك {item_name} مع الطلب بـ{_int_to_ar(int(price))} جنيه؟"
             return rule.get("suggestion", f"ولو تحب، أزودلك {item_name} مع الطلب؟")
@@ -2789,8 +3104,32 @@ def _is_reservation_ready_for_confirmation(ud: UserData, cfg: RestaurantConfig) 
     return _reservation_next_missing_slot(ud, cfg) is None
 
 
-def _is_complaint_ready_for_submission(ud: UserData) -> bool:
-    return _complaint_next_missing_slot(ud) is None
+def _is_near_turn_cap_completion(flow: str, ud: UserData) -> bool:
+    if ud.order_confirmed or ud.reservation_confirmed or ud.complaint_logged:
+        return True
+    if flow == "takeaway":
+        return _takeaway_next_missing_slot(ud) in {None, "رقم الموبايل"}
+    if flow == "delivery":
+        return _delivery_next_missing_slot(ud) in {None, "رقم الموبايل"}
+    if flow == "reservation":
+        return _reservation_next_missing_slot(ud, ud.restaurant) in {None, "رقم الموبايل"}
+    if flow == "complaint":
+        return _complaint_next_missing_slot(ud) in {None, "رقم الموبايل"}
+    return False
+
+
+def _turn_cap_system_message(flow: str, ud: UserData, *, in_grace: bool) -> str:
+    missing = _next_step_hint_for_flow(flow, ud) or "المعلومة الأساسية الناقصة"
+    if in_grace:
+        return (
+            "المكالمة دخلت آخر أدوار السماح. "
+            f"كمّل بشكل مختصر جدًا وركّز على {missing} فقط. "
+            "متفتحش مواضيع جديدة ومتعملش أب سيل إضافي."
+        )
+    return (
+        "المكالمة قربت من الحد الأقصى للأدوار. "
+        f"ركّز فقط على {missing} وخلي الرد قصير وطبيعي ومن غير تكرار."
+    )
 
 
 def _flow_missing_phone(flow: str, ud: UserData) -> bool:
@@ -2817,10 +3156,28 @@ def _flow_missing_name(flow: str, ud: UserData) -> bool:
     return False
 
 
-def _should_add_turn_guard(user_text: str) -> bool:
+def _turn_guard_signature(flow: str, guard: str) -> str:
+    normalized_guard = " ".join((guard or "").split())
+    if not normalized_guard:
+        return ""
+    payload = f"{flow}\n{normalized_guard}".encode("utf-8")
+    return hashlib.sha1(payload).hexdigest()
+
+
+def _should_add_turn_guard(
+    user_text: str,
+    *,
+    flow: str = "",
+    current_guard: str = "",
+    previous_guard_signature: str = "",
+) -> bool:
     normalized = _normalize_ar(user_text)
     if not normalized:
         return False
+    if current_guard:
+        current_signature = _turn_guard_signature(flow, current_guard)
+        if previous_guard_signature and current_signature == previous_guard_signature:
+            return False
     return True
 
 
@@ -2830,113 +3187,74 @@ def _flow_turn_guard_message(flow: str, ud: UserData, user_text: str) -> str:
     # Post-confirmation: don't restart the flow
     if ud.order_confirmed or ud.reservation_confirmed or ud.complaint_logged:
         return (
-            "الطلب/الحجز/الشكوى مسجّل خلاص. "
-            "لو العميل عايز حاجة تانية ساعده، "
-            "ولو بيسلّم أو بيشكر قول شكرا واقفل. "
-            "متبدأش أوردر جديد ومتسألش تحب تطلب إيه."
+            "خلاص كل حاجة اتسجلت. "
+            "لو العميل بيشكر أو بيسلّم رد عليه بشكل لطيف. "
+            "لو عايز حاجة تانية ساعده. بس متفتحش موضوع جديد من عندك."
         )
 
     if flow == "takeaway":
         missing = _takeaway_next_missing_slot(ud)
         if missing == "الطلب":
             return (
-                "هذه مرحلة استلام من المطعم. المطلوب الآن الطلب فقط. "
-                "لا تطلب الاسم أو الرقم أو التأكيد قبل تسجيل الطلب. "
-                "لو كلام العميل مجرد تحية أو موافقة قصيرة فاسأله: تحب تطلب إيه؟"
+                "لسه مخدناش الطلب. حاول توجّه الكلام ناحية الأكل بشكل طبيعي. "
+                "لو العميل بيسأل سؤال عادي جاوبه الأول وبعدين ارجع اسأله عن طلبه."
             )
         if missing == "الاسم":
             return (
-                "هذه مرحلة استلام من المطعم. المطلوب الآن الاسم فقط. "
-                "لا تطلب الرقم قبل الاسم. "
-                "لو آخر كلام من العميل كان نفيًا مثل لا أو مفيش على الطلب الخاص، انتقل للاسم فورًا."
+                "الطلب اتسجل — محتاج الاسم دلوقتي. "
+                "لو العميل قال لا أو مفيش على الطلب الخاص، اسأله عن اسمه."
             )
         if missing == "رقم الموبايل":
-            return (
-                "هذه مرحلة استلام من المطعم. المطلوب الآن رقم الموبايل فقط. "
-                "لا تؤكد الطلب ولا تقل تم استلامه قبل تسجيل الرقم."
-            )
-        return (
-            "هذه مرحلة استلام من المطعم. المطلوب الآن تأكيد الطلب فقط. "
-            "لا تقل تم استلام الطلب أو تم تسجيله إلا بعد نجاح confirm_order."
-        )
+            return "الاسم اتسجل — محتاج رقم الموبايل. متأكدش الطلب قبل ما تاخد الرقم."
+        return "كل البيانات جاهزة — لخّص الطلب واستنى التأكيد. متقولش الطلب اتسجل غير بعد نجاح confirm_order."
 
     if flow == "delivery":
         missing = _delivery_next_missing_slot(ud)
         if missing == "الطلب":
             return (
-                "هذه مرحلة توصيل. المطلوب الآن الطلب فقط. "
-                "لا تطلب العنوان أو الاسم أو الرقم قبل تسجيل الطلب."
+                "لسه مخدناش الطلب. وجّه الكلام ناحية الأكل بشكل طبيعي. "
+                "لو العميل بيسأل حاجة تانية جاوبه وبعدين ارجع."
             )
         if missing == "العنوان والمنطقة":
             return (
-                "هذه مرحلة توصيل. المطلوب الآن العنوان فقط. "
-                "لما العميل يقول عنوانه استدعِ update_delivery_address فوراً. "
-                "لا تطلب الاسم أو الرقم قبل العنوان."
+                "الطلب اتسجل — محتاج العنوان دلوقتي. "
+                "أول ما العميل يقول عنوانه استدعي update_delivery_address فوراً."
             )
         if missing == "الاسم":
             return (
-                "هذه مرحلة توصيل. المطلوب الآن الاسم فقط. "
-                "لو العميل قال لا أو مفيش على الطلبات الخاصة أو العلامة المميزة، انتقل للاسم فورًا."
+                "العنوان اتسجل — محتاج الاسم دلوقتي. "
+                "لو العميل رد على سؤال الطلبات الخاصة أو العلامة المميزة، انتقل للاسم."
             )
         if missing == "رقم الموبايل":
-            return (
-                "هذه مرحلة توصيل. المطلوب الآن رقم الموبايل فقط. "
-                "لا تؤكد الطلب قبل تسجيل الرقم."
-            )
-        return (
-            "هذه مرحلة توصيل. المطلوب الآن تأكيد الطلب فقط. "
-            "لا تقل تم استلام الطلب أو اتسجل للتوصيل إلا بعد نجاح confirm_delivery."
-        )
+            return "الاسم اتسجل — محتاج رقم الموبايل. متأكدش الطلب قبل الرقم."
+        return "كل البيانات جاهزة — لخّص الطلب واستنى التأكيد. متقولش اتسجل للتوصيل غير بعد نجاح confirm_delivery."
 
     if flow == "reservation":
         missing = _reservation_next_missing_slot(ud, ud.restaurant)
         if missing == "وقت الحجز":
-            return (
-                "هذه مرحلة حجز. المطلوب الآن وقت الحجز فقط بصيغة يوم وساعة. "
-                "لا تطلب عدد الضيوف قبل تثبيت الوقت."
-            )
+            return "محتاج وقت الحجز — يوم وساعة. لو خارج المواعيد قوله واقترح بديل."
         if missing == "عدد الضيوف":
-            return (
-                "هذه مرحلة حجز. المطلوب الآن عدد الضيوف فقط. "
-                "لا تطلب الاسم أو الرقم قبل العدد."
-            )
+            return "الوقت اتسجل — محتاج عدد الضيوف."
         if missing == "الفرع":
-            return (
-                "هذه مرحلة حجز. المطلوب الآن اسم الفرع فقط. "
-                "لا تنتقل للاسم قبل تحديد الفرع."
-            )
+            return "محتاج يحدد الفرع."
         if missing == "الاسم":
-            return "هذه مرحلة حجز. المطلوب الآن الاسم فقط."
+            return "محتاج الاسم دلوقتي."
         if missing == "رقم الموبايل":
-            return (
-                "هذه مرحلة حجز. المطلوب الآن رقم الموبايل فقط. "
-                "لا تؤكد الحجز قبل تسجيل الرقم."
-            )
-        return (
-            "هذه مرحلة حجز. المطلوب الآن تأكيد الحجز فقط. "
-            "لا تقل الحجز اتأكد إلا بعد نجاح confirm_reservation."
-        )
+            return "محتاج رقم الموبايل. متأكدش الحجز قبل ما تاخد الرقم."
+        return "كل البيانات جاهزة — لخّص الحجز واستنى التأكيد. متقولش الحجز اتأكد غير بعد نجاح confirm_reservation."
 
     if flow == "complaint":
         missing = _complaint_next_missing_slot(ud)
         if missing == "الشكوى":
-            return "هذه مرحلة شكوى. المطلوب الآن تفاصيل الشكوى فقط."
+            return "اسمع الشكوى كويس وخلّي العميل يحكي."
         if missing == "نوع الشكوى":
-            return "هذه مرحلة شكوى. المطلوب الآن نوع الشكوى فقط: طلب أو جودة أو خدمة أو توصيل."
+            return "حاول تفهم نوع المشكلة: طلب أو جودة أو خدمة أو توصيل."
         if missing == "الاسم":
-            return "هذه مرحلة شكوى. المطلوب الآن الاسم فقط."
+            return "الشكوى اتسجلت — محتاج الاسم."
         if missing == "رقم الموبايل":
-            return (
-                "هذه مرحلة شكوى. المطلوب الآن رقم الموبايل فقط. "
-                "لا تقل الشكوى اتثبتت إلا بعد نجاح التسجيل."
-            )
-        return (
-            "هذه مرحلة شكوى. لو التسجيل لم ينجح فقل محفوظة مبدئيًا فقط. "
-            "ولا تقل اتثبتت إلا بعد نجاح submit complaint."
-        )
+            return "محتاج رقم الموبايل علشان يقدروا يتواصلوا مع العميل."
+        return "الشكوى اتسجلت. لو في حاجة ناقصة كمّلها، بس متقولش 'اتثبتت' غير لو فعلاً نجحت."
 
-    if _is_greeting_only(user_text) or normalized in {"تمام", "ماشي", "ايوه", "أيوه"}:
-        return "لو كلام العميل تحية أو موافقة قصيرة فقط، اسأله عن الخطوة المطلوبة الحالية ولا ترتجل."
     return ""
 
 
@@ -2953,9 +3271,9 @@ def _inactivity_reprompt(ud: "UserData", flow: str = "") -> str:
     elif flow == "reservation":
         missing = _reservation_next_missing_slot(ud, ud.restaurant)
     else:
-        return "لسه معايا يا فندم؟"
+        return _random.choice(["لسه معايا يا فندم؟", "أنا معاك يا فندم", "ألو؟"])
     if missing == "الطلب":
-        return "تحب تطلب إيه يا فندم؟"
+        return _random.choice(["تحب تطلب إيه يا فندم؟", "قولي تحب إيه؟"])
     if missing == "الاسم":
         return _ask_name()
     if missing == "رقم الموبايل":
@@ -2963,12 +3281,12 @@ def _inactivity_reprompt(ud: "UserData", flow: str = "") -> str:
     if missing == "العنوان والمنطقة":
         return _ask_address()
     if missing == "وقت الحجز":
-        return "امتى تحب تحجز يا فندم؟"
+        return _random.choice(["امتى تحب تحجز يا فندم؟", "الحجز امتى؟"])
     if missing == "عدد الضيوف":
-        return "كام فرد يا فندم؟"
+        return _random.choice(["كام فرد يا فندم؟", "هتكونوا كام؟"])
     if not missing:
-        return "كده تمام يا فندم؟"
-    return "لسه معايا يا فندم؟"
+        return _random.choice(["كده تمام يا فندم؟", "خلصنا يا فندم؟"])
+    return _random.choice(["لسه معايا يا فندم؟", "أنا معاك يا فندم"])
 
 
 async def _maybe_submit_pending_complaint(context: RunContext_T) -> str:
@@ -2978,1100 +3296,25 @@ async def _maybe_submit_pending_complaint(context: RunContext_T) -> str:
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared tools
+# Re-exports — BaseAgent, shared tools, and flow classes
+# (extracted to separate modules but re-exported here for backward compat)
 # ─────────────────────────────────────────────────────────────────────────────
-
-@function_tool()
-async def update_name(
-    name: Annotated[str, Field(description="اسم العميل واكتبه بالعربي الصوتي حتى لو اتقال بالإنجليزي")],
-    context: RunContext_T,
-) -> str:
-    return await _apply_name_update(
-        context.userdata,
-        name,
-        flow_name=_current_flow_name(context),
-    )
-
-
-@function_tool()
-async def update_phone(
-    phone: Annotated[str, Field(description="رقم موبايل مصري بالأرقام فقط مثل 01012345678")],
-    context: RunContext_T,
-) -> str:
-    return await _apply_phone_update(
-        context.userdata,
-        phone,
-        flow_name=_current_flow_name(context),
-    )
-
-
-@function_tool()
-async def get_menu(context: RunContext_T) -> str:
-    return _menu_response_for_flow(_current_flow_name(context), context.userdata.restaurant)
-
-
-@function_tool()
-async def to_greeter(context: RunContext_T) -> tuple[Agent, str]:
-    curr: BaseAgent = context.session.current_agent
-    return await curr._transfer("greeter", context)
-
-
-class BaseAgent(Agent):
-    # subclass يحدد الجملة الأولى — بتتقال مباشرة عبر TTS بدون LLM (أسرع)
-    # لو فضلت فاضية يُستخدم generate_reply عادي
-    _opening: str = ""
-
-    def _sync_phone_capture_mode(self) -> None:
-        ud: UserData = self.session.userdata
-        desired_preemptive = SESSION_PREEMPTIVE_GENERATION and not ud.phone_capture_mode
-        if self.session.options.preemptive_generation == desired_preemptive:
-            return
-        self.session.options.preemptive_generation = desired_preemptive
-        logger.info(
-            "call=%s | phone_capture_mode=%s | preemptive=%s",
-            ud.call_id,
-            ud.phone_capture_mode,
-            desired_preemptive,
-        )
-
-    async def on_enter(self) -> None:
-        ud: UserData = self.session.userdata
-        logger.info("call=%s | agent=%s", ud.call_id, self.__class__.__name__)
-        desired_phone_mode = _flow_missing_phone(self.__class__.__name__.lower(), ud)
-        if desired_phone_mode != ud.phone_capture_mode:
-            _set_phone_capture_mode(ud, desired_phone_mode)
-
-        chat_ctx = self.chat_ctx.copy()
-        if isinstance(ud.prev_agent, Agent):
-            prev_ctx = ud.prev_agent.chat_ctx.copy(
-                exclude_instructions=True,
-                exclude_function_call=False,
-                exclude_handoff=True,
-                exclude_config_update=True,
-            ).truncate(max_items=PROMPT_HISTORY_ITEMS)
-            seen = {item.id for item in chat_ctx.items}
-            chat_ctx.items.extend(i for i in prev_ctx.items if i.id not in seen)
-
-        chat_ctx.add_message(
-            role="system",
-            content=(
-                "أسلوب الكلام:\n"
-                "- اتكلم زي موظف مطعم مصري طبيعي، ودود وعفوي.\n"
-                "- خليك مختصر بس مش جاف — كلمة لطيفة هنا وهنا عادي.\n"
-                "- كمّل على أول معلومة ناقصة، ومتكررش حاجة العميل قالها قبل كده.\n"
-                "- متضيفش أصناف أو كميات من عندك.\n"
-                "- الأرقام بالكلام والأسماء بالعربي الصوتي.\n"
-                f"بيانات العميل: {ud.summarize()}"
-            ),
-        )
-        chat_ctx.add_message(
-            role="system",
-            content=(
-                f"أنت دلوقتي في {self.__class__.__name__}. "
-                "رد طبيعي بالمصري وكمّل على اللي ناقص."
-            ),
-        )
-        await self.update_chat_ctx(chat_ctx)
-        self._sync_phone_capture_mode()
-
-        if self._opening:
-            # bypass LLM — قول الجملة مباشرة عبر TTS — بيوفر ~500ms لكل انتقال
-            await self.session.say(self._opening, add_to_chat_ctx=True)
-        else:
-            self.session.generate_reply(tool_choice="none")
-
-    async def _say_and_stop(self, text: str) -> None:
-        self._sync_phone_capture_mode()
-        await self.session.say(
-            _voice_safe_text(text, max_chars=180),
-            allow_interruptions=True,
-            add_to_chat_ctx=True,
-        )
-        raise StopResponse()
-
-    def _tool_context(self) -> SimpleNamespace:
-        return SimpleNamespace(userdata=self.session.userdata, session=self.session)
-
-    def _transfer_live(self, name: str) -> bool:
-        ud: UserData = self.session.userdata
-        current = self.session.current_agent
-        current_name = current.__class__.__name__.lower()
-        if current_name == name:
-            logger.warning("call=%s | live transfer skipped | reason=self | agent=%s", ud.call_id, name)
-            return False
-        target = ud.agents.get(name)
-        if target is None:
-            logger.error("call=%s | live transfer target missing: %s", ud.call_id, name)
-            return False
-        logger.info("call=%s | live transfer | %s -> %s", ud.call_id, self.__class__.__name__, name)
-        ud.prev_agent = current
-        self.session.update_agent(target)
-        return True
-
-    async def _maybe_handle_turn_deterministically(self, user_text: str) -> bool:
-        return False
-
-    def _turn_guard_message(self, user_text: str) -> str:
-        flow = self.__class__.__name__.lower()
-        return _flow_turn_guard_message(flow, self.session.userdata, user_text)
-
-    async def on_user_turn_completed(
-        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
-    ) -> None:
-        user_text = _chat_message_text(new_message)
-        flow = self.__class__.__name__.lower()
-        ud = self.session.userdata
-        if not _normalize_ar(user_text):
-            logger.info("call=%s | empty transcript ignored | flow=%s | text=%r", ud.call_id, flow, user_text)
-            raise StopResponse()
-        desired_phone_mode = _flow_missing_phone(flow, ud) or bool(ud.pending_phone_digits)
-        if desired_phone_mode != ud.phone_capture_mode:
-            _set_phone_capture_mode(ud, desired_phone_mode)
-        self._sync_phone_capture_mode()
-
-        if flow in {"takeaway", "delivery"} and _is_total_question(user_text):
-            logger.info("call=%s | total turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-            await self._say_and_stop(_order_total_user_message(flow, ud, ud.restaurant))
-
-        if flow in {"greeter", "delivery"} and _is_delivery_zone_question(user_text):
-            logger.info("call=%s | delivery_zones_intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-            await self._say_and_stop(_delivery_zone_user_message(ud.restaurant))
-
-        if flow in {"takeaway", "delivery"} and _is_menu_question(user_text):
-            logger.info("call=%s | menu turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-            await self._say_and_stop(_menu_response_for_flow(flow, ud.restaurant))
-
-        if ud.order_confirmed or ud.reservation_confirmed or ud.complaint_logged:
-            if _is_thanks_message(user_text):
-                logger.info("call=%s | post_completion_thanks_intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-                await self._say_and_stop(_random.choice(["العفو يا فندم!", "ولا يهمك!", "بالهنا والشفا!"]))
-            if _is_positive_confirmation(user_text):
-                logger.info("call=%s | post_completion_ack_intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-                await self._say_and_stop(_random.choice(["تحت أمرك!", "في أي حاجة تانية يا فندم؟"]))
-
-        # Deterministic handler runs FIRST — upsell, special-request, confirmation
-        # This prevents name/phone interception from stealing turns during those steps.
-        if await self._maybe_handle_turn_deterministically(user_text):
-            raise StopResponse()
-
-        # Name/phone interception runs AFTER deterministic handler so upsell/special
-        # request steps aren't mistakenly captured as names.
-        if _flow_missing_name(flow, ud) and not ud.pending_upsell_item and not _is_likely_non_name_response(user_text):
-            candidate = _extract_name_candidate(user_text)
-            if candidate:
-                logger.info("call=%s | name turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-                await self._say_and_stop(await _apply_name_update(ud, candidate, flow_name=flow))
-
-        if _flow_missing_phone(flow, ud) and _is_phone_like_text(user_text):
-            logger.info("call=%s | phone turn intercepted | flow=%s | text=%r", ud.call_id, flow, user_text)
-            phone_reply = await _apply_phone_update(ud, user_text, flow_name=flow)
-            if phone_reply:
-                await self._say_and_stop(phone_reply)
-            raise StopResponse()
-
-        if len(turn_ctx.items) > TURN_CHAT_CTX_MAX_ITEMS:
-            turn_ctx.items[:] = turn_ctx.truncate(max_items=TURN_CHAT_CTX_MAX_ITEMS).items
-
-        guard = self._turn_guard_message(user_text) if _should_add_turn_guard(user_text) else ""
-        if guard:
-            turn_ctx.add_message(
-                role="system",
-                content=(
-                    f"آخر كلام واضح من العميل: {user_text or '—'}\n"
-                    f"{guard}\n"
-                    "رد بشكل طبيعي وكمّل على اللي ناقص."
-                ),
-            )
-
-    async def _transfer(self, name: str, context: RunContext_T) -> tuple[Agent, str]:
-        ud = context.userdata
-        current = context.session.current_agent
-        current_name = current.__class__.__name__.lower()
-        if current_name == name:
-            logger.warning("call=%s | skipped self-transfer for agent=%s", ud.call_id, name)
-            return current, ""
-        if name not in ud.agents:
-            logger.error("call=%s | transfer target missing: %s", ud.call_id, name)
-            return current, "الخدمة دي مش متاحة دلوقتي."
-        logger.info("call=%s | %s → %s", ud.call_id, self.__class__.__name__, name)
-        ud.prev_agent = current
-        return ud.agents[name], ""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Greeter
-# ─────────────────────────────────────────────────────────────────────────────
-
-class Greeter(BaseAgent):
-    def __init__(self, cfg: RestaurantConfig) -> None:
-        self.cfg = cfg
-
-        if cfg.degraded_mode:
-            instructions = (
-                f"أنت موظف استقبال في '{cfg.name}' والنظام في وضع degraded مؤقت.\n"
-                "قول بالظبط: 'أهلاً بيك يا فندم، في تحديث مؤقت في النظام دلوقتي، تقدر تقولّي طلبك أو تتصل بالمطعم مباشرة.'\n"
-                "لا تدّعي منيو أو مواعيد أو توصيل غير مؤكدة.\n"
-                "لو العميل عايز يكمل اطلب منه يحدد طلبه أو شكواه بشكل مختصر."
-            )
-        elif not cfg.is_open:
-            reason = cfg.closed_reason or "خارج المواعيد"
-            instructions = (
-                f"أنت موظف استقبال في '{cfg.name}'، المطعم مقفول حالياً.\n"
-                f"قول بالظبط: 'أهلاً بيك يا فندم، معاك {cfg.name}، للأسف إحنا مقفولين دلوقتي، {reason}.'\n"
-                f"ثم قول المواعيد: {cfg.hours_text()}\n"
-                f"لو سألك على حاجة تانية قوله يتصل على {cfg.phone}."
-            )
-        else:
-            delivery_line = "• طلب توصيل → to_delivery\n" if cfg.delivery_enabled else ""
-            instructions = (
-                f"أنت موظف استقبال في مطعم '{cfg.name}'.\n\n"
-                "أول ما تفهم نية العميل حوّله للمكان الصح على طول.\n"
-                "لو العميل قال توصيل أو هييجي ياخده صراحة، حوّله فوراً من غير أسئلة زيادة.\n"
-                "لو سأل على المنيو أو سعر → get_menu.\n\n"
-                "التحويلات:\n"
-                "• طلب أكل / استلام من المطعم → to_takeaway\n"
-                f"{delivery_line}"
-                "• حجز ترابيزة → to_reservation\n"
-                "• شكوى أو مشكلة → to_complaint\n"
-                "• مش واضح → اسأله بشكل عفوي\n"
-                "• استخدم resolve_request لو الكلام مش واضح أو الـ STT ملخبطة\n\n"
-                f"أصناف متاحة: {cfg.menu_names()}\n\n"
-                "اتكلم زي موظف مصري طبيعي — ودود وعفوي. متاخدش طلبات ولا تحسب إجمالي."
-            )
-
-        super().__init__(
-            instructions=instructions,
-            tools=[get_menu],
-        )
-        self._delivery_enabled = cfg.delivery_enabled
-        self._opening = (
-            _degraded_user_message(cfg)
-            if cfg.degraded_mode else
-            f"أهلاً بيك يا فندم، معاك {cfg.name}. تحب تطلب، تحجز، ولا في حاجة تانية؟"
-            if cfg.is_open else
-            f"أهلاً بيك يا فندم، معاك {cfg.name}، للأسف إحنا مقفولين دلوقتي."
-        )
-
-    async def _maybe_handle_turn_deterministically(self, user_text: str) -> bool:
-        decision = _greeter_turn_decision(
-            user_text,
-            self.cfg,
-            has_delivery_agent="delivery" in self.session.userdata.agents,
-        )
-        logger.info(
-            "call=%s | greeter turn decision | reason=%s | action=%s | target=%s | text=%r",
-            self.session.userdata.call_id,
-            decision.reason,
-            decision.action,
-            decision.target_agent or "-",
-            user_text,
-        )
-        if decision.action == "route" and decision.target_agent:
-            if self._transfer_live(decision.target_agent):
-                return True
-            await self._say_and_stop("الخدمة دي مش متاحة دلوقتي يا فندم.")
-        if decision.message:
-            await self._say_and_stop(decision.message)
-        return False
-
-    @function_tool()
-    async def to_reservation(self, context: RunContext_T) -> tuple[Agent, str]:
-        """يُستدعى لما العميل يريد حجز ترابيزة."""
-        return await self._transfer("reservation", context)
-
-    @function_tool()
-    async def to_takeaway(self, context: RunContext_T) -> tuple[Agent, str]:
-        """يُستدعى لما العميل يريد ييجي ياخد طلبه من المطعم."""
-        return await self._transfer("takeaway", context)
-
-    @function_tool()
-    async def to_delivery(self, context: RunContext_T) -> str | tuple[Agent, str]:
-        """يُستدعى لما العميل يريد توصيل الطلب لعنوانه."""
-        if not self._delivery_enabled and not self.cfg.degraded_mode:
-            return _delivery_unavailable_user_message(self.cfg)
-        return await self._transfer("delivery", context)
-
-    @function_tool()
-    async def to_complaint(self, context: RunContext_T) -> tuple[Agent, str]:
-        """يُستدعى لما العميل عنده شكوى أو مشكلة."""
-        return await self._transfer("complaint", context)
-
-    @function_tool()
-    async def resolve_request(
-        self,
-        user_text: Annotated[str, Field(description="آخر كلام واضح قاله العميل")],
-        context: RunContext_T,
-    ) -> str | tuple[Agent, str]:
-        intent = _guess_request_intent(user_text, context.userdata.restaurant)
-        if intent in {"delivery", "delivery_degraded"}:
-            return await self._transfer("delivery", context)
-        if intent == "delivery_unavailable":
-            return _delivery_unavailable_user_message(context.userdata.restaurant)
-        if intent == "takeaway":
-            return await self._transfer("takeaway", context)
-        if intent == "reservation":
-            return await self._transfer("reservation", context)
-        if intent == "complaint":
-            return await self._transfer("complaint", context)
-        if intent == "menu":
-            return await get_menu(context)
-        if intent == "order_ambiguous":
-            return "حضرتك هتيجي تاخده ولا توصيل يا فندم؟"
-        return "معلش يا فندم، طلب أكل ولا حجز ولا شكوى؟"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Takeaway
-# ─────────────────────────────────────────────────────────────────────────────
-
-class Takeaway(BaseAgent):
-    def __init__(self, cfg: RestaurantConfig) -> None:
-        self.cfg = cfg
-
-        self._opening = "اتفضل يا فندم، تحب تطلب إيه؟"
-        super().__init__(
-            instructions=(
-                f"أنت موظف طلبات استلام من المطعم في '{cfg.name}'.\n"
-                f"وقت الاستلام: {num2ar(cfg.wait_minutes)} دقيقة.\n\n"
-                "اتكلم زي موظف مطعم مصري حقيقي — عفوي وودود، مش بتقرأ من سكريبت.\n"
-                "نوّع في كلامك، متقولش نفس الجمل كل مرة.\n"
-                "الترتيب العام:\n"
-                "١. لما العميل يقول طلبه استدعِ update_order فوراً — هو اللي بيتحقق من المنيو.\n"
-                "٢. لو update_order رجّع إن الصنف مش في المنيو، بلّغ العميل ومتسجلوش.\n"
-                "٣. اقترح إضافة مرة واحدة بس (مشروب أو طبق جانبي).\n"
-                "٤. اسأل لو فيه طلب خاص في التحضير، ولو قال لأ كمّل.\n"
-                "٥. خُد الاسم ورقم الموبايل.\n"
-                "٦. لخّص الطلب والإجمالي مرة واحدة، ولو وافق استدعِ confirm_order.\n"
-                "لو العميل قال معلومة من خطوة جاية سجّلها وكمّل عادي.\n\n"
-                "قواعد صارمة:\n"
-                "- لازم تستدعي update_order قبل ما تأكد أي صنف — أنت مش عارف المنيو.\n"
-                "- لو سأل عن المنيو أو سعر → get_menu\n"
-                "- لو عنده شكوى → to_complaint\n"
-                "- متقولش للعميل إن صنف موجود أو مش موجود من عندك — استدعِ update_order وهو يرد.\n"
-                "- 'أيوه' أو 'تمام' مش موافقة على الإضافة إلا لو ذكر الصنف.\n"
-                "- لا تكرر التأكيد أكتر من مرة واحدة"
-            ),
-            tools=[
-                update_name,
-                update_phone,
-                to_greeter,
-                get_menu,
-            ],
-        )
-
-    async def _maybe_handle_turn_deterministically(self, user_text: str) -> bool:
-        ud = self.session.userdata
-        context = self._tool_context()
-
-        if ud.pending_upsell_item:
-            pending_item = ud.pending_upsell_item
-            if _is_explicit_upsell_acceptance(user_text, pending_item):
-                logger.info("call=%s | takeaway upsell accepted | item=%s", ud.call_id, pending_item)
-                accepted_item = _accept_pending_upsell(ud, self.cfg) or "الإضافة"
-                special_request = _extract_special_request_after_upsell_reply(user_text, pending_item)
-                if special_request:
-                    ud.special_requests = special_request
-                    await self._say_and_stop(
-                        _special_request_followup_message("takeaway", ud, accepted_item=accepted_item)
-                    )
-                if _upsell_reply_negates_special(user_text):
-                    ud.special_requests = None
-                    await self._say_and_stop(
-                        _voice_safe_text(
-                            _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item}", _ask_name()),
-                            max_chars=180,
-                        )
-                    )
-                await self._say_and_stop(
-                    _voice_safe_text(
-                        _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item}", _ask_special()),
-                        max_chars=180,
-                    )
-                )
-            if _is_positive_confirmation(user_text) or _is_explicit_upsell_rejection(user_text):
-                logger.info("call=%s | takeaway upsell skipped | item=%s | text=%r", ud.call_id, pending_item, user_text)
-                _clear_pending_upsell(ud, accepted=False)
-                special_request = _extract_special_request_after_upsell_reply(user_text, pending_item)
-                if special_request:
-                    ud.special_requests = special_request
-                    await self._say_and_stop(_special_request_followup_message("takeaway", ud))
-                if _upsell_reply_negates_special(user_text):
-                    ud.special_requests = None
-                    await self._say_and_stop(
-                        _voice_safe_text(_join_user_phrases(_ack(), _ask_name()), max_chars=180)
-                    )
-                await self._say_and_stop(
-                    _voice_safe_text(_join_user_phrases(_ack(), _ask_special()), max_chars=180)
-                )
-            logger.info("call=%s | takeaway pending upsell cleared for next turn | item=%s", ud.call_id, pending_item)
-            _clear_pending_upsell(ud, accepted=False)
-
-        if ud.order and not ud.customer_name and _looks_empty_answer(user_text):
-            logger.info("call=%s | takeaway optional_empty_intercepted | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.update_special_requests(requests=user_text, context=context))
-
-        if _is_takeaway_ready_for_confirmation(ud) and _is_positive_confirmation(user_text):
-            logger.info("call=%s | takeaway confirm_intercepted | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.confirm_order(context=context))
-
-        return False
-
-    @function_tool()
-    async def to_complaint(self, context: RunContext_T) -> tuple[Agent, str]:
-        """يُستدعى لو العميل عنده شكوى."""
-        return await self._transfer("complaint", context)
-
-    @function_tool()
-    async def update_order(
-        self,
-        items: Annotated[
-            list[str],
-            Field(description="القايمة الكاملة للطلب مع الكميات مثل ['كشري كبير × 2', 'بيبسي']"),
-        ],
-        context: RunContext_T,
-    ) -> str:
-        if not items:
-            return _voice_safe_text("الطلب فاضي.")
-        if not _available_menu_items(self.cfg):
-            normalized_items = [item.strip() for item in items if item.strip()]
-            if not normalized_items:
-                return _menu_unavailable_user_message(self.cfg)
-            context.userdata.order = normalized_items
-            context.userdata.order_validated = False
-            context.userdata.order_total = 0.0
-            logger.warning("call=%s | takeaway order captured without menu validation", context.userdata.call_id)
-            return _voice_safe_text(
-                f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}.",
-                max_chars=180,
-            )
-        normalized_items, unknown, total = _normalize_order_items(items, self.cfg.menu_items)
-        if unknown and not normalized_items:
-            # All items unknown
-            return _voice_safe_text(
-                f"معلش يا فندم، '{', '.join(unknown)}' مش موجود عندنا. {self.cfg.menu_text()} تحب تطلب إيه منهم؟",
-                max_chars=220,
-            )
-        if unknown:
-            # Some valid, some not
-            context.userdata.order = normalized_items
-            context.userdata.order_validated = True
-            context.userdata.order_total = total
-            return _voice_safe_text(
-                f"سجلت {', '.join(normalized_items)} بس '{', '.join(unknown)}' مش في المنيو. تحب تبدلها بحاجة تانية؟",
-                max_chars=200,
-            )
-        context.userdata.order = normalized_items
-        context.userdata.order_validated = True
-        context.userdata.order_total = total
-        upsell = _get_upsell_suggestion(context.userdata, self.cfg)
-        if upsell:
-            return _voice_safe_text(
-                f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}. {upsell}",
-                max_chars=180,
-            )
-        return _voice_safe_text(
-            f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}.",
-            max_chars=180,
-        )
-
-    @function_tool()
-    async def update_special_requests(
-        self,
-        requests: Annotated[str, Field(description="طلبات خاصة في التحضير أو مفيش")],
-        context: RunContext_T,
-    ) -> str:
-        _clear_pending_upsell(context.userdata)
-        if _looks_empty_answer(requests):
-            context.userdata.special_requests = None
-            return _voice_safe_text(
-                _join_user_phrases("تمام يا فندم، مفيش طلب خاص", _ask_name()),
-                max_chars=180,
-            )
-        context.userdata.special_requests = requests.strip()
-        return _voice_safe_text(
-            _join_user_phrases("تمام يا فندم، سجلت الملاحظة على الطلب", _ask_name()),
-            max_chars=180,
-        )
-
-    @function_tool()
-    async def confirm_order(self, context: RunContext_T) -> str:
-        ud = context.userdata
-        if ud.order_confirmed:
-            logger.info("call=%s | takeaway submit skipped | reason=already_confirmed", ud.call_id)
-            return _voice_safe_text(f"الطلب متسجل خلاص يا {ud.customer_name}. في حاجة تانية؟")
-        if ud.order_submit_in_flight:
-            logger.warning("call=%s | takeaway submit skipped | reason=in_flight", ud.call_id)
-            return _voice_safe_text("ثانية واحدة يا فندم، بسجل الطلب دلوقتي.")
-        missing = _takeaway_next_missing_slot(ud)
-        if missing:
-            return _voice_safe_text(f"لسه محتاج: {missing}.")
-        if not ud.order_validated:
-            logger.warning("call=%s | takeaway submit skipped | reason=order_not_validated", ud.call_id)
-            return _order_validation_user_message(self.cfg)
-        if not _can_attempt_backend_write(ud):
-            logger.warning("call=%s | takeaway submit skipped | reason=write_unavailable", ud.call_id)
-            return _backend_failure_user_message(ud)
-
-        ud.order_submit_in_flight = True
-        try:
-            result = await submit_takeaway(ud)
-        finally:
-            ud.order_submit_in_flight = False
-        if not result:
-            return _backend_failure_user_message(ud)
-        if result.get("queued"):
-            return _backend_queued_user_message("order")
-
-        ud.order_id = result.get("order_id", "")
-        ud.order_confirmed = True
-        wait = result.get("estimated_time", self.cfg.wait_minutes)
-        return f"تمام يا {ud.customer_name}، الطلب اتسجل. هيبقى جاهز خلال {num2ar(wait)} دقيقة."
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Delivery
-# ─────────────────────────────────────────────────────────────────────────────
-
-class Delivery(BaseAgent):
-    def __init__(self, cfg: RestaurantConfig) -> None:
-        self.cfg = cfg
-        self._opening = "اتفضل يا فندم، تحب تطلب إيه؟"
-
-        zones_info = f" | مناطق: {cfg.delivery_zones_text()}" if cfg.delivery_zones else ""
-
-        super().__init__(
-            instructions=(
-                f"أنت موظف طلبات توصيل في '{cfg.name}'.\n"
-                f"{cfg.delivery_info_text()}{zones_info}\n\n"
-                "اتكلم زي موظف مطعم مصري حقيقي — عفوي وودود.\n"
-                "نوّع في كلامك، متقولش نفس الجمل كل مرة.\n"
-                "الترتيب العام:\n"
-                "١. لما العميل يقول طلبه استدعِ update_order فوراً — هو اللي بيتحقق من المنيو.\n"
-                "٢. لو update_order رجّع إن الصنف مش في المنيو، بلّغ العميل ومتسجلوش.\n"
-                "٣. اقترح إضافة مرة واحدة بس (مشروب أو طبق جانبي).\n"
-                "٤. اسأل لو فيه طلب خاص في التحضير، ولو قال لأ كمّل.\n"
-                "٥. خُد العنوان → استدعِ update_delivery_address فوراً حتى لو المنطقة مش واضحة.\n"
-                "٦. العلامة المميزة لو العنوان مش واضح كفاية.\n"
-                "٧. خُد الاسم ورقم الموبايل.\n"
-                "٨. لخّص الطلب والإجمالي مرة واحدة، ولو وافق استدعِ confirm_delivery.\n"
-                "لو العميل قال معلومة من خطوة جاية سجّلها وكمّل عادي.\n\n"
-                "قواعد صارمة:\n"
-                "- لازم تستدعي update_order قبل ما تأكد أي صنف — أنت مش عارف المنيو.\n"
-                "- أول ما العميل يقول عنوانه استدعِ update_delivery_address على طول.\n"
-                "- لو سأل عن المنيو أو سعر → get_menu\n"
-                "- لو عنده شكوى → to_complaint\n"
-                "- متقولش للعميل إن صنف موجود أو مش موجود من عندك — استدعِ update_order وهو يرد.\n"
-                "- 'أيوه' أو 'تمام' مش موافقة على الإضافة إلا لو ذكر الصنف."
-            ),
-            tools=[
-                update_name,
-                update_phone,
-                to_greeter,
-                get_menu,
-            ],
-        )
-
-    async def _maybe_handle_turn_deterministically(self, user_text: str) -> bool:
-        ud = self.session.userdata
-        context = self._tool_context()
-
-        if ud.pending_upsell_item:
-            pending_item = ud.pending_upsell_item
-            if _is_explicit_upsell_acceptance(user_text, pending_item):
-                logger.info("call=%s | delivery upsell accepted | item=%s", ud.call_id, pending_item)
-                accepted_item = _accept_pending_upsell(ud, self.cfg) or "الإضافة"
-                special_request = _extract_special_request_after_upsell_reply(user_text, pending_item)
-                if special_request:
-                    ud.special_requests = special_request
-                    await self._say_and_stop(
-                        _special_request_followup_message("delivery", ud, accepted_item=accepted_item)
-                    )
-                if _upsell_reply_negates_special(user_text):
-                    ud.special_requests = None
-                    await self._say_and_stop(
-                        _voice_safe_text(
-                            _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item}", _ask_address()),
-                            max_chars=180,
-                        )
-                    )
-                await self._say_and_stop(
-                    _voice_safe_text(
-                        _join_user_phrases(f"تمام يا فندم، ضفت {accepted_item}", _ask_special()),
-                        max_chars=180,
-                    )
-                )
-            if _is_positive_confirmation(user_text) or _is_explicit_upsell_rejection(user_text):
-                logger.info("call=%s | delivery upsell skipped | item=%s | text=%r", ud.call_id, pending_item, user_text)
-                _clear_pending_upsell(ud, accepted=False)
-                special_request = _extract_special_request_after_upsell_reply(user_text, pending_item)
-                if special_request:
-                    ud.special_requests = special_request
-                    await self._say_and_stop(_special_request_followup_message("delivery", ud))
-                if _upsell_reply_negates_special(user_text):
-                    ud.special_requests = None
-                    await self._say_and_stop(
-                        _voice_safe_text(_join_user_phrases(_ack(), _ask_address()), max_chars=180)
-                    )
-                await self._say_and_stop(
-                    _voice_safe_text(_join_user_phrases(_ack(), _ask_special()), max_chars=180)
-                )
-            logger.info("call=%s | delivery pending upsell cleared for next turn | item=%s", ud.call_id, pending_item)
-            _clear_pending_upsell(ud, accepted=False)
-
-        if ud.order and not ud.delivery_address and _looks_empty_answer(user_text):
-            logger.info("call=%s | delivery optional_empty_intercepted | step=special_requests | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.update_special_requests(requests=user_text, context=context))
-
-        if ud.delivery_address and not ud.landmark_asked and _looks_empty_answer(user_text):
-            logger.info("call=%s | delivery optional_empty_intercepted | step=landmark | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.update_delivery_landmark(landmark=user_text, context=context))
-
-        if _is_delivery_ready_for_confirmation(ud) and _is_positive_confirmation(user_text):
-            logger.info("call=%s | delivery confirm_intercepted | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.confirm_delivery(context=context))
-
-        return False
-
-    @function_tool()
-    async def update_order(
-        self,
-        items: Annotated[
-            list[str],
-            Field(description="القائمة الكاملة للطلب مع الكميات مثلاً ['كوشري كبير × 2', 'عصير ليمون']"),
-        ],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لما العميل يطلب أو يعدّل. ابعت القائمة كاملة دايماً."""
-        if not items:
-            return _voice_safe_text("الطلب فاضي.")
-        if not _available_menu_items(self.cfg):
-            normalized_items = [item.strip() for item in items if item.strip()]
-            if not normalized_items:
-                return _menu_unavailable_user_message(self.cfg)
-            context.userdata.order = normalized_items
-            context.userdata.order_validated = False
-            context.userdata.order_total = 0.0
-            logger.warning("call=%s | delivery order captured without menu validation", context.userdata.call_id)
-            return _voice_safe_text(
-                f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}.",
-                max_chars=180,
-            )
-        normalized_items, unknown, total = _normalize_order_items(items, self.cfg.menu_items)
-        if unknown and not normalized_items:
-            return _voice_safe_text(
-                f"معلش يا فندم، '{', '.join(unknown)}' مش موجود عندنا. {self.cfg.menu_text()} تحب تطلب إيه منهم؟",
-                max_chars=220,
-            )
-        if unknown:
-            context.userdata.order = normalized_items
-            context.userdata.order_validated = True
-            context.userdata.order_total = total
-            return _voice_safe_text(
-                f"سجلت {', '.join(normalized_items)} بس '{', '.join(unknown)}' مش في المنيو. تحب تبدلها بحاجة تانية؟",
-                max_chars=200,
-            )
-
-        if self.cfg.min_order > 0:
-            if total < self.cfg.min_order:
-                return _voice_safe_text(
-                    f"أقل طلب للتوصيل {money2ar(self.cfg.min_order)} جنيه. "
-                    f"طلبك دلوقتي {money2ar(total)} جنيه. "
-                    "تحب تضيف حاجة؟"
-                )
-
-        context.userdata.order = normalized_items
-        context.userdata.order_validated = True
-        context.userdata.order_total = total
-        upsell = _get_upsell_suggestion(context.userdata, self.cfg)
-        if upsell:
-            return _voice_safe_text(
-                f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}. {upsell}",
-                max_chars=180,
-            )
-        return _voice_safe_text(
-            f"تمام يا فندم، {_ack_got(', '.join(normalized_items))}.",
-            max_chars=180,
-        )
-
-    @function_tool()
-    async def update_special_requests(
-        self,
-        requests: Annotated[str, Field(description="طلبات خاصة في التحضير")],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لما العميل يذكر طلبات خاصة."""
-        _clear_pending_upsell(context.userdata)
-        if _looks_empty_answer(requests):
-            context.userdata.special_requests = None
-            return _voice_safe_text(
-                _join_user_phrases("تمام يا فندم، مفيش طلب خاص", _ask_address()),
-                max_chars=180,
-            )
-        context.userdata.special_requests = requests.strip()
-        return _voice_safe_text(
-            _join_user_phrases("تمام يا فندم، سجلت الملاحظة على الطلب", _ask_address()),
-            max_chars=180,
-        )
-
-    @function_tool()
-    async def update_delivery_address(
-        self,
-        address: Annotated[str, Field(description="العنوان كامل: الشارع والرقم والمنطقة")],
-        zone: Annotated[str, Field(description="المنطقة أو الحي — لو مش واضحة كرر اسم المنطقة من العنوان")],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لما العميل يقول عنوانه — استدعيه فوراً حتى لو المنطقة مش واضحة."""
-        # لو المنطقة مش متبعتة، حاول تستخرجها من العنوان
-        if not zone or not zone.strip():
-            zone = _extract_zone_from_address(address, self.cfg.delivery_zones)
-        # تحقق من منطقة التوصيل — مطابقة عربية مرنة
-        if self.cfg.delivery_zones:
-            zone_norm = _normalize_ar(zone)
-            covered = any(
-                zone_norm in _normalize_ar(z) or _normalize_ar(z) in zone_norm
-                for z in self.cfg.delivery_zones
-            )
-            if not covered:
-                return _voice_safe_text(
-                    f"للأسف مش بنوصل {zone} دلوقتي. "
-                    f"المتاح {self.cfg.delivery_zones_text()}. "
-                    "تحب تيجي تاخده من عندنا؟"
-                )
-
-        context.userdata.delivery_address = address.strip()
-        context.userdata.delivery_zone    = zone.strip()
-        context.userdata.delivery_landmark = None
-        logger.info("call=%s | delivery_address=%s zone=%s",
-                    context.userdata.call_id, address, zone)
-        if _address_seems_specific(address):
-            context.userdata.landmark_asked = True
-            return _voice_safe_text(
-                _join_user_phrases(
-                    f"تمام يا فندم، سجلت العنوان: {context.userdata.delivery_address}",
-                    _ask_name(),
-                ),
-                max_chars=220,
-            )
-        context.userdata.landmark_asked = False
-        return _voice_safe_text(
-            _join_user_phrases(
-                f"تمام يا فندم، سجلت العنوان: {context.userdata.delivery_address}",
-                "في علامة مميزة قريبة منك؟",
-            ),
-            max_chars=220,
-        )
-
-    @function_tool()
-    async def update_delivery_landmark(
-        self,
-        landmark: Annotated[str, Field(description="علامة مميزة قريبة من العنوان")],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لما العميل يذكر علامة مميزة."""
-        context.userdata.landmark_asked = True
-        if _looks_empty_answer(landmark):
-            context.userdata.delivery_landmark = None
-            return _voice_safe_text(
-                _join_user_phrases("تمام يا فندم، مفيش علامة مميزة", _ask_name()),
-                max_chars=180,
-            )
-        explicit_name_reply = re.match(r"^\s*(?:انا|أنا|اسمي|اسمى|الاسم|اسم|معاك|معاكي)\b", landmark, flags=re.IGNORECASE)
-        if explicit_name_reply and not context.userdata.customer_name:
-            name_candidate = _extract_name_candidate(landmark)
-            if name_candidate:
-                context.userdata.delivery_landmark = None
-                context.userdata.customer_name = name_candidate
-                return _voice_safe_text(f"{_ack()} يا {name_candidate}. {_ask_phone()}", max_chars=180)
-        context.userdata.delivery_landmark = landmark.strip()
-        return _voice_safe_text(
-            _join_user_phrases("تمام يا فندم، سجلت العلامة المميزة", _ask_name()),
-            max_chars=180,
-        )
-
-    @function_tool()
-    async def to_complaint(self, context: RunContext_T) -> tuple[Agent, str]:
-        """يُستدعى لو العميل عنده شكوى."""
-        return await self._transfer("complaint", context)
-
-    @function_tool()
-    async def confirm_delivery(self, context: RunContext_T) -> str:
-        """يُستدعى بعد تأكيد الطلب والعنوان والاسم والرقم كاملاً."""
-        ud = context.userdata
-        if ud.order_confirmed:
-            logger.info("call=%s | delivery submit skipped | reason=already_confirmed", ud.call_id)
-            return _voice_safe_text(f"الطلب مسجل خلاص يا {ud.customer_name}. في حاجة تانية؟")
-        if ud.order_submit_in_flight:
-            logger.warning("call=%s | delivery submit skipped | reason=in_flight", ud.call_id)
-            return _voice_safe_text("ثانية واحدة يا فندم، بسجل الطلب دلوقتي.")
-        missing = _delivery_next_missing_slot(ud)
-        if missing:
-            return _voice_safe_text(f"لسه محتاج: {missing}.")
-        if not ud.order_validated:
-            logger.warning("call=%s | delivery submit skipped | reason=order_not_validated", ud.call_id)
-            return _order_validation_user_message(self.cfg)
-        if not _can_attempt_backend_write(ud):
-            logger.warning("call=%s | delivery submit skipped | reason=write_unavailable", ud.call_id)
-            return _backend_failure_user_message(ud)
-
-        ud.order_submit_in_flight = True
-        try:
-            result = await submit_delivery(ud)
-        finally:
-            ud.order_submit_in_flight = False
-        if not result:
-            return _backend_failure_user_message(ud)
-        if result.get("queued"):
-            return _backend_queued_user_message("order")
-
-        ud.order_id        = result.get("order_id", "")
-        ud.order_confirmed = True
-        wait               = result.get("estimated_time", self.cfg.delivery_minutes)
-
-        msg = f"تمام يا {ud.customer_name}، الطلب اتسجل للتوصيل."
-        if self.cfg.delivery_fee > 0:
-            msg += f" رسوم التوصيل {money2ar(self.cfg.delivery_fee)} جنيه."
-        msg += f" هيوصلك خلال {num2ar(wait)} دقيقة."
-        return msg
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Reservation
-# ─────────────────────────────────────────────────────────────────────────────
-
-class Reservation(BaseAgent):
-    def __init__(self, cfg: RestaurantConfig) -> None:
-        self.cfg = cfg
-        self._opening = "عايز تحجز إمتى يا فندم؟"
-
-        branch_note = f" | فروع: {cfg.branch_names()}" if len(cfg.branches) > 1 else ""
-
-        super().__init__(
-            instructions=(
-                f"أنت موظف حجوزات في '{cfg.name}'.\n"
-                f"مواعيد: {cfg.hours_text()}\n"
-                f"الحجز: من {num2ar(cfg.min_guests)} لـ{num2ar(cfg.max_guests)} ضيف{branch_note}\n\n"
-                "اتكلم زي موظف مصري طبيعي — ودود وعفوي.\n"
-                "الترتيب العام:\n"
-                "١. اسأل عن الوقت → update_reservation_time\n"
-                "   لو خارج المواعيد → قول المواعيد واقترح بديل\n"
-                "٢. اسأل عن عدد الضيوف → update_guests_count\n"
-                "٣. اسأل لو في مناسبة → update_reservation_notes\n"
-                + (f"٤. اسأل عن الفرع: {cfg.branch_names()} → update_branch\n" if len(cfg.branches) > 1 else "")
-                + ("٥" if len(cfg.branches) > 1 else "٤") + ". خُد الاسم → update_name\n"
-                + ("٦" if len(cfg.branches) > 1 else "٥") + ". خُد رقم الموبايل → update_phone\n"
-                + ("٧" if len(cfg.branches) > 1 else "٦") + ". لخّص الحجز، ولو أكّد → confirm_reservation\n\n"
-                "لو حاجة خارج نطاقك → to_greeter"
-            ),
-            tools=[
-                update_name,
-                update_phone,
-                to_greeter,
-            ],
-        )
-
-    async def _maybe_handle_turn_deterministically(self, user_text: str) -> bool:
-        ud = self.session.userdata
-        context = self._tool_context()
-
-        if ud.reservation_time and ud.guests_count is not None and not ud.customer_name and _looks_empty_answer(user_text):
-            logger.info("call=%s | reservation optional_empty_intercepted | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.update_reservation_notes(notes=user_text, context=context))
-
-        if _is_reservation_ready_for_confirmation(ud, self.cfg) and _is_positive_confirmation(user_text):
-            logger.info("call=%s | reservation confirm_intercepted | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.confirm_reservation(context=context))
-
-        return False
-
-    @function_tool()
-    async def update_reservation_time(
-        self,
-        time: Annotated[str, Field(description="وقت وتاريخ الحجز")],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لما العميل يحدد وقت الحجز."""
-        time = time.strip()
-        parsed = _parse_reservation_time(time, self.cfg)
-        if parsed is None:
-            if self.cfg.hours:
-                return _voice_safe_text(
-                    f"الوقت مش واضح أو خارج المواعيد. مواعيدنا {self.cfg.hours_text()}. قول اليوم والساعة مع بعض.",
-                    max_chars=170,
-                )
-            return _voice_safe_text("الوقت مش واضح. قول اليوم والساعة مع بعض، زي بكرة الساعة 8 بالليل.")
-        context.userdata.reservation_time = parsed.raw_text
-        context.userdata.reservation_time_iso = parsed.normalized_text
-        return _voice_safe_text(f"{_ack()}، {parsed.raw_text}. كام شخص هتكونوا؟", max_chars=180)
-
-    @function_tool()
-    async def update_guests_count(
-        self,
-        count: Annotated[int, Field(description="عدد الضيوف", ge=1)],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لما العميل يقول عدد الضيوف."""
-        if count < self.cfg.min_guests:
-            return _voice_safe_text(f"أقل عدد للحجز {num2ar(self.cfg.min_guests)} أشخاص.")
-        if count > self.cfg.max_guests:
-            return _voice_safe_text(f"أكتر عدد في حجز واحد {num2ar(self.cfg.max_guests)}، اتصل على {spoken_phone(self.cfg.phone)} مباشرة لو أكتر.")
-        context.userdata.guests_count = count
-        return _voice_safe_text(f"{_ack()}، {num2ar(count)} أشخاص. في مناسبة معينة ولا عادي؟")
-
-    @function_tool()
-    async def update_branch(
-        self,
-        branch: Annotated[str, Field(description="اسم الفرع")],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لما العميل يختار فرع."""
-        resolved = _resolve_branch_name(branch, self.cfg.branches)
-        if not resolved:
-            return _voice_safe_text(f"الفرع ده مش واضح. الفروع المتاحة: {self.cfg.branch_names()}.", max_chars=170)
-        context.userdata.selected_branch = resolved
-        return _voice_safe_text(f"{_ack()}، فرع {resolved}. {_ask_name()}")
-
-    @function_tool()
-    async def update_reservation_notes(
-        self,
-        notes: Annotated[str, Field(description="ملاحظات أو طلبات خاصة")],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لما العميل يذكر طلبات خاصة للحجز."""
-        if _looks_empty_answer(notes):
-            context.userdata.reservation_notes = None
-            if len(self.cfg.branches) > 1 and not context.userdata.selected_branch:
-                return _voice_safe_text(
-                    f"تمام يا فندم، مفيش ملاحظات. أي فرع تفضل؟ {self.cfg.branch_names()}",
-                    max_chars=180,
-                )
-            return _voice_safe_text(
-                _join_user_phrases("تمام يا فندم، مفيش ملاحظات", _ask_name()),
-                max_chars=180,
-            )
-        context.userdata.reservation_notes = notes.strip()
-        if len(self.cfg.branches) > 1 and not context.userdata.selected_branch:
-            return _voice_safe_text(
-                f"تمام يا فندم، سجلت الملاحظة. أي فرع تفضل؟ {self.cfg.branch_names()}",
-                max_chars=180,
-            )
-        return _voice_safe_text(
-            _join_user_phrases("تمام يا فندم، سجلت الملاحظة", _ask_name()),
-            max_chars=180,
-        )
-
-    @function_tool()
-    async def confirm_reservation(self, context: RunContext_T) -> str:
-        """يُستدعى بعد تأكيد كل بيانات الحجز."""
-        ud = context.userdata
-        if ud.reservation_confirmed:
-            logger.info("call=%s | reservation submit skipped | reason=already_confirmed", ud.call_id)
-            return _voice_safe_text(f"الحجز مسجل خلاص يا {ud.customer_name}. في حاجة تانية؟")
-        if ud.reservation_submit_in_flight:
-            logger.warning("call=%s | reservation submit skipped | reason=in_flight", ud.call_id)
-            return _voice_safe_text("ثانية واحدة يا فندم، بسجل الحجز دلوقتي.")
-        missing = _reservation_next_missing_slot(ud, self.cfg)
-        if missing:
-            return _voice_safe_text(f"لسه محتاج: {missing}.")
-        if not _can_attempt_backend_write(ud):
-            logger.warning("call=%s | reservation submit skipped | reason=write_unavailable", ud.call_id)
-            return _backend_failure_user_message(ud)
-
-        ud.reservation_submit_in_flight = True
-        try:
-            result = await submit_reservation(ud)
-        finally:
-            ud.reservation_submit_in_flight = False
-        if not result:
-            return _backend_failure_user_message(ud)
-        if result.get("queued"):
-            return _backend_queued_user_message("reservation")
-
-        ud.reservation_id        = result.get("reservation_id", "")
-        ud.reservation_confirmed = True
-        msg = f"تمام يا {ud.customer_name}، الحجز اتأكد."
-        msg += " هنبعتلك رسالة تأكيد."
-        return msg
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Complaint
-# ─────────────────────────────────────────────────────────────────────────────
-
-class Complaint(BaseAgent):
-    def __init__(self, cfg: RestaurantConfig) -> None:
-        self._opening = "قولي حصل إيه يا فندم؟"
-        super().__init__(
-            instructions=(
-                f"أنت موظف خدمة عملاء في '{cfg.name}'.\n\n"
-                "اتبع الخطوات دي بالترتيب:\n"
-                "١. قول: 'قولي حصل إيه يا فندم؟' → استمع للشكوى\n"
-                "٢. قول: 'آسفين جداً على اللي حصل، هنتابع الموضوع فوراً.' → log_complaint\n"
-                "٣. لو الاسم مش متسجل: 'اسمك إيه يا فندم؟' → update_name\n"
-                "٤. لو الموبايل مش متسجل: 'ورقم موبايلك علشان نتواصل معاك؟' → update_phone\n"
-                "٥. قول: 'تحب حاجة تانية يا فندم؟'\n\n"
-                "قواعد:\n"
-                "- لا تجادل ولا تبرر\n"
-                "- لو طلب أكل → to_greeter"
-            ),
-            tools=[update_name, update_phone, to_greeter],
-        )
-
-    @function_tool()
-    async def log_complaint(
-        self,
-        complaint_text: Annotated[str, Field(description="ملخص الشكوى")],
-        complaint_type: Annotated[str, Field(
-            description="النوع: order_issue | quality | service | delivery | other"
-        )],
-        context: RunContext_T,
-    ) -> str:
-        """يُستدعى لتسجيل الشكوى."""
-        ud = context.userdata
-        if ud.complaint_logged:
-            logger.info("call=%s | complaint log skipped | reason=already_logged", ud.call_id)
-            return _voice_safe_text("الشكوى متسجلة خلاص يا فندم.")
-        cleaned_text = complaint_text.strip()
-        if len(cleaned_text) < 3:
-            return _voice_safe_text("قولّي الشكوى بشكل أوضح شوية يا فندم.")
-        ud.complaint_text = cleaned_text
-        normalized_type = _normalize_complaint_type(complaint_type)
-        if not normalized_type:
-            logger.info("call=%s | complaint_pending | missing=نوع الشكوى", ud.call_id)
-            return _voice_safe_text("نوع الشكوى مش واضح. اختاره كطلب أو جودة أو خدمة أو توصيل.")
-        ud.complaint_type = normalized_type
-        note = await _maybe_submit_pending_complaint(context)
-        if ud.complaint_logged:
-            return _voice_safe_text(_join_user_phrases("تمام يا فندم، الشكوى اتسجلت", _complaint_followup_question(ud)), max_chars=180)
-        if note:
-            return _voice_safe_text(_join_user_phrases(_clean_followup_note(note), _complaint_followup_question(ud)), max_chars=180)
-        return _voice_safe_text(_join_user_phrases("تمام يا فندم، سجلت الشكوى", _complaint_followup_question(ud)), max_chars=180)
+from base_agent import BaseAgent, RunContext_T, get_menu, to_greeter, update_name, update_phone  # noqa: F811,E402
+from flows.greeter import Greeter  # noqa: E402
+from flows.takeaway import Takeaway  # noqa: E402
+from flows.delivery import Delivery  # noqa: E402
+from flows.reservation import Reservation  # noqa: E402
+from flows.complaint import Complaint  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Graceful shutdown — httpx cleanup via atexit (signal handling done by SDK)
 # ─────────────────────────────────────────────────────────────────────────────
-def _cleanup_http():
-    global _http_client
-    client = _http_client
-    _http_client = None
-    if not client or client.is_closed:
-        return
-    try:
-        loop = asyncio.get_event_loop_policy().get_event_loop()
-        if loop.is_running():
-            loop.create_task(client.aclose())
-            return
-        if not loop.is_closed():
-            loop.run_until_complete(client.aclose())
-            return
-    except Exception:
-        logger.debug("http client cleanup fallback triggered", exc_info=True)
-    try:
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(client.aclose())
-        loop.close()
-    except Exception:
-        logger.debug("http client cleanup failed", exc_info=True)
-
-atexit.register(_cleanup_http)
+atexit.register(_remove_worker_health_snapshot_sync)
+atexit.register(_cleanup_http_client_impl)
 
 
 async def _safe_aclose_session_once(
-    session: AgentSession[UserData],
+    session: "AgentSession[UserData]",
     close_state: dict[str, bool],
     *,
     timeout_seconds: float = 5.0,
@@ -4084,7 +3327,7 @@ async def _safe_aclose_session_once(
 
 
 async def _safe_close_session_once(
-    session: AgentSession[UserData],
+    session: "AgentSession[UserData]",
     close_state: dict[str, bool],
     *,
     farewell: str = "",
@@ -4101,254 +3344,11 @@ async def _safe_close_session_once(
             )
     await _safe_aclose_session_once(session, close_state, timeout_seconds=timeout_seconds)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Entrypoint
+# Entrypoint — available via main.py (use `python main.py start` to run)
+# For backward compat, `python agent.py start` still works via lazy import.
 # ─────────────────────────────────────────────────────────────────────────────
-server = AgentServer(num_idle_processes=AGENT_IDLE_PROCESSES)
-
-MAX_CALL_DURATION = _get_env_int("MAX_CALL_DURATION", 600, min_value=30)  # ثواني — default 10 دقايق
-
-
-@server.rtc_session()
-async def entrypoint(ctx: JobContext):
-    call_id = str(uuid.uuid4())[:16]
-    logger.info("call=%s | started | room=%s", call_id, ctx.room.name)
-
-    # ── استخراج restaurant_id من room metadata لدعم multi-tenant ──────────
-    restaurant_id = ""
-    try:
-        meta = getattr(ctx.room, "metadata", None) or ""
-        if meta:
-            meta_dict = _json.loads(meta) if isinstance(meta, str) else meta
-            restaurant_id = str(meta_dict.get("restaurant_id", ""))
-    except Exception as _e:
-        logger.warning("call=%s | could not parse room metadata: %s", call_id, _e)
-
-    cfg      = await fetch_config(call_id, restaurant_id=restaurant_id)
-    userdata = UserData(call_id=call_id, restaurant=cfg)
-    await _ensure_backend_queue_worker_started()
-    session_stt = _build_session_stt(cfg, client_reference_id=call_id)
-    stt_context_terms = _stt_context_terms_for_config(cfg)
-    logger.info(
-        "call=%s | startup readiness | deps_ready=%s | config_available=%s | write_available=%s | config_source=%s | degraded=%s | stt_provider=%s | stt_context_terms=%d | preemptive=%s",
-        call_id,
-        session_dependencies_ready(),
-        backend_config_available(),
-        backend_write_available(userdata.write_health),
-        cfg.config_source,
-        cfg.degraded_mode,
-        SESSION_STT_PROVIDER,
-        len(stt_context_terms),
-        SESSION_PREEMPTIVE_GENERATION,
-    )
-
-    agents = {
-        "greeter":     Greeter(cfg),
-        "takeaway":    Takeaway(cfg),
-        "reservation": Reservation(cfg),
-        "complaint":   Complaint(cfg),
-    }
-    # في degraded mode بنضيف delivery agent كمسار capture مؤقت بدل ما ننفي الخدمة غلط.
-    if cfg.delivery_enabled or cfg.degraded_mode:
-        agents["delivery"] = Delivery(cfg)
-
-    userdata.agents = agents
-
-    session = AgentSession[UserData](
-        userdata       = userdata,
-        stt            = session_stt,
-        llm            = SESSION_LLM,
-        tts            = SESSION_TTS,
-        vad            = SESSION_VAD,
-        allow_interruptions=True,
-        min_interruption_duration=MIN_INTERRUPTION_DURATION_SECONDS,
-        min_endpointing_delay=MIN_ENDPOINTING_DELAY_SECONDS,
-        max_endpointing_delay=MAX_ENDPOINTING_DELAY_SECONDS,
-        false_interruption_timeout=FALSE_INTERRUPTION_TIMEOUT_SECONDS,
-        user_away_timeout=USER_AWAY_TIMEOUT_SECONDS,
-        preemptive_generation=SESSION_PREEMPTIVE_GENERATION,
-        max_tool_steps = MAX_TOOL_STEPS,
-    )
-
-    # ── Metrics: breakdown per component ──────────────────────────────────
-    @session.on("metrics_collected")
-    def _on_metrics(event):
-        m = event.metrics
-        if isinstance(m, STTMetrics):
-            logger.info(
-                "call=%s | METRICS STT | duration=%.0fms | audio=%.1fs",
-                call_id, m.duration * 1000, m.audio_duration,
-            )
-        elif isinstance(m, LLMMetrics):
-            logger.info(
-                "call=%s | METRICS LLM | ttft=%.0fms | total=%.0fms | prompt=%d | completion=%d | tok/s=%.0f",
-                call_id, m.ttft * 1000, m.duration * 1000,
-                m.prompt_tokens, m.completion_tokens, m.tokens_per_second,
-            )
-        elif isinstance(m, TTSMetrics):
-            logger.info(
-                "call=%s | METRICS TTS | ttfb=%.0fms | total=%.0fms | audio=%.1fs | chars=%d",
-                call_id, m.ttfb * 1000, m.duration * 1000,
-                m.audio_duration, m.characters_count,
-            )
-        elif isinstance(m, EOUMetrics):
-            logger.info(
-                "call=%s | METRICS EOU | eou_delay=%.0fms | transcription=%.0fms",
-                call_id, m.end_of_utterance_delay * 1000,
-                m.transcription_delay * 1000,
-            )
-
-    t_start = time.monotonic()
-    close_event = asyncio.Event()
-    close_state = {"closed": False}
-    close_reason = "normal_close"
-    last_user_activity_at = t_start
-    agent_state = "initializing"
-    inactivity_prompt_count = 0
-    last_reprompt_at = 0.0
-    watchdog_task: asyncio.Task | None = None
-
-    @session.on("close")
-    def _on_close(event):
-        nonlocal close_reason
-        close_reason = f"session_{event.reason}"
-        close_event.set()
-
-    @session.on("agent_state_changed")
-    def _on_agent_state(event):
-        nonlocal agent_state, last_user_activity_at, inactivity_prompt_count, last_reprompt_at
-        agent_state = event.new_state
-        if event.old_state == "speaking" and event.new_state == "listening":
-            last_user_activity_at = time.monotonic()
-            inactivity_prompt_count = 0
-            last_reprompt_at = 0.0
-        logger.info(
-            "call=%s | agent_state=%s→%s",
-            call_id, event.old_state, event.new_state,
-        )
-
-    @session.on("user_state_changed")
-    def _on_user_state(event):
-        nonlocal last_user_activity_at
-        if event.new_state == "speaking":
-            last_user_activity_at = time.monotonic()
-        logger.info(
-            "call=%s | user_state=%s→%s",
-            call_id, event.old_state, event.new_state,
-        )
-
-    @session.on("user_input_transcribed")
-    def _on_transcribed(event):
-        nonlocal last_user_activity_at, inactivity_prompt_count, last_reprompt_at
-        if event.transcript.strip():
-            last_user_activity_at = time.monotonic()
-            inactivity_prompt_count = 0
-            last_reprompt_at = 0.0
-        logger.info(
-            "call=%s | transcript final=%s | text=%s",
-            call_id, event.is_final, (event.transcript or "").strip(),
-        )
-
-    @session.on("agent_false_interruption")
-    def _on_false_interruption(event):
-        logger.info(
-            "call=%s | false_interruption | resumed=%s",
-            call_id, event.resumed,
-        )
-
-    @session.on("function_tools_executed")
-    def _on_tools(event):
-        tool_names = [getattr(call, "name", "") for call in event.function_calls]
-        logger.info("call=%s | tools=%s", call_id, tool_names)
-
-    @session.on("error")
-    def _on_error(event):
-        logger.error("call=%s | session error | %s", call_id, _exc_log_fields(event.error))
-
-    async def _watch_inactivity() -> None:
-        nonlocal inactivity_prompt_count, last_reprompt_at, close_reason
-        while not close_event.is_set():
-            await asyncio.sleep(1.0)
-            if close_event.is_set():
-                return
-            if agent_state in {"speaking", "thinking", "initializing"}:
-                continue
-            if userdata.session_transitional_state:
-                continue
-            if (
-                userdata.order_submit_in_flight
-                or userdata.reservation_submit_in_flight
-                or userdata.complaint_submit_in_flight
-            ):
-                continue
-
-            idle_for = time.monotonic() - last_user_activity_at
-            if (
-                inactivity_prompt_count < NO_SPEECH_REPROMPT_LIMIT
-                and idle_for >= NO_SPEECH_PROMPT_SECONDS
-                and (not last_reprompt_at or (time.monotonic() - last_reprompt_at) >= NO_SPEECH_REPROMPT_GAP_SECONDS)
-            ):
-                inactivity_prompt_count += 1
-                last_reprompt_at = time.monotonic()
-                logger.warning(
-                    "call=%s | inactivity reprompt | idle_for=%.1fs | count=%d",
-                    call_id, idle_for, inactivity_prompt_count,
-                )
-                flow_name = session.current_agent.__class__.__name__.lower() if session.current_agent else ""
-                reprompt_text = _inactivity_reprompt(userdata, flow_name)
-                with contextlib.suppress(Exception):
-                    await session.say(
-                        reprompt_text,
-                        allow_interruptions=True,
-                        add_to_chat_ctx=False,
-                    )
-                continue
-
-            if idle_for >= NO_SPEECH_CLOSE_SECONDS:
-                close_reason = "inactivity_timeout"
-                userdata.session_transitional_state = True
-                logger.warning(
-                    "call=%s | inactivity close | idle_for=%.1fs",
-                    call_id, idle_for,
-                )
-                await _safe_close_session_once(
-                    session,
-                    close_state,
-                    farewell="هقفل المكالمة دلوقتي، كلمنا تاني في أي وقت يا فندم.",
-                )
-                return
-
-    try:
-        await session.start(agent=userdata.agents["greeter"], room=ctx.room)
-        watchdog_task = asyncio.create_task(_watch_inactivity(), name=f"inactivity_watchdog_{call_id}")
-        await asyncio.wait_for(close_event.wait(), timeout=MAX_CALL_DURATION)
-    except asyncio.TimeoutError:
-        close_reason = "call_timeout"
-        userdata.session_transitional_state = True
-        logger.warning("call=%s | timeout after %ds — ending session", call_id, MAX_CALL_DURATION)
-        await _safe_close_session_once(
-            session,
-            close_state,
-            farewell="معلش يا فندم، وقت المكالمة خلص. كلمنا تاني في أي وقت.",
-        )
-    except Exception as exc:
-        close_reason = "session_error"
-        logger.exception("call=%s | error: %s", call_id, exc)
-        userdata.session_transitional_state = True
-        await _safe_aclose_session_once(session, close_state)
-        raise
-    finally:
-        if watchdog_task is not None:
-            watchdog_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await watchdog_task
-        await _safe_aclose_session_once(session, close_state)
-        duration = int(time.monotonic() - t_start)
-        logger.info(
-            "call=%s | ended | duration=%ds | close_reason=%s | order=%s | reservation=%s | complaint=%s | config_source=%s",
-            call_id, duration, close_reason, userdata.order_confirmed, userdata.reservation_confirmed,
-            userdata.complaint_logged, userdata.restaurant.config_source,
-        )
-
 if __name__ == "__main__":
+    from main import server  # lazy import to avoid circular dependency
     cli.run_app(server)

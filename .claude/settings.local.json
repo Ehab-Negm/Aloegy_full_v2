@@ -6,7 +6,8 @@
       "Bash(python -m pytest smoke_tests.py -x -v)",
       "Bash(pip install:*)",
       "Bash(python smoke_tests.py)",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(ls *.py)"
     ]
   }
 }
