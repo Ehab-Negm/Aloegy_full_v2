@@ -9,7 +9,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import Agent, RunContext
 from pydantic import Field
 
-from base_agent import BaseAgent, RunContext_T, _run_tool_safely, get_menu, update_name, update_phone
+from base_agent import BaseAgent, RunContext_T, _run_tool_safely, build_instructions, get_menu, update_name, update_phone
 from backend.config import RestaurantConfig
 
 logger = logging.getLogger("restaurant.agent")
@@ -24,41 +24,36 @@ class Greeter(BaseAgent):
         self.cfg = cfg
 
         if cfg.degraded_mode:
-            instructions = (
-                f"أنت شغال في '{cfg.name}' — بترد على التليفون وبتساعد الناس.\n"
-                "في مشكلة مؤقتة في النظام دلوقتي، فقول للعميل إن في تحديث بسيط وممكن يقولّك طلبه أو يتصل بالمطعم.\n"
-                "متتكلمش عن المنيو أو المواعيد لأنك مش متأكد منها دلوقتي.\n"
-                "لو سألك أي سؤال عادي رد عليه طبيعي — أنت بني آدم مش آلة."
+            core = (
+                "النظام فيه تحديث بسيط دلوقتي. قول للعميل كده بشكل طبيعي "
+                "واطلب منه يقولك طلبه أو يتصل على المطعم.\n"
+                "متتكلمش عن المنيو ولا المواعيد — مش عارفهم دلوقتي."
             )
         elif not cfg.is_open:
             reason = cfg.closed_reason or "خارج المواعيد"
-            instructions = (
-                f"أنت شغال في '{cfg.name}' — بترد على التليفون.\n"
-                f"المطعم مقفول دلوقتي ({reason}).\n"
-                f"قول للعميل إنكم مقفولين وقوله المواعيد: {cfg.hours_text()}\n"
-                f"لو سألك على حاجة تانية قوله يتصل على {cfg.phone}.\n"
-                "لو سألك 'أنت مين' أو أي سؤال عادي رد عليه طبيعي الأول."
+            core = (
+                f"المطعم مقفول حالياً ({reason}).\n"
+                f"قول للعميل إحنا مقفولين، والمواعيد: {cfg.hours_text()}.\n"
+                f"لو سأل عن أي حاجة تانية قوله يتصل على {cfg.phone}."
             )
         else:
-            delivery_line = "• طلب توصيل → to_delivery\n" if cfg.delivery_enabled else ""
-            instructions = (
-                f"أنت شغال في مطعم '{cfg.name}' — بترد على التليفون وبتوجّه الناس.\n\n"
-                "شغلتك إنك تفهم العميل عايز إيه وتحوّله للمكان الصح.\n"
-                "لو العميل عايز يطلب أو يحجز أو عنده شكوى، حوّله على طول.\n"
-                "لو سألك سؤال عادي زي 'أنت مين' أو 'إيه الأخبار'، رد عليه طبيعي الأول وبعدين اسأله يحب إيه.\n"
-                "لو الكلام مش واضح أو الـ STT ملخبطة، استخدم resolve_request.\n\n"
+            delivery_line = "- طلب توصيل → to_delivery\n" if cfg.delivery_enabled else ""
+            core = (
+                "شغلك إنك تفهم العميل عايز إيه وتحوّله على طول للمكان الصح.\n"
+                "لو سألك \"أنت مين؟\" أو \"إيه الأخبار؟\"، رد قصير طبيعي وبعدين اسأله يقدر يساعده في إيه.\n"
+                "لو الكلام مش واضح أو الـ STT ملخبطة → resolve_request.\n\n"
                 "التحويلات:\n"
-                "• طلب أكل / استلام → to_takeaway\n"
+                "- طلب أكل / استلام → to_takeaway\n"
                 f"{delivery_line}"
-                "• حجز ترابيزة → to_reservation\n"
-                "• شكوى أو مشكلة → to_complaint\n"
-                "• سؤال عن المنيو → get_menu\n\n"
+                "- حجز ترابيزة → to_reservation\n"
+                "- شكوى أو مشكلة → to_complaint\n"
+                "- سؤال عن المنيو → get_menu\n\n"
                 f"أصناف متاحة: {cfg.menu_names()}\n\n"
-                "متاخدش طلبات ولا تحسب إجمالي — بس وجّه العميل."
+                "مهم: متاخدش طلبات ولا تحسب حاجة — أنت بس بتوجّه."
             )
 
         super().__init__(
-            instructions=instructions,
+            instructions=build_instructions(cfg.name, core),
             tools=[get_menu, update_name, update_phone],
         )
         self._delivery_enabled = cfg.delivery_enabled

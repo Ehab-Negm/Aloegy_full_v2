@@ -104,7 +104,8 @@ JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
 JWT_ALGORITHM = "HS256"
 JWT_TTL_MINUTES = max(10, int(os.getenv("JWT_TTL_MINUTES", "720")))
 OTP_TTL_MINUTES = max(1, int(os.getenv("OTP_TTL_MINUTES", "10")))
-DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "956956").strip()
+DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "").strip() or None
+DEV_OTP_BYPASS_ENABLED = APP_ENV == "dev" and bool(DEV_OTP_BYPASS)
 BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "mock_secret_key").strip()
 
 if APP_ENV == "prod":
@@ -129,15 +130,16 @@ CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", ",".join(
 
 
 DEFAULT_CORS_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$"
-CORS_ORIGIN_REGEX = (
-    r"https?://.*"
-    if APP_ENV != "prod"
-    else (os.getenv("CORS_ORIGIN_REGEX", DEFAULT_CORS_ORIGIN_REGEX).strip() or None)
-)
+CORS_ORIGIN_REGEX = os.getenv("CORS_ORIGIN_REGEX", DEFAULT_CORS_ORIGIN_REGEX).strip() or None
 ALLOW_CREDENTIALS = APP_ENV == "prod"
 BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1").strip() or "127.0.0.1"
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
 DEFAULT_COLLECTION_LIMIT = max(20, int(os.getenv("DEFAULT_COLLECTION_LIMIT", "200")))
+
+if DEV_OTP_BYPASS_ENABLED:
+    logger.warning("DEV_OTP_BYPASS is enabled for APP_ENV=dev")
+elif DEV_OTP_BYPASS:
+    logger.warning("DEV_OTP_BYPASS is set but ignored outside APP_ENV=dev")
 MAX_COLLECTION_LIMIT = max(DEFAULT_COLLECTION_LIMIT, int(os.getenv("MAX_COLLECTION_LIMIT", "500")))
 MAX_REQUEST_BODY_BYTES = max(1024 * 1024, int(os.getenv("MAX_REQUEST_BODY_BYTES", str(10 * 1024 * 1024))))
 
@@ -270,6 +272,7 @@ class Restaurant(Base):
     owner_phone: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     address: Mapped[str] = mapped_column(String(255), default="")
     location: Mapped[str] = mapped_column(String(255), default="")
+    branches_json: Mapped[str] = mapped_column(Text, default="")
     working_hours: Mapped[str] = mapped_column(Text, default="")
     contact_phone: Mapped[str] = mapped_column(String(32), default="")
     plan: Mapped[str] = mapped_column(String(40), default="Basic")
@@ -447,11 +450,25 @@ class CallLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     restaurant_id: Mapped[int] = mapped_column(ForeignKey("restaurants.id"), index=True)
+    call_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    customer_name: Mapped[str] = mapped_column(String(120), default="")
     phone: Mapped[str] = mapped_column(String(32), index=True)
+    flow: Mapped[str] = mapped_column(String(40), default="")
+    transcript_excerpt: Mapped[str] = mapped_column(Text, default="")
+    agent_reply_excerpt: Mapped[str] = mapped_column(Text, default="")
     last_message: Mapped[str] = mapped_column(Text, default="")
     ai_response: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="closed")
     order_total: Mapped[float] = mapped_column(Float, default=0.0)
+    outcome: Mapped[str] = mapped_column(String(40), default="unknown")
+    failure_reason: Mapped[str] = mapped_column(String(120), default="")
+    close_reason: Mapped[str] = mapped_column(String(80), default="")
+    review_status: Mapped[str] = mapped_column(String(20), default="needs_review")
+    review_notes: Mapped[str] = mapped_column(Text, default="")
+    handoff_target: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
 
 
@@ -487,11 +504,18 @@ class OrderStatusUpdateRequest(BaseModel):
     driverPhone: str | None = None
 
 
+class BranchPayload(BaseModel):
+    name: str = ""
+    address: str = ""
+    deliveryZones: list[str] = []
+
+
 class RestaurantSettingsPayload(BaseModel):
     name: str
     address: str
     workingHours: str
     contactPhone: str
+    branches: list[BranchPayload] = []
 
 
 class AgentSettingsPayload(BaseModel):
@@ -535,6 +559,10 @@ class MenuItemPayload(BaseModel):
     mediumPrice: str = "0"
     largePrice: str = "0"
     available: bool = True
+
+
+class BulkMenuItemsPayload(BaseModel):
+    items: list[MenuItemPayload]
 
 
 class EmployeePayload(BaseModel):
@@ -620,6 +648,35 @@ class AgentComplaintPayload(BaseModel):
     customer_phone: str
     complaint_text: str
     complaint_type: str
+
+
+class AgentCallLogPayload(BaseModel):
+    call_id: str
+    customer_name: str = ""
+    customer_phone: str = ""
+    flow: str = ""
+    transcript_excerpt: str = ""
+    agent_reply_excerpt: str = ""
+    last_message: str = ""
+    ai_response: str = ""
+    status: Literal["active", "closed", "pending"] = "closed"
+    order_total: float = 0.0
+    outcome: str = "unknown"
+    failure_reason: str = ""
+    close_reason: str = ""
+    review_status: Literal["needs_review", "reviewed", "ignored"] = "needs_review"
+    review_notes: str = ""
+    handoff_target: str | None = None
+    duration_seconds: int = 0
+    started_at: str | None = None
+    ended_at: str | None = None
+
+
+class CallReviewPayload(BaseModel):
+    review_status: Literal["needs_review", "reviewed", "ignored"]
+    failure_reason: str = ""
+    review_notes: str = ""
+    outcome: str | None = None
     logged_at: str | None = None
     channel: str = "voice_agent"
 
@@ -834,6 +891,25 @@ def relative_time_label(value: datetime) -> str:
     return f"من {days} يوم"
 
 
+def duration_label(value: int) -> str:
+    seconds = max(0, int(value))
+    minutes, remaining_seconds = divmod(seconds, 60)
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:02d}:{remaining_minutes:02d}:{remaining_seconds:02d}"
+    return f"{remaining_minutes:02d}:{remaining_seconds:02d}"
+
+
+def parse_optional_datetime(value: str | None) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return ensure_utc_datetime(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid datetime value: {value!r}") from exc
+
+
 def restaurant_or_404(db: Session, restaurant_id: int) -> Restaurant:
     restaurant = db.get(Restaurant, restaurant_id)
     if not restaurant:
@@ -861,12 +937,28 @@ def resolve_restaurant_scope(
 def serialize_call(call: CallLog) -> dict[str, Any]:
     return {
         "id": call.id,
+        "callId": call.call_id or f"CALL-{call.id:04d}",
+        "customerName": call.customer_name,
         "phone": call.phone,
-        "lastMessage": call.last_message,
-        "aiResponse": call.ai_response,
+        "flow": call.flow,
+        "transcriptExcerpt": call.transcript_excerpt,
+        "agentReplyExcerpt": call.agent_reply_excerpt,
+        "lastMessage": call.last_message or call.transcript_excerpt,
+        "aiResponse": call.ai_response or call.agent_reply_excerpt,
         "time": relative_time_label(call.created_at),
         "status": call.status,
         "orderTotal": currency_text(call.order_total),
+        "outcome": call.outcome,
+        "failureReason": call.failure_reason,
+        "closeReason": call.close_reason,
+        "reviewStatus": call.review_status,
+        "reviewNotes": call.review_notes,
+        "handoffTarget": call.handoff_target,
+        "durationSeconds": call.duration_seconds,
+        "duration": duration_label(call.duration_seconds),
+        "startedAt": call.started_at.isoformat() if call.started_at else None,
+        "endedAt": call.ended_at.isoformat() if call.ended_at else None,
+        "createdAt": call.created_at.isoformat(),
     }
 
 
@@ -947,13 +1039,93 @@ def serialize_employee(user: User) -> dict[str, Any]:
     }
 
 
+def _default_branch_record(restaurant: Restaurant) -> dict[str, Any]:
+    default_name = (restaurant.location or restaurant.name or "الفرع الرئيسي").strip()
+    default_address = (restaurant.address or "").strip()
+    delivery_zones = [restaurant.location.strip()] if restaurant.location.strip() else []
+    return {
+        "name": default_name,
+        "address": default_address,
+        "deliveryZones": delivery_zones,
+    }
+
+
+def _normalize_branch_records(branches: list[dict[str, Any]], restaurant: Restaurant) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for raw in branches:
+        name = str(raw.get("name", "")).strip()
+        address = str(raw.get("address", "")).strip()
+        delivery_zones = [
+            str(zone).strip()
+            for zone in raw.get("deliveryZones", [])
+            if str(zone).strip()
+        ]
+        if not name and not address and not delivery_zones:
+            continue
+        if not name:
+            name = address or restaurant.location or restaurant.name or "الفرع الرئيسي"
+        normalized.append(
+            {
+                "name": name,
+                "address": address,
+                "deliveryZones": delivery_zones,
+            }
+        )
+    return normalized or [_default_branch_record(restaurant)]
+
+
+def _parse_branches_config(restaurant: Restaurant) -> list[dict[str, Any]]:
+    raw = (restaurant.branches_json or "").strip()
+    if not raw:
+        return [_default_branch_record(restaurant)]
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return [_default_branch_record(restaurant)]
+    if not isinstance(parsed, list):
+        return [_default_branch_record(restaurant)]
+    branch_records = [item for item in parsed if isinstance(item, dict)]
+    return _normalize_branch_records(branch_records, restaurant)
+
+
+def _aggregate_delivery_zones(branches: list[dict[str, Any]], restaurant: Restaurant) -> list[str]:
+    zones: list[str] = []
+    seen: set[str] = set()
+    for branch in branches:
+        for zone in branch.get("deliveryZones", []):
+            normalized = str(zone).strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                zones.append(normalized)
+    if zones:
+        return zones
+    fallback_zone = (restaurant.location or "").strip()
+    return [fallback_zone] if fallback_zone else []
+
+
+def _payload_branches_to_records(branches: list[BranchPayload], restaurant: Restaurant) -> list[dict[str, Any]]:
+    return _normalize_branch_records(
+        [
+            {
+                "name": branch.name,
+                "address": branch.address,
+                "deliveryZones": branch.deliveryZones,
+            }
+            for branch in branches
+        ],
+        restaurant,
+    )
+
+
 def restaurant_settings_payload(restaurant: Restaurant) -> dict[str, Any]:
+    branches = _parse_branches_config(restaurant)
     return {
         "restaurant": {
             "name": restaurant.name,
             "address": restaurant.address,
             "workingHours": restaurant.working_hours,
             "contactPhone": restaurant.contact_phone,
+            "branches": branches,
         },
         "agent": {
             "name": restaurant.agent_name,
@@ -970,22 +1142,81 @@ def upsert_call_log(
     db: Session,
     *,
     restaurant_id: int,
+    call_id: str | None = None,
+    customer_name: str = "",
     phone: str,
+    flow: str = "",
+    transcript_excerpt: str = "",
+    agent_reply_excerpt: str = "",
     last_message: str,
     ai_response: str,
     status: str,
     order_total: float,
-) -> None:
-    db.add(
-        CallLog(
+    outcome: str = "unknown",
+    failure_reason: str = "",
+    close_reason: str = "",
+    review_status: str = "needs_review",
+    review_notes: str = "",
+    handoff_target: str | None = None,
+    duration_seconds: int = 0,
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
+) -> CallLog:
+    existing: CallLog | None = None
+    if call_id:
+        existing = db.scalar(
+            select(CallLog)
+            .where(CallLog.restaurant_id == restaurant_id, CallLog.call_id == call_id)
+            .order_by(desc(CallLog.created_at))
+        )
+
+    if existing is None:
+        existing = CallLog(
             restaurant_id=restaurant_id,
+            call_id=call_id,
+            customer_name=customer_name,
             phone=phone,
+            flow=flow,
+            transcript_excerpt=transcript_excerpt,
+            agent_reply_excerpt=agent_reply_excerpt,
             last_message=last_message,
             ai_response=ai_response,
             status=status,
             order_total=order_total,
+            outcome=outcome,
+            failure_reason=failure_reason,
+            close_reason=close_reason,
+            review_status=review_status,
+            review_notes=review_notes,
+            handoff_target=handoff_target,
+            duration_seconds=max(0, int(duration_seconds)),
+            started_at=started_at,
+            ended_at=ended_at,
         )
-    )
+        db.add(existing)
+        return existing
+
+    existing.customer_name = customer_name or existing.customer_name
+    existing.phone = phone or existing.phone
+    existing.flow = flow or existing.flow
+    existing.transcript_excerpt = transcript_excerpt or existing.transcript_excerpt
+    existing.agent_reply_excerpt = agent_reply_excerpt or existing.agent_reply_excerpt
+    if last_message and not existing.last_message:
+        existing.last_message = last_message
+    if ai_response and not existing.ai_response:
+        existing.ai_response = ai_response
+    existing.status = status or existing.status
+    existing.order_total = max(float(existing.order_total or 0.0), float(order_total or 0.0))
+    existing.outcome = outcome or existing.outcome
+    existing.failure_reason = failure_reason or existing.failure_reason
+    existing.close_reason = close_reason or existing.close_reason
+    existing.review_status = review_status or existing.review_status
+    existing.review_notes = review_notes or existing.review_notes
+    existing.handoff_target = handoff_target or existing.handoff_target
+    existing.duration_seconds = max(int(existing.duration_seconds or 0), int(duration_seconds or 0))
+    existing.started_at = started_at or existing.started_at
+    existing.ended_at = ended_at or existing.ended_at
+    return existing
 
 
 def best_menu_price(item: MenuItem) -> float:
@@ -1039,12 +1270,19 @@ def _build_upsell_rules(menu_items: list[MenuItem]) -> list[dict]:
 
 
 def restaurant_config_payload(restaurant: Restaurant, menu_items: list[MenuItem]) -> dict[str, Any]:
+    branches = _parse_branches_config(restaurant)
     return {
         "id": restaurant.public_id,
         "name": restaurant.name,
         "phone": restaurant.contact_phone or restaurant.owner_phone,
         "address": restaurant.address,
-        "branches": [{"name": restaurant.location or restaurant.name, "address": restaurant.address}],
+        "branches": [
+            {
+                "name": branch.get("name", ""),
+                "address": branch.get("address", ""),
+            }
+            for branch in branches
+        ],
         "hours": _parse_working_hours(restaurant.working_hours),
         "menu_items": [
             {"name": item.name, "price": best_menu_price(item), "available": item.available}
@@ -1060,7 +1298,7 @@ def restaurant_config_payload(restaurant: Restaurant, menu_items: list[MenuItem]
         "delivery_minutes": restaurant.delivery_minutes,
         "delivery_fee": restaurant.delivery_fee,
         "min_order": restaurant.min_order,
-        "delivery_zones": [restaurant.location] if restaurant.location else [],
+        "delivery_zones": _aggregate_delivery_zones(branches, restaurant),
     }
 
 
@@ -1126,6 +1364,112 @@ def compute_dashboard_stats(db: Session, restaurant_id: int) -> dict[str, str]:
         "totalOrders": str(orders_count),
         "totalCustomers": str(customers_count),
         "totalFiles": str(files_count),
+    }
+
+
+SUCCESSFUL_CALL_OUTCOMES = {"order_confirmed", "reservation_confirmed", "complaint_logged", "handoff"}
+PROCESSED_REVIEW_STATUSES = {"reviewed", "ignored"}
+
+
+def _percent_text(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "0%"
+    return f"{round((numerator / denominator) * 100):d}%"
+
+
+def compute_quality_analytics(db: Session, restaurant_id: int) -> dict[str, Any]:
+    total_calls = int(
+        db.scalar(select(func.count(CallLog.id)).where(CallLog.restaurant_id == restaurant_id)) or 0
+    )
+    successful_calls = int(
+        db.scalar(
+            select(func.count(CallLog.id)).where(
+                CallLog.restaurant_id == restaurant_id,
+                CallLog.outcome.in_(SUCCESSFUL_CALL_OUTCOMES),
+            )
+        ) or 0
+    )
+    reviewed_calls = int(
+        db.scalar(
+            select(func.count(CallLog.id)).where(
+                CallLog.restaurant_id == restaurant_id,
+                CallLog.review_status.in_(PROCESSED_REVIEW_STATUSES),
+            )
+        ) or 0
+    )
+    needs_review = int(
+        db.scalar(
+            select(func.count(CallLog.id)).where(
+                CallLog.restaurant_id == restaurant_id,
+                CallLog.review_status == "needs_review",
+            )
+        ) or 0
+    )
+
+    outcome_rows = db.execute(
+        select(
+            CallLog.outcome.label("name"),
+            func.count(CallLog.id).label("value"),
+        )
+        .where(CallLog.restaurant_id == restaurant_id)
+        .group_by(CallLog.outcome)
+        .order_by(desc("value"), "name")
+    ).all()
+    outcomes = [
+        {"name": str(row.name or "unknown"), "value": int(row.value)}
+        for row in outcome_rows
+        if int(row.value or 0) > 0
+    ]
+
+    failure_rows = db.execute(
+        select(
+            CallLog.failure_reason.label("reason"),
+            func.count(CallLog.id).label("count"),
+        )
+        .where(
+            CallLog.restaurant_id == restaurant_id,
+            CallLog.failure_reason != "",
+        )
+        .group_by(CallLog.failure_reason)
+        .order_by(desc("count"), "reason")
+    ).all()
+    failures = [
+        {"name": str(row.reason), "value": int(row.count)}
+        for row in failure_rows
+        if row.reason
+    ]
+
+    review_rows = db.execute(
+        select(
+            CallLog.review_status.label("name"),
+            func.count(CallLog.id).label("value"),
+        )
+        .where(CallLog.restaurant_id == restaurant_id)
+        .group_by(CallLog.review_status)
+        .order_by(desc("value"), "name")
+    ).all()
+    review_statuses = [
+        {"name": str(row.name or "needs_review"), "value": int(row.value)}
+        for row in review_rows
+        if int(row.value or 0) > 0
+    ]
+
+    return {
+        "summary": {
+            "totalCalls": total_calls,
+            "successfulCalls": successful_calls,
+            "reviewedCalls": reviewed_calls,
+            "needsReview": needs_review,
+            "successRate": _percent_text(successful_calls, total_calls),
+            "reviewCoverage": _percent_text(reviewed_calls, total_calls),
+        },
+        "outcomes": outcomes,
+        "failures": failures,
+        "reviewStatuses": review_statuses,
+        "topBlockers": [
+            {"reason": item["name"], "count": item["value"]}
+            for item in failures[:5]
+        ],
     }
 
 
@@ -1235,6 +1579,7 @@ def compute_analytics(db: Session, restaurant_id: int) -> dict[str, Any]:
         "dailyOrders": daily_orders[-7:],
         "monthlyRevenue": monthly_revenue,
         "categoryData": category_data,
+        "quality": compute_quality_analytics(db, restaurant_id),
     }
 def _provisional_public_id(prefix: str) -> str:
     return f"TMP-{prefix}-{uuid.uuid4().hex[:12].upper()}"
@@ -1468,10 +1813,11 @@ def seed_database() -> None:
         db.flush()
 
         def add_order(restaurant: Restaurant, phone: str, customer_name: str, items: list[tuple[str, int, float]], status_value: str, created_at: datetime, upsell: bool = False, source: str = "voice_agent") -> None:
+            call_id = uuid.uuid4().hex[:8]
             order = Order(
                 public_id=f"ORD-{created_at.year}-{uuid.uuid4().hex[:5].upper()}",
                 restaurant_id=restaurant.id,
-                call_id=uuid.uuid4().hex[:8],
+                call_id=call_id,
                 type="delivery" if status_value in {"out_for_delivery", "delivered"} else "takeaway",
                 customer_name=customer_name,
                 phone=normalize_phone(phone),
@@ -1489,11 +1835,21 @@ def seed_database() -> None:
             upsert_call_log(
                 db,
                 restaurant_id=restaurant.id,
+                call_id=call_id,
+                customer_name=customer_name,
                 phone=normalize_phone(phone),
+                flow=order.type,
+                transcript_excerpt=order.items_summary,
+                agent_reply_excerpt=f"تم تسجيل الطلب {order.public_id}",
                 last_message=order.items_summary,
                 ai_response=f"تم تسجيل الطلب {order.public_id}",
                 status="active" if status_value in {"received", "preparing"} else "closed",
                 order_total=order.amount,
+                outcome="order_confirmed",
+                review_status="reviewed",
+                duration_seconds=75,
+                started_at=created_at,
+                ended_at=created_at + timedelta(seconds=75),
             )
 
         now = utc_now()
@@ -1545,16 +1901,35 @@ def _run_migrations() -> None:
     """Add columns that were introduced after the initial schema."""
     import sqlalchemy as sa
 
-    inspector = sa.inspect(engine)
     migrations: list[tuple[str, str, str]] = [
         ("reservations", "reservation_time_iso", "VARCHAR(64)"),
         ("otp_codes", "attempts", "INTEGER DEFAULT 0"),
+        ("restaurants", "branches_json", "TEXT DEFAULT ''"),
+        ("call_logs", "call_id", "VARCHAR(40)"),
+        ("call_logs", "customer_name", "VARCHAR(120) DEFAULT ''"),
+        ("call_logs", "flow", "VARCHAR(40) DEFAULT ''"),
+        ("call_logs", "transcript_excerpt", "TEXT DEFAULT ''"),
+        ("call_logs", "agent_reply_excerpt", "TEXT DEFAULT ''"),
+        ("call_logs", "outcome", "VARCHAR(40) DEFAULT 'unknown'"),
+        ("call_logs", "failure_reason", "VARCHAR(120) DEFAULT ''"),
+        ("call_logs", "close_reason", "VARCHAR(80) DEFAULT ''"),
+        ("call_logs", "review_status", "VARCHAR(20) DEFAULT 'needs_review'"),
+        ("call_logs", "review_notes", "TEXT DEFAULT ''"),
+        ("call_logs", "handoff_target", "VARCHAR(80)"),
+        ("call_logs", "duration_seconds", "INTEGER DEFAULT 0"),
+        ("call_logs", "started_at", "DATETIME"),
+        ("call_logs", "ended_at", "DATETIME"),
     ]
+    existing_by_table: dict[str, set[str]] = {}
     with engine.connect() as conn:
         for table, column, col_type in migrations:
-            existing = [c["name"] for c in inspector.get_columns(table)]
+            if table not in existing_by_table:
+                inspector = sa.inspect(conn)
+                existing_by_table[table] = {c["name"] for c in inspector.get_columns(table)}
+            existing = existing_by_table[table]
             if column not in existing:
                 conn.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                existing.add(column)
                 logger.info("migration | added column %s.%s", table, column)
         conn.commit()
 
@@ -1682,7 +2057,7 @@ def verify_otp(
     if otp_row and ensure_utc_datetime(otp_row.expires_at) >= utc_now() and otp_row.code_hash == hash_otp(phone, otp):
         otp_is_valid = True
         otp_row.consumed_at = utc_now()
-    elif APP_ENV != "prod" and otp == DEV_OTP_BYPASS:
+    elif DEV_OTP_BYPASS_ENABLED and otp == DEV_OTP_BYPASS:
         otp_is_valid = True
 
     if not otp_is_valid:
@@ -1750,6 +2125,28 @@ def fetch_calls(
         .limit(_effective_collection_limit(limit))
     ).all()
     return [serialize_call(call) for call in calls]
+
+
+@app.patch("/calls/{call_log_id}/review")
+def update_call_review(
+    call_log_id: int,
+    payload: CallReviewPayload,
+    user: CurrentUser = Depends(require_roles("admin", "owner", "employee")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    call = db.get(CallLog, call_log_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="call not found")
+    if user.role != "admin" and call.restaurant_id != user.restaurant_id:
+        raise HTTPException(status_code=403, detail="forbidden")
+    call.review_status = payload.review_status
+    call.failure_reason = payload.failure_reason.strip()
+    call.review_notes = payload.review_notes.strip()
+    if payload.outcome is not None and payload.outcome.strip():
+        call.outcome = payload.outcome.strip()
+    db.commit()
+    db.refresh(call)
+    return serialize_call(call)
 
 
 @app.get("/users")
@@ -1960,8 +2357,20 @@ def save_settings(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     restaurant = resolve_restaurant_scope(db, user, restaurant_id)
+    branch_records = _payload_branches_to_records(payload.restaurant.branches, restaurant)
+    if not payload.restaurant.branches:
+        branch_records = [
+            {
+                "name": (restaurant.location or payload.restaurant.name or "الفرع الرئيسي").strip(),
+                "address": payload.restaurant.address.strip(),
+                "deliveryZones": [restaurant.location.strip()] if restaurant.location.strip() else [],
+            }
+        ]
+    primary_branch = branch_records[0]
     restaurant.name = payload.restaurant.name
-    restaurant.address = payload.restaurant.address
+    restaurant.address = primary_branch.get("address", "").strip() or payload.restaurant.address
+    restaurant.location = primary_branch.get("name", "").strip() or restaurant.location
+    restaurant.branches_json = json.dumps(branch_records, ensure_ascii=False)
     restaurant.working_hours = payload.restaurant.workingHours
     restaurant.contact_phone = validate_phone_or_400(payload.restaurant.contactPhone)
     restaurant.agent_name = payload.agent.name
@@ -2008,6 +2417,39 @@ def create_menu_item(
     db.commit()
     db.refresh(item)
     return serialize_menu_item(item)
+
+
+@app.post("/menu-items/bulk")
+def create_menu_items_bulk(
+    payload: BulkMenuItemsPayload,
+    restaurant_id: int | None = Query(default=None, alias="restaurantId"),
+    user: CurrentUser = Depends(require_roles("admin", "owner")),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    restaurant = resolve_restaurant_scope(db, user, restaurant_id)
+    items_payload = payload.items[:100]
+    if not items_payload:
+        raise HTTPException(status_code=400, detail="at least one menu item is required")
+
+    created: list[MenuItem] = []
+    for raw_item in items_payload:
+        item = MenuItem(
+            restaurant_id=restaurant.id,
+            name=raw_item.name.strip(),
+            category=raw_item.category.strip() or "وجبات",
+            ingredients=raw_item.ingredients.strip(),
+            small_price=_safe_price(raw_item.smallPrice),
+            medium_price=_safe_price(raw_item.mediumPrice),
+            large_price=_safe_price(raw_item.largePrice),
+            available=raw_item.available,
+        )
+        db.add(item)
+        created.append(item)
+
+    db.commit()
+    for item in created:
+        db.refresh(item)
+    return [serialize_menu_item(item) for item in created]
 
 
 @app.put("/menu-items/{item_id}")
@@ -2486,6 +2928,53 @@ def get_restaurant_config(
     return restaurant_config_payload(restaurant, menu_items)
 
 
+@app.post("/calls/upsert")
+def upsert_agent_call_log(
+    payload: AgentCallLogPayload,
+    _: None = Depends(verify_agent_key),
+    restaurant_id: str | None = Query(default=None),
+    x_restaurant_id: str | None = Header(default=None, alias="X-Restaurant-ID"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    requested_id = (restaurant_id or x_restaurant_id or DEFAULT_RESTAURANT_PUBLIC_ID).strip()
+    restaurant = db.scalar(select(Restaurant).where(Restaurant.public_id == requested_id))
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="restaurant not found")
+    started_at = parse_optional_datetime(payload.started_at)
+    ended_at = parse_optional_datetime(payload.ended_at)
+    call = upsert_call_log(
+        db,
+        restaurant_id=restaurant.id,
+        call_id=payload.call_id,
+        customer_name=payload.customer_name.strip(),
+        phone=normalize_phone(payload.customer_phone) if payload.customer_phone.strip() else "",
+        flow=payload.flow.strip(),
+        transcript_excerpt=payload.transcript_excerpt.strip(),
+        agent_reply_excerpt=payload.agent_reply_excerpt.strip(),
+        last_message=payload.last_message.strip(),
+        ai_response=payload.ai_response.strip(),
+        status=payload.status,
+        order_total=max(0.0, float(payload.order_total or 0.0)),
+        outcome=payload.outcome.strip() or "unknown",
+        failure_reason=payload.failure_reason.strip(),
+        close_reason=payload.close_reason.strip(),
+        review_status=payload.review_status,
+        review_notes=payload.review_notes.strip(),
+        handoff_target=(payload.handoff_target or "").strip() or None,
+        duration_seconds=max(0, int(payload.duration_seconds)),
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    db.commit()
+    db.refresh(call)
+    return {
+        "id": call.id,
+        "call_id": call.call_id or payload.call_id,
+        "status": call.status,
+        "outcome": call.outcome,
+    }
+
+
 @app.post("/orders")
 def create_agent_order(
     payload: AgentOrderPayload,
@@ -2531,11 +3020,16 @@ def create_agent_order(
         upsert_call_log(
             db,
             restaurant_id=restaurant.id,
+            call_id=payload.call_id,
+            customer_name=payload.customer_name,
             phone=order.phone,
+            flow=payload.type,
             last_message=order.items_summary,
             ai_response=f"تم تسجيل الطلب {order.public_id}",
             status="active",
             order_total=order.amount,
+            outcome="order_confirmed",
+            review_status="reviewed",
         )
         try:
             db.commit()
@@ -2593,11 +3087,16 @@ def create_agent_reservation(
     upsert_call_log(
         db,
         restaurant_id=restaurant.id,
+        call_id=payload.call_id,
+        customer_name=payload.customer_name,
         phone=reservation.customer_phone,
+        flow="reservation",
         last_message=f"حجز {reservation.guests_count} أفراد",
         ai_response=f"تم تسجيل الحجز {reservation.public_id}",
-        status="closed",
+        status="active",
         order_total=0.0,
+        outcome="reservation_confirmed",
+        review_status="reviewed",
     )
     try:
         db.commit()
@@ -2642,11 +3141,16 @@ def create_agent_complaint(
     upsert_call_log(
         db,
         restaurant_id=restaurant.id,
+        call_id=payload.call_id,
+        customer_name=payload.customer_name,
         phone=issue.customer_phone,
+        flow="complaint",
         last_message=payload.complaint_text,
         ai_response="تم تسجيل الشكوى وهيتم المتابعة",
-        status="closed",
+        status="active",
         order_total=0.0,
+        outcome="complaint_logged",
+        review_status="reviewed",
     )
     db.commit()
     return {"complaint_id": issue.id, "status": issue.status}

@@ -9,7 +9,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import Agent, RunContext
 from pydantic import Field
 
-from base_agent import BaseAgent, RunContext_T, _run_tool_safely, get_menu, to_greeter, update_name, update_phone
+from base_agent import BaseAgent, RunContext_T, _run_tool_safely, build_instructions, get_menu, to_greeter, update_name, update_phone
 from backend.config import RestaurantConfig
 
 logger = logging.getLogger("restaurant.agent")
@@ -23,25 +23,24 @@ class Delivery(BaseAgent):
 
         zones_info = f" | مناطق: {cfg.delivery_zones_text()}" if cfg.delivery_zones else ""
 
+        core = (
+            f"بتاخد طلبات توصيل. {cfg.delivery_info_text()}{zones_info}\n\n"
+            "الخطوات بالترتيب:\n"
+            "1. اسمع الطلب → update_order (هو اللي بيتحقق من المنيو والأسعار).\n"
+            "2. اقترح إضافة بسيطة مرة واحدة بس.\n"
+            "3. اسأل لو في طلب خاص في التحضير.\n"
+            "4. خُد العنوان → update_delivery_address فوراً.\n"
+            "5. لو العنوان مش واضح، اسأل عن علامة مميزة (محل، مسجد، صيدلية…).\n"
+            "6. خُد الاسم والموبايل.\n"
+            "7. لخّص الطلب بإيجاز، ولو أكّد → confirm_delivery.\n\n"
+            "قواعد:\n"
+            "- لو قال معلومة من خطوة جاية، سجّلها فوراً وكمّل.\n"
+            "- \"أيوه\" أو \"تمام\" لوحدها مش موافقة على إضافة إلا لو ذكر اسم الصنف.\n"
+            "- متقولش من عندك أي صنف موجود أو لأ — update_order هو اللي بيقرر.\n"
+            "- سؤال عن المنيو → get_menu | شكوى → to_complaint."
+        )
         super().__init__(
-            instructions=(
-                f"أنت شغال في '{cfg.name}' — بتاخد طلبات التوصيل على التليفون.\n"
-                f"{cfg.delivery_info_text()}{zones_info}\n\n"
-                "اتكلم زي بني آدم طبيعي، مش بتقرأ من ورقة. نوّع في كلامك ومتكررش نفس الجمل.\n\n"
-                "المطلوب منك بالترتيب:\n"
-                "- اسمع الطلب واستدعي update_order (هو اللي بيتحقق من المنيو — أنت متعرفش الأسعار).\n"
-                "- اقترح إضافة بسيطة مرة واحدة بس.\n"
-                "- اسأل لو في طلب خاص.\n"
-                "- خُد العنوان واستدعي update_delivery_address فوراً.\n"
-                "- لو العنوان مش واضح، اسأل عن علامة مميزة.\n"
-                "- خُد الاسم والموبايل.\n"
-                "- لخّص الطلب ولو أكّد استدعي confirm_delivery.\n\n"
-                "لو العميل قالك معلومة من خطوة جاية سجّلها وكمّل عادي.\n"
-                "لو سألك سؤال عادي أو غريب رد عليه طبيعي وبعدين ارجع.\n"
-                "لو سأل عن المنيو → get_menu | لو عنده شكوى → to_complaint\n"
-                "متقولش للعميل صنف موجود أو لأ من عندك — ده شغل update_order.\n"
-                "'أيوه' أو 'تمام' لوحدها مش موافقة على إضافة إلا لو ذكر الصنف."
-            ),
+            instructions=build_instructions(cfg.name, core),
             tools=[
                 update_name,
                 update_phone,

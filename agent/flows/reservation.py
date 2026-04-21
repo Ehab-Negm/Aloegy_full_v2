@@ -8,7 +8,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import Agent, RunContext
 from pydantic import Field
 
-from base_agent import BaseAgent, RunContext_T, _run_tool_safely, to_greeter, update_name, update_phone
+from base_agent import BaseAgent, RunContext_T, _run_tool_safely, build_instructions, to_greeter, update_name, update_phone
 from backend.config import RestaurantConfig
 
 logger = logging.getLogger("restaurant.agent")
@@ -22,23 +22,23 @@ class Reservation(BaseAgent):
 
         branch_note = f" | فروع: {cfg.branch_names()}" if len(cfg.branches) > 1 else ""
 
-        branch_instruction = f"- اسأل عن الفرع: {cfg.branch_names()} → update_branch\n" if len(cfg.branches) > 1 else ""
+        branch_instruction = f"3.5. اسأل عن الفرع: {cfg.branch_names()} → update_branch\n" if len(cfg.branches) > 1 else ""
+        core = (
+            f"بتاخد حجوزات ترابيزات.\n"
+            f"المواعيد: {cfg.hours_text()}\n"
+            f"الحجز يقبل من {num2ar(cfg.min_guests)} لـ{num2ar(cfg.max_guests)} ضيف{branch_note}.\n\n"
+            "الخطوات بالترتيب:\n"
+            "1. اسمع الوقت → update_reservation_time (لو خارج المواعيد، قوله واقترح بديل قريب).\n"
+            "2. اسمع عدد الضيوف → update_guests_count.\n"
+            "3. اسأل لو في مناسبة خاصة → update_reservation_notes.\n"
+            f"{branch_instruction}"
+            "4. خُد الاسم → update_name.\n"
+            "5. خُد الموبايل → update_phone.\n"
+            "6. لخّص الحجز بإيجاز، ولو أكّد → confirm_reservation.\n\n"
+            "لو طلب حاجة خارج نطاق الحجز → to_greeter."
+        )
         super().__init__(
-            instructions=(
-                f"أنت شغال في '{cfg.name}' — بتاخد حجوزات الترابيزات على التليفون.\n"
-                f"مواعيد: {cfg.hours_text()}\n"
-                f"الحجز: من {num2ar(cfg.min_guests)} لـ{num2ar(cfg.max_guests)} ضيف{branch_note}\n\n"
-                "اتكلم زي بني آدم طبيعي. لو سألك سؤال عادي رد عليه وبعدين ارجع للحجز.\n\n"
-                "المطلوب منك بالترتيب:\n"
-                "- اسمع الوقت → update_reservation_time (لو خارج المواعيد قوله واقترح بديل)\n"
-                "- اسمع عدد الضيوف → update_guests_count\n"
-                "- اسأل لو في مناسبة → update_reservation_notes\n"
-                f"{branch_instruction}"
-                "- خُد الاسم → update_name\n"
-                "- خُد الموبايل → update_phone\n"
-                "- لخّص الحجز ولو أكّد → confirm_reservation\n\n"
-                "لو حاجة خارج نطاقك → to_greeter"
-            ),
+            instructions=build_instructions(cfg.name, core),
             tools=[
                 update_name,
                 update_phone,

@@ -3,13 +3,14 @@ import contextlib
 import inspect
 import json
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
 from types import SimpleNamespace
 
 import httpx
-from livekit.agents import StopResponse, llm
+from livekit.agents import StopResponse, llm, tts as livekit_tts
 
 import agent
 from health import start_health_server
@@ -1308,6 +1309,16 @@ async def main() -> int:
         and "SESSION_VAD" in combined_text,
     )
     check("inactivity_watchdog_present", "_watch_inactivity" in combined_text and "_safe_close_session" in combined_text)
+    check(
+        "session_tts_streaming_enabled",
+        bool(getattr(agent.SESSION_TTS.capabilities, "streaming", False)),
+    )
+    session_tts_stream = agent.SESSION_TTS.stream()
+    check(
+        "session_tts_stream_interface_available",
+        isinstance(session_tts_stream, livekit_tts.SynthesizeStream),
+    )
+    await session_tts_stream.aclose()
 
     # ── PRD-001: _handle_quick_intercepts uses elif (not if/if) ──
     intercepts_src = inspect.getsource(agent.BaseAgent._handle_quick_intercepts)
@@ -1605,6 +1616,58 @@ async def main() -> int:
         and "upsell.rejected" in prd029_event_names,
     )
 
+    golden_delivery_ud = agent.UserData(call_id="call-golden-delivery", restaurant=cfg)
+    golden_delivery_ud.active_flow = "delivery"
+    golden_delivery_ud.order = ["burger large"]
+    golden_delivery_ud.customer_name = "محمد"
+    golden_delivery_ud.customer_phone = "01012345678"
+
+    golden_reservation_ud = agent.UserData(call_id="call-golden-reservation", restaurant=cfg)
+    golden_reservation_ud.active_flow = "reservation"
+    golden_reservation_ud.reservation_time = AR_TOMORROW_8_PM
+    golden_reservation_ud.guests_count = 4
+    golden_reservation_ud.customer_name = "سارة"
+    golden_reservation_ud.customer_phone = "01012345678"
+
+    golden_handoff_ud = agent.UserData(call_id="call-golden-handoff", restaurant=cfg)
+    golden_handoff_ud.active_flow = "delivery"
+    golden_handoff_ud.handoff_target = "employee"
+
+    golden_complaint_ud = agent.UserData(call_id="call-golden-complaint", restaurant=cfg)
+    golden_complaint_ud.active_flow = "complaint"
+    golden_complaint_ud.complaint_logged = True
+
+    golden_abandoned_ud = agent.UserData(call_id="call-golden-abandoned", restaurant=cfg)
+    golden_abandoned_ud.active_flow = "greeter"
+
+    golden_outcome_cases = [
+        ("delivery_missing_address", golden_delivery_ud, "normal_close", ("closed_without_action", "missing_address", "needs_review")),
+        ("reservation_missing_branch", golden_reservation_ud, "normal_close", ("closed_without_action", "missing_branch", "needs_review")),
+        ("handoff_success", golden_handoff_ud, "normal_close", ("handoff", "", "reviewed")),
+        ("complaint_success", golden_complaint_ud, "normal_close", ("complaint_logged", "", "reviewed")),
+        ("abandoned_timeout", golden_abandoned_ud, "inactivity_timeout", ("abandoned", "customer_inactive", "needs_review")),
+    ]
+
+    golden_outcome_matrix_ok = True
+    for _name, _ud, _close_reason, (_expected_outcome, _expected_failure, _expected_review) in golden_outcome_cases:
+        actual_outcome, actual_failure = agent._call_outcome_and_failure_reason(_ud, _close_reason)
+        actual_review = agent._call_review_status(actual_outcome, actual_failure)
+        if (
+            actual_outcome != _expected_outcome
+            or actual_failure != _expected_failure
+            or actual_review != _expected_review
+        ):
+            golden_outcome_matrix_ok = False
+            print(
+                "GOLDEN_CALL_MISMATCH:",
+                _name,
+                {
+                    "expected": (_expected_outcome, _expected_failure, _expected_review),
+                    "actual": (actual_outcome, actual_failure, actual_review),
+                },
+            )
+    check("golden_call_quality_matrix", golden_outcome_matrix_ok)
+
     check(
         "prd033_backend_checks_idempotency_header",
         phase8_sources["backend_main"].count('alias="Idempotency-Key"') >= 3
@@ -1615,6 +1678,20 @@ async def main() -> int:
     check(
         "prd033_backend_enforces_idempotency_uniqueness",
         phase8_sources["backend_main"].count('UniqueConstraint("idempotency_key")') >= 3,
+    )
+    check(
+        "prd003_no_default_otp_bypass",
+        'os.getenv("DEV_OTP_BYPASS", "956956")' not in phase8_sources["backend_main"]
+        and "DEV_OTP_BYPASS_ENABLED = APP_ENV == \"dev\" and bool(DEV_OTP_BYPASS)" in phase8_sources["backend_main"],
+    )
+    check(
+        "prd008_no_wildcard_cors_regex",
+        'r"https?://.*"' not in phase8_sources["backend_main"],
+    )
+    check(
+        "prd024_cleanup_http_client_uses_running_loop",
+        "get_event_loop(" not in inspect.getsource(agent._cleanup_http_client_impl)
+        and "get_running_loop(" in inspect.getsource(agent._cleanup_http_client_impl),
     )
 
     class _RunningTask:
@@ -1631,8 +1708,10 @@ async def main() -> int:
     saved_queue_worker = ctx.backend_queue_worker
     saved_config_refresh_worker = ctx.config_refresh_worker
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
+    smoke_tmp_root = Path(".runtime") / "smoke-temp"
+    smoke_tmp_root.mkdir(parents=True, exist_ok=True)
+    tmpdir_path = Path(tempfile.mkdtemp(prefix="health-", dir=smoke_tmp_root))
+    try:
         agent.AGENT_HEALTH_SNAPSHOT_DIR = str(tmpdir_path / "health")
         agent.BACKEND_WRITE_QUEUE_PATH = str(tmpdir_path / "backend_queue.jsonl")
         try:
@@ -1667,6 +1746,8 @@ async def main() -> int:
             ctx.runtime_health.last_config_error = saved_last_config_error
             ctx.backend_queue_worker = saved_queue_worker
             ctx.config_refresh_worker = saved_config_refresh_worker
+    finally:
+        shutil.rmtree(tmpdir_path, ignore_errors=True)
 
     check(
         "prd034_health_report_states",

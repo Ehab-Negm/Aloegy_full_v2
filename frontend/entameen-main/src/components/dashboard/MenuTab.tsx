@@ -1,12 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Save, Trash2, UtensilsCrossed } from "lucide-react";
+import { Plus, Save, Trash2, Upload, UtensilsCrossed } from "lucide-react";
 
-import { createMenuItem, deleteMenuItem, fetchMenuItems, updateMenuItem, type MenuItem } from "@/services/api";
+import {
+  createMenuItem,
+  createMenuItemsBulk,
+  deleteMenuItem,
+  fetchMenuItems,
+  updateMenuItem,
+  type MenuItem,
+} from "@/services/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/use-toast";
 
 const CATEGORIES = ["وجبات", "مشروبات", "حلويات", "مقبلات", "سلطات", "إضافات"];
 
@@ -15,11 +24,54 @@ interface MenuTabProps {
   readOnly?: boolean;
 }
 
+interface ParsedBulkLine {
+  lineNumber: number;
+  item?: Partial<MenuItem>;
+  error?: string;
+}
+
+const parseBulkMenu = (draft: string): ParsedBulkLine[] => {
+  return draft
+    .split("\n")
+    .map((line, index) => ({ raw: line.trim(), lineNumber: index + 1 }))
+    .filter((entry) => entry.raw)
+    .map(({ raw, lineNumber }) => {
+      const parts = raw.split("|").map((part) => part.trim());
+      if (parts.length < 3) {
+        return {
+          lineNumber,
+          error: "لازم على الأقل اسم الصنف والفئة وسعر واحد",
+        };
+      }
+
+      const [name, category, smallPrice = "0", mediumPrice = "0", largePrice = "0", ...rest] = parts;
+      if (!name) {
+        return { lineNumber, error: "اسم الصنف ناقص" };
+      }
+
+      return {
+        lineNumber,
+        item: {
+          name,
+          category: category || "وجبات",
+          smallPrice,
+          mediumPrice,
+          largePrice,
+          ingredients: rest.join(" | "),
+          available: true,
+        },
+      };
+    });
+};
+
 const MenuTab = ({ restaurantId, readOnly }: MenuTabProps) => {
+  const { toast } = useToast();
   const [items, setItems] = useState<MenuItem[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [savingId, setSavingId] = useState<number | null>(null);
+  const [bulkDraft, setBulkDraft] = useState("");
+  const [bulkImporting, setBulkImporting] = useState(false);
 
   useEffect(() => {
     let ignore = false;
@@ -64,8 +116,10 @@ const MenuTab = ({ restaurantId, readOnly }: MenuTabProps) => {
       const updated = await updateMenuItem(item.id, item, restaurantId);
       setItems((current) => current.map((entry) => (entry.id === item.id ? updated : entry)));
       setEditingId(null);
+      toast({ title: "تم الحفظ", description: `الصنف ${updated.name || "الجديد"} اتحفظ` });
     } catch (error) {
       console.error("Failed to save menu item:", error);
+      toast({ title: "خطأ", description: "مش قادر أحفظ الصنف دلوقتي", variant: "destructive" });
     } finally {
       setSavingId(null);
     }
@@ -80,6 +134,38 @@ const MenuTab = ({ restaurantId, readOnly }: MenuTabProps) => {
       }
     } catch (error) {
       console.error("Failed to delete menu item:", error);
+      toast({ title: "خطأ", description: "مش قادر أمسح الصنف دلوقتي", variant: "destructive" });
+    }
+  };
+
+  const parsedBulk = useMemo(() => parseBulkMenu(bulkDraft), [bulkDraft]);
+  const bulkItems = parsedBulk.filter((entry) => entry.item).map((entry) => entry.item as Partial<MenuItem>);
+  const bulkErrors = parsedBulk.filter((entry) => entry.error);
+
+  const importBulkMenu = async () => {
+    if (!bulkItems.length) {
+      toast({ title: "مفيش بيانات", description: "حط أصناف الأول عشان نعمل import", variant: "destructive" });
+      return;
+    }
+    if (bulkErrors.length) {
+      toast({ title: "فيه أخطاء", description: "راجع السطور اللي فيها formatting غلط قبل الـ import", variant: "destructive" });
+      return;
+    }
+
+    try {
+      setBulkImporting(true);
+      const created = await createMenuItemsBulk(bulkItems, restaurantId);
+      setItems((current) => [...created, ...current]);
+      setBulkDraft("");
+      toast({
+        title: "تم استيراد المنيو ✅",
+        description: `اتضاف ${created.length} صنف مرة واحدة`,
+      });
+    } catch (error) {
+      console.error("Failed to bulk import menu:", error);
+      toast({ title: "خطأ", description: "الـ bulk import فشل، راجع البيانات وحاول تاني", variant: "destructive" });
+    } finally {
+      setBulkImporting(false);
     }
   };
 
@@ -120,7 +206,54 @@ const MenuTab = ({ restaurantId, readOnly }: MenuTabProps) => {
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-6">
+        <div className="rounded-2xl border border-border/50 bg-muted/20 p-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-foreground">Bulk menu import</p>
+              <p className="text-xs text-muted-foreground">
+                كل سطر بصيغة: `اسم الصنف | الفئة | صغير | وسط | كبير | المكونات`
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Badge variant="outline">{items.length} صنف حاليًا</Badge>
+              <Badge variant="outline">{bulkItems.length} جاهزين للاستيراد</Badge>
+            </div>
+          </div>
+
+          <Textarea
+            value={bulkDraft}
+            onChange={(event) => setBulkDraft(event.target.value)}
+            className="min-h-[140px] rounded-xl bg-background"
+            placeholder={"مثال:\nبرجر دبل | وجبات | 120 | 160 | 190 | لحم، جبنة شيدر\nبيبسي | مشروبات | 20 | 25 | 30 |"}
+            disabled={Boolean(disabled || bulkImporting)}
+          />
+
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="text-xs text-muted-foreground">
+              {bulkErrors.length > 0
+                ? `${bulkErrors.length} سطر محتاج مراجعة`
+                : bulkDraft.trim()
+                  ? "البيانات شكلها جاهز للاستيراد"
+                  : "اكتب الأصناف هنا لو عايز تضيف المنيو بسرعة"}
+            </div>
+            {!readOnly && (
+              <Button onClick={() => void importBulkMenu()} className="gap-2 rounded-xl" disabled={Boolean(disabled || bulkImporting)}>
+                <Upload size={16} />
+                {bulkImporting ? "جاري الاستيراد..." : "استيراد الأصناف"}
+              </Button>
+            )}
+          </div>
+
+          {bulkErrors.length > 0 && (
+            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-700">
+              {bulkErrors.slice(0, 4).map((entry) => (
+                <div key={entry.lineNumber}>السطر {entry.lineNumber}: {entry.error}</div>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-sm" dir="rtl">
             <thead>

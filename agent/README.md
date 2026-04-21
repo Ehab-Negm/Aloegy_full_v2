@@ -44,6 +44,7 @@ SONIOX_API_KEY=your_soniox_key
 GOOGLE_API_KEY=your_google_key
 OPENAI_API_KEY=your_openai_key
 XAI_API_KEY=your_xai_key
+HAMSA_API_KEY=your_hamsa_key
 
 # Backend
 BACKEND_BASE_URL=http://localhost:8000
@@ -72,9 +73,13 @@ SESSION_STT_MODEL=stt-rt-v4
 SESSION_STT_LANGUAGE=ar
 SESSION_STT_LANGUAGE_HINTS_STRICT=true
 SESSION_STT_BASE_URL=wss://stt-rt.soniox.com/transcribe-websocket
-SESSION_TTS_MODEL=xai/tts-1
-SESSION_TTS_VOICE=leo
-SESSION_TTS_LANGUAGE=multi
+SESSION_TTS_MODEL=hamsa/tts-realtime
+SESSION_TTS_VOICE=Salma
+SESSION_TTS_DIALECT=egy
+SESSION_TTS_LANGUAGE=ar
+SESSION_TTS_MULAW=false
+SESSION_TTS_STREAMING_ENABLED=true
+SESSION_TTS_STREAM_PACING=false
 ```
 
 مهم:

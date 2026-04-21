@@ -9,11 +9,15 @@ import os
 import time
 import uuid
 import json as _json
+from datetime import datetime, timezone
 from typing import Any
 
 from livekit.agents import AgentServer, JobContext, cli
 from livekit.agents.metrics import EOUMetrics, LLMMetrics, STTMetrics, TTSMetrics
 from livekit.agents.voice import AgentSession
+from livekit.agents.voice.room_io import RoomInputOptions
+from livekit.plugins import noise_cancellation
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from backend.config import RestaurantConfig
 from health import HealthServerHandle, start_health_server
@@ -59,6 +63,7 @@ def _start_parent_health_server() -> None:
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
     call_id = str(uuid.uuid4())[:16]
+    call_started_at_utc = datetime.now(timezone.utc)
     logger.info("call=%s | started | room=%s", call_id, ctx.room.name)
     _agent._emit_event("call.start", call_id=call_id, room=ctx.room.name)
     proc_context = ctx.proc.userdata.get("worker_context")
@@ -121,6 +126,7 @@ async def entrypoint(ctx: JobContext):
         llm            = _agent.SESSION_LLM,
         tts            = _agent.SESSION_TTS,
         vad            = _agent.SESSION_VAD,
+        turn_detection = MultilingualModel(),
         allow_interruptions=True,
         min_interruption_duration=_agent.MIN_INTERRUPTION_DURATION_SECONDS,
         min_endpointing_delay=_agent.MIN_ENDPOINTING_DELAY_SECONDS,
@@ -200,13 +206,16 @@ async def entrypoint(ctx: JobContext):
     @session.on("user_input_transcribed")
     def _on_transcribed(event):
         nonlocal last_user_activity_at, inactivity_prompt_count, last_reprompt_at
-        if event.transcript.strip():
+        transcript = (event.transcript or "").strip()
+        if transcript:
             last_user_activity_at = time.monotonic()
             inactivity_prompt_count = 0
             last_reprompt_at = 0.0
+            if event.is_final:
+                userdata.last_user_message = transcript[:280]
         logger.info(
             "call=%s | transcript final=%s | text=%s",
-            call_id, event.is_final, (event.transcript or "").strip(),
+            call_id, event.is_final, transcript,
         )
 
     @session.on("agent_false_interruption")
@@ -268,6 +277,7 @@ async def entrypoint(ctx: JobContext):
                 )
                 reprompt_text = _agent._inactivity_reprompt(userdata, flow_name)
                 with contextlib.suppress(Exception):
+                    userdata.last_agent_message = reprompt_text
                     await session.say(
                         reprompt_text,
                         allow_interruptions=True,
@@ -298,7 +308,13 @@ async def entrypoint(ctx: JobContext):
                 return
 
     try:
-        await session.start(agent=userdata.agents["greeter"], room=ctx.room)
+        await session.start(
+            agent=userdata.agents["greeter"],
+            room=ctx.room,
+            room_input_options=RoomInputOptions(
+                noise_cancellation=noise_cancellation.BVCTelephony(),
+            ),
+        )
         watchdog_task = asyncio.create_task(_watch_inactivity(), name=f"inactivity_watchdog_{call_id}")
         await asyncio.wait_for(close_event.wait(), timeout=MAX_CALL_DURATION)
     except asyncio.TimeoutError:
@@ -325,6 +341,19 @@ async def entrypoint(ctx: JobContext):
         await _agent._release_session_slot(call_id)
         _agent._cleanup_turn_count(call_id)
         duration = int(time.monotonic() - t_start)
+        call_ended_at_utc = datetime.now(timezone.utc)
+        try:
+            call_log_result = await _agent.submit_call_log(
+                userdata,
+                close_reason=close_reason,
+                duration_seconds=duration,
+                started_at_iso=call_started_at_utc.isoformat(),
+                ended_at_iso=call_ended_at_utc.isoformat(),
+            )
+            if call_log_result is not None and call_log_result.get("queued"):
+                logger.warning("call=%s | call log deferred to queue", call_id)
+        except Exception:
+            logger.exception("call=%s | call log submit failed", call_id)
         _agent._emit_event(
             "call.end",
             call_id=call_id,

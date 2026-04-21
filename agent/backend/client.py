@@ -68,16 +68,21 @@ async def get_http_client(
 def cleanup_http_client() -> None:
     """Synchronously close the client (for atexit)."""
     global _http_client
-    if _http_client is not None and not _http_client.is_closed:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(_http_client.aclose())
-            else:
-                loop.run_until_complete(_http_client.aclose())
-        except Exception:
-            pass
+    client = _http_client
     _http_client = None
+    if client is not None and not client.is_closed:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                asyncio.run(client.aclose())
+            except Exception:
+                pass
+        else:
+            try:
+                loop.create_task(client.aclose())
+            except Exception:
+                pass
 
 
 def retry_delay(attempt: int, base_seconds: float) -> float:

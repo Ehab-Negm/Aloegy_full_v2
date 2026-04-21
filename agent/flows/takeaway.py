@@ -8,7 +8,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import Agent, RunContext
 from pydantic import Field
 
-from base_agent import BaseAgent, RunContext_T, _run_tool_safely, get_menu, to_greeter, update_name, update_phone
+from base_agent import BaseAgent, RunContext_T, _run_tool_safely, build_instructions, get_menu, to_greeter, update_name, update_phone
 from backend.config import RestaurantConfig
 
 logger = logging.getLogger("restaurant.agent")
@@ -20,24 +20,23 @@ class Takeaway(BaseAgent):
         self.cfg = cfg
 
         self._opening = "اتفضل يا فندم، تحب تطلب إيه؟"
+        core = (
+            f"بتاخد طلبات استلام. وقت التحضير: {num2ar(cfg.wait_minutes)} دقيقة.\n\n"
+            "الخطوات بالترتيب:\n"
+            "1. اسمع الطلب → استدعي update_order (هو اللي بيتحقق من المنيو والأسعار، أنت معاكش أي أسعار).\n"
+            "2. اقترح إضافة بسيطة مرة واحدة بس (مش أكتر). لو رفض، كمّل.\n"
+            "3. اسأل لو في طلب خاص في التحضير.\n"
+            "4. خُد الاسم والموبايل.\n"
+            "5. لخّص الطلب بإيجاز، ولو أكّد → confirm_order.\n\n"
+            "قواعد:\n"
+            "- لو قال معلومة من خطوة جاية (اسم أو موبايل قبل ما تسأل)، سجّلها فوراً وكمّل طبيعي.\n"
+            "- \"أيوه\" أو \"تمام\" لوحدها مش موافقة على إضافة إلا لو قال اسم الصنف.\n"
+            "- متقولش من عندك أي صنف موجود أو لأ — ده شغل update_order.\n"
+            "- متكررش التأكيد أكتر من مرة.\n"
+            "- سؤال عن المنيو → get_menu | شكوى → to_complaint."
+        )
         super().__init__(
-            instructions=(
-                f"أنت شغال في '{cfg.name}' — بتاخد طلبات الاستلام على التليفون.\n"
-                f"وقت الاستلام: {num2ar(cfg.wait_minutes)} دقيقة.\n\n"
-                "اتكلم زي بني آدم طبيعي، مش بتقرأ من ورقة. نوّع في كلامك.\n\n"
-                "المطلوب منك بالترتيب:\n"
-                "- اسمع الطلب واستدعي update_order (هو اللي بيتحقق من المنيو — أنت متعرفش الأسعار).\n"
-                "- اقترح إضافة بسيطة مرة واحدة بس.\n"
-                "- اسأل لو في طلب خاص.\n"
-                "- خُد الاسم والموبايل.\n"
-                "- لخّص الطلب ولو أكّد استدعي confirm_order.\n\n"
-                "لو العميل قالك معلومة من خطوة جاية سجّلها وكمّل عادي.\n"
-                "لو سألك سؤال عادي رد عليه طبيعي وبعدين ارجع.\n"
-                "لو سأل عن المنيو → get_menu | لو عنده شكوى → to_complaint\n"
-                "متقولش للعميل صنف موجود أو لأ من عندك — ده شغل update_order.\n"
-                "'أيوه' أو 'تمام' لوحدها مش موافقة على إضافة إلا لو ذكر الصنف.\n"
-                "متكررش التأكيد أكتر من مرة."
-            ),
+            instructions=build_instructions(cfg.name, core),
             tools=[
                 update_name,
                 update_phone,

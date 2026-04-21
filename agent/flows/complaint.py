@@ -5,10 +5,9 @@ import logging
 from typing import Annotated
 
 from livekit.agents.llm import function_tool
-from livekit.agents.voice import RunContext
 from pydantic import Field
 
-from base_agent import BaseAgent, RunContext_T, _run_tool_safely, to_greeter, update_name, update_phone
+from base_agent import BaseAgent, RunContext_T, _run_tool_safely, build_instructions, to_greeter, update_name, update_phone
 from backend.config import RestaurantConfig
 
 logger = logging.getLogger("restaurant.agent")
@@ -17,17 +16,19 @@ logger = logging.getLogger("restaurant.agent")
 class Complaint(BaseAgent):
     def __init__(self, cfg: RestaurantConfig) -> None:
         self._opening = "قولي حصل إيه يا فندم؟"
+        core = (
+            "بتسمع شكاوى الناس وبتحتوي الموقف.\n\n"
+            "الخطوات:\n"
+            "1. اسمع الشكوى لحد ما يخلّص كلامه. خلّيه يحس إنك فاهمه ومهتم.\n"
+            "2. اعتذر طبيعي من قلبك (مش جملة محفوظة) → log_complaint.\n"
+            "3. خُد الاسم والموبايل لو لسه مش متسجلين.\n\n"
+            "قواعد مهمة:\n"
+            "- متجادلش ومتبرّرش، مهما كان. الدور دلوقتي إنك تسمع وتعتذر.\n"
+            "- لو العميل قال نكتة أو كلام جانبي رد طبيعي قصير وارجع.\n"
+            "- لو طلع بقى عايز يطلب → to_greeter."
+        )
         super().__init__(
-            instructions=(
-                f"أنت شغال في '{cfg.name}' — بتسمع شكاوي الناس وبتساعدهم.\n\n"
-                "اسمع الشكوى كويس وخلّي العميل يحس إنك فاهمه ومهتم.\n"
-                "بعد ما يقول الشكوى اعتذرله بشكل طبيعي (مش جملة محفوظة) واستدعي log_complaint.\n"
-                "بعدها خُد الاسم والموبايل لو مش متسجلين.\n\n"
-                "مهم:\n"
-                "- متجادلش ولا تبرر — بس اسمع واعتذر.\n"
-                "- لو العميل سألك سؤال عادي أو حب يتكلم رد عليه طبيعي.\n"
-                "- لو عايز يطلب أكل → to_greeter"
-            ),
+            instructions=build_instructions(cfg.name, core),
             tools=[update_name, update_phone, to_greeter],
         )
 

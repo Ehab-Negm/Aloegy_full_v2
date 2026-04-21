@@ -17,7 +17,7 @@ ADMIN_PHONE = "+201094321642"
 SALES_PHONE = "+201111111111"
 OWNER_PHONE = "+201012345678"
 DEFAULT_DEMO_RESTAURANT_ID = "demo-restaurant"
-DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "956956").strip() or "956956"
+DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "").strip() or None
 
 
 class SmokeTestError(RuntimeError):
@@ -121,6 +121,7 @@ def unique_phone(prefix: str = "13") -> str:
 
 
 def login_with_bypass(api: ApiClient, phone: str, expected_role: str) -> Session:
+    check(bool(DEV_OTP_BYPASS), "DEV_OTP_BYPASS must be set explicitly for bypass-based smoke login")
     send_result = api.post("/auth/send-otp", data={"phone": phone})
     check(send_result.get("success") is True, f"OTP send should succeed for {phone}")
     check("devOtp" not in send_result, f"OTP response should not expose devOtp for {phone}")
@@ -289,10 +290,26 @@ def main() -> int:
         check(isinstance(orders, list) and orders, "Orders payload should include seeded orders")
         check(isinstance(files, list) and files, "Files payload should include a seeded file")
         check(isinstance(settings, dict) and "restaurant" in settings and "agent" in settings, "Settings payload is invalid")
+        check(isinstance(settings["restaurant"].get("branches"), list) and settings["restaurant"]["branches"], "Settings should include branch config")
         check(isinstance(menu_items, list) and menu_items, "Menu items payload should include seeded items")
         check(isinstance(employees, list), "Employees payload should be a list")
         check(isinstance(issues, list), "Issues payload should be a list")
-        check(isinstance(analytics, dict) and "summary" in analytics, "Analytics payload is invalid")
+        check(
+            isinstance(analytics, dict)
+            and "summary" in analytics
+            and "quality" in analytics
+            and isinstance(analytics["quality"], dict)
+            and "summary" in analytics["quality"]
+            and "outcomes" in analytics["quality"]
+            and "failures" in analytics["quality"]
+            and "reviewStatuses" in analytics["quality"],
+            "Analytics payload is invalid",
+        )
+        check(
+            isinstance(analytics["quality"]["summary"].get("successRate"), str)
+            and isinstance(analytics["quality"]["summary"].get("reviewCoverage"), str),
+            "Quality analytics summary is invalid",
+        )
         log_pass("owner dashboard fetch endpoints work")
 
         first_order = orders[0]
@@ -312,8 +329,30 @@ def main() -> int:
         updated_settings_payload = json.loads(json.dumps(settings))
         updated_settings_payload["restaurant"]["name"] = f"{settings['restaurant']['name']} Smoke"
         updated_settings_payload["agent"]["name"] = f"{settings['agent']['name']} Smoke"
+        updated_settings_payload["restaurant"]["branches"] = [
+            {
+                "name": "فرع الدقي",
+                "address": "12 شارع التحرير، الدقي",
+                "deliveryZones": ["الدقي", "المهندسين"],
+            },
+            {
+                "name": "فرع مدينة نصر",
+                "address": "20 عباس العقاد، مدينة نصر",
+                "deliveryZones": ["مدينة نصر", "مكرم عبيد"],
+            },
+        ]
         updated_settings = owner_api.put("/settings", data=updated_settings_payload)
         check(updated_settings["restaurant"]["name"].endswith("Smoke"), "Settings update should persist restaurant name")
+        check(len(updated_settings["restaurant"]["branches"]) == 2, "Settings update should persist branches")
+        synced_agent_config = api.get(
+            "/restaurant/config",
+            headers={
+                "X-API-Key": args.api_key,
+                "X-Restaurant-ID": DEFAULT_DEMO_RESTAURANT_ID,
+            },
+        )
+        check(len(synced_agent_config.get("branches", [])) == 2, "Agent config should include synced branches")
+        check(set(synced_agent_config.get("delivery_zones", [])) >= {"الدقي", "مدينة نصر"}, "Agent config should aggregate delivery zones from branches")
         owner_api.put("/settings", data=original_settings)
         log_pass("settings update works")
 
@@ -345,6 +384,36 @@ def main() -> int:
         check(updated_item["name"] == "Smoke Meal Updated", "Menu item update should persist")
         owner_api.delete(f"/menu-items/{created_item['id']}")
         log_pass("menu item CRUD works")
+
+        bulk_items = owner_api.post(
+            "/menu-items/bulk",
+            data={
+                "items": [
+                    {
+                        "name": "Bulk Smoke Burger",
+                        "category": "وجبات",
+                        "ingredients": "beef, bun",
+                        "smallPrice": "80",
+                        "mediumPrice": "110",
+                        "largePrice": "140",
+                        "available": True,
+                    },
+                    {
+                        "name": "Bulk Smoke Cola",
+                        "category": "مشروبات",
+                        "ingredients": "",
+                        "smallPrice": "15",
+                        "mediumPrice": "20",
+                        "largePrice": "25",
+                        "available": True,
+                    },
+                ]
+            },
+        )
+        check(isinstance(bulk_items, list) and len(bulk_items) == 2, "Bulk menu import should create multiple items")
+        for item in bulk_items:
+            owner_api.delete(f"/menu-items/{item['id']}")
+        log_pass("menu bulk import works")
 
         employee_phone = unique_phone("14")
         created_employee = owner_api.post("/employees", data={"name": "Smoke Employee", "phone": employee_phone})
@@ -553,4 +622,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

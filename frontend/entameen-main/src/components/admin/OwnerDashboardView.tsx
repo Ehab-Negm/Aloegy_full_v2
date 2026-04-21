@@ -5,14 +5,12 @@ import {
   FileText,
   Loader2,
   PhoneCall,
-  Search,
   Settings,
   ShoppingCart,
   UserCog,
   Users,
   UtensilsCrossed,
 } from "lucide-react";
-import { motion } from "framer-motion";
 
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,6 +37,7 @@ import EmployeesTab from "@/components/dashboard/EmployeesTab";
 import AnalyticsTab from "@/components/dashboard/AnalyticsTab";
 import IssueReportsTab from "@/components/dashboard/IssueReportsTab";
 import CustomersTab from "@/components/dashboard/CustomersTab";
+import CallsTab from "@/components/dashboard/CallsTab";
 
 const ORDER_STATUSES = [
   { value: "received", label: "تم الاستلام" },
@@ -74,20 +73,6 @@ const orderStatusBadge = (status: string) => {
   );
 };
 
-const callStatusBadge = (status: string) => {
-  const map: Record<string, { label: string; className: string }> = {
-    active: { label: "جاري", className: "bg-emerald-100 text-emerald-700 border-emerald-200" },
-    closed: { label: "خلصت", className: "bg-muted text-muted-foreground border-border" },
-    pending: { label: "مستنية", className: "bg-amber-100 text-amber-700 border-amber-200" },
-  };
-  const state = map[status] || map.pending;
-  return (
-    <Badge variant="outline" className={state.className}>
-      {state.label}
-    </Badge>
-  );
-};
-
 interface OwnerDashboardViewProps {
   restaurantName: string;
   readOnly?: boolean;
@@ -96,8 +81,6 @@ interface OwnerDashboardViewProps {
 
 const OwnerDashboardView = ({ restaurantName, readOnly, restaurantId }: OwnerDashboardViewProps) => {
   const { toast } = useToast();
-  const [search, setSearch] = useState("");
-  const [selectedChat, setSelectedChat] = useState<number | null>(null);
   const [calls, setCalls] = useState<Call[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -156,12 +139,6 @@ const OwnerDashboardView = ({ restaurantName, readOnly, restaurantId }: OwnerDas
       ignore = true;
     };
   }, [restaurantId, toast]);
-
-  useEffect(() => {
-    if (selectedChat !== null && !calls.some((call) => call.id === selectedChat)) {
-      setSelectedChat(null);
-    }
-  }, [calls, selectedChat]);
 
   useEffect(() => {
     let ignore = false;
@@ -311,9 +288,6 @@ const OwnerDashboardView = ({ restaurantName, readOnly, restaurantId }: OwnerDas
     }
   };
 
-  const filteredCalls = calls.filter((call) => call.phone.includes(search));
-  const selectedCall = selectedChat ? calls.find((call) => call.id === selectedChat) ?? null : null;
-
   if (loading) {
     return (
       <Card className="border-border/50">
@@ -379,82 +353,13 @@ const OwnerDashboardView = ({ restaurantName, readOnly, restaurantId }: OwnerDas
         </TabsList>
 
         <TabsContent value="calls">
-          <div className="grid gap-4 md:grid-cols-3">
-            <div className="space-y-3 md:col-span-1">
-              <div className="relative">
-                <Search size={16} className="absolute start-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="ابحث برقم الموبايل..."
-                  className="w-full rounded-xl border border-border bg-muted/50 px-4 py-2.5 pe-4 ps-10 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                />
-              </div>
-              {filteredCalls.map((call) => (
-                <motion.div
-                  key={call.id}
-                  whileHover={{ scale: 1.01 }}
-                  onClick={() => setSelectedChat(call.id)}
-                  className={`cursor-pointer rounded-xl border p-4 transition-colors ${
-                    selectedChat === call.id ? "border-primary/40 bg-accent" : "border-border/50 bg-card hover:bg-muted/30"
-                  }`}
-                >
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-sm font-medium text-foreground" dir="ltr">
-                      {call.phone}
-                    </span>
-                    {callStatusBadge(call.status)}
-                  </div>
-                  <p className="truncate text-xs text-muted-foreground">{call.lastMessage}</p>
-                  <div className="mt-1 flex items-center justify-between">
-                    <p className="text-xs text-muted-foreground/60">{call.time}</p>
-                    <p className="text-xs font-medium text-primary">{call.orderTotal}</p>
-                  </div>
-                </motion.div>
-              ))}
-              {filteredCalls.length === 0 && (
-                <Card className="border-border/50">
-                  <CardContent className="py-8 text-center text-sm text-muted-foreground">مفيش مكالمات مطابقة للبحث</CardContent>
-                </Card>
-              )}
-            </div>
-
-            <div className="md:col-span-2">
-              {selectedCall ? (
-                <Card className="h-full border-border/50">
-                  <CardHeader className="pb-3">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-base font-heading">مكالمة مع</CardTitle>
-                      <span className="text-sm font-medium text-foreground" dir="ltr">
-                        {selectedCall.phone}
-                      </span>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="flex justify-start">
-                      <div className="max-w-xs rounded-2xl rounded-tr-sm bg-muted px-4 py-3">
-                        <p className="text-sm">{selectedCall.lastMessage}</p>
-                        <p className="mt-1 text-[10px] text-muted-foreground">العميل</p>
-                      </div>
-                    </div>
-                    <div className="flex justify-end">
-                      <div className="max-w-xs rounded-2xl rounded-tl-sm bg-primary px-4 py-3">
-                        <p className="text-sm text-primary-foreground">{selectedCall.aiResponse}</p>
-                        <p className="mt-1 text-[10px] text-primary-foreground/70">ألو إيچي</p>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : (
-                <Card className="flex min-h-[300px] items-center justify-center border-border/50">
-                  <div className="text-center text-muted-foreground">
-                    <PhoneCall size={48} className="mx-auto mb-3 opacity-30" />
-                    <p className="text-sm">اختار مكالمة عشان تشوف التفاصيل</p>
-                  </div>
-                </Card>
-              )}
-            </div>
-          </div>
+          <CallsTab
+            calls={calls}
+            readOnly={readOnly}
+            onCallUpdated={(updatedCall) =>
+              setCalls((current) => current.map((call) => (call.id === updatedCall.id ? updatedCall : call)))
+            }
+          />
         </TabsContent>
 
         <TabsContent value="orders">

@@ -1,11 +1,34 @@
 export interface Call {
   id: number;
+  callId: string;
+  customerName: string;
   phone: string;
+  flow: string;
+  transcriptExcerpt: string;
+  agentReplyExcerpt: string;
   lastMessage: string;
   aiResponse: string;
   time: string;
   status: "active" | "closed" | "pending";
   orderTotal: string;
+  outcome: string;
+  failureReason: string;
+  closeReason: string;
+  reviewStatus: "needs_review" | "reviewed" | "ignored";
+  reviewNotes: string;
+  handoffTarget?: string | null;
+  durationSeconds: number;
+  duration: string;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  createdAt: string;
+}
+
+export interface CallReviewUpdate {
+  reviewStatus: "needs_review" | "reviewed" | "ignored";
+  failureReason?: string;
+  reviewNotes?: string;
+  outcome?: string;
 }
 
 export interface UserProfile {
@@ -79,6 +102,13 @@ export interface RestaurantSettings {
   address: string;
   workingHours: string;
   contactPhone: string;
+  branches: BranchSettings[];
+}
+
+export interface BranchSettings {
+  name: string;
+  address: string;
+  deliveryZones: string[];
 }
 
 export interface AgentSettings {
@@ -132,6 +162,20 @@ export interface AnalyticsResponse {
   dailyOrders: Array<{ day: string; orders: number; revenue: number }>;
   monthlyRevenue: Array<{ month: string; revenue: number }>;
   categoryData: Array<{ name: string; value: number }>;
+  quality: {
+    summary: {
+      totalCalls: number;
+      successfulCalls: number;
+      reviewedCalls: number;
+      needsReview: number;
+      successRate: string;
+      reviewCoverage: string;
+    };
+    outcomes: Array<{ name: string; value: number }>;
+    failures: Array<{ name: string; value: number }>;
+    reviewStatuses: Array<{ name: string; value: number }>;
+    topBlockers: Array<{ reason: string; count: number }>;
+  };
 }
 
 export interface CurrentUserProfile {
@@ -356,6 +400,18 @@ export async function fetchCalls(restaurantId?: number): Promise<Call[]> {
   return apiRequest<Call[]>("/calls", undefined, { restaurantId });
 }
 
+export async function updateCallReview(callId: number, payload: CallReviewUpdate): Promise<Call> {
+  return apiRequest<Call>(`/calls/${callId}/review`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      review_status: payload.reviewStatus,
+      failure_reason: payload.failureReason ?? "",
+      review_notes: payload.reviewNotes ?? "",
+      outcome: payload.outcome ?? undefined,
+    }),
+  });
+}
+
 export async function fetchUsers(restaurantId?: number): Promise<UserProfile[]> {
   return apiRequest<UserProfile[]>("/users", undefined, { restaurantId });
 }
@@ -507,6 +563,27 @@ export async function createMenuItem(payload: Partial<MenuItem>, restaurantId?: 
         mediumPrice: payload.mediumPrice ?? "0",
         largePrice: payload.largePrice ?? "0",
         available: payload.available ?? true,
+      }),
+    },
+    { restaurantId },
+  );
+}
+
+export async function createMenuItemsBulk(payload: Partial<MenuItem>[], restaurantId?: number): Promise<MenuItem[]> {
+  return apiRequest<MenuItem[]>(
+    "/menu-items/bulk",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        items: payload.map((item) => ({
+          name: item.name ?? "",
+          category: item.category ?? "وجبات",
+          ingredients: item.ingredients ?? "",
+          smallPrice: item.smallPrice ?? "0",
+          mediumPrice: item.mediumPrice ?? "0",
+          largePrice: item.largePrice ?? "0",
+          available: item.available ?? true,
+        })),
       }),
     },
     { restaurantId },

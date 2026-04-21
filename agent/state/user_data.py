@@ -87,6 +87,10 @@ class UserData:
     session_transitional_state: bool = False
     last_guard_flow: str | None = None
     last_guard_signature: str | None = None
+    last_user_message: str = ""
+    last_agent_message: str = ""
+    active_flow: str = ""
+    handoff_target: str = ""
 
     customer_name: InitVar[str | None] = None
     customer_phone: InitVar[str | None] = None

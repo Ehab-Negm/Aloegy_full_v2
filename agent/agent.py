@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from dotenv import load_dotenv
 
-from livekit.agents import StopResponse, cli, llm
+from livekit.agents import StopResponse, cli, llm, tts as lk_tts
 from livekit.agents.voice import AgentSession, RunContext
 from livekit.plugins import google, openai, silero
 try:
@@ -206,9 +206,13 @@ NO_SPEECH_PROMPT_SECONDS          = _get_env_float("NO_SPEECH_PROMPT_SECONDS", 1
 NO_SPEECH_CLOSE_SECONDS           = _get_env_float("NO_SPEECH_CLOSE_SECONDS", 28.0, min_value=2.0)
 NO_SPEECH_REPROMPT_LIMIT          = _get_env_int("NO_SPEECH_REPROMPT_LIMIT", 2, min_value=1)
 NO_SPEECH_REPROMPT_GAP_SECONDS    = _get_env_float("NO_SPEECH_REPROMPT_GAP_SECONDS", 8.0, min_value=0.5)
-SESSION_TTS_MODEL            = os.getenv("SESSION_TTS_MODEL", "xai/tts-1")
-SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "ara")
-SESSION_TTS_LANGUAGE         = os.getenv("SESSION_TTS_LANGUAGE", "ar-EG")
+SESSION_TTS_MODEL            = os.getenv("SESSION_TTS_MODEL", "hamsa/tts-realtime")
+SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "Salma")
+SESSION_TTS_LANGUAGE         = os.getenv("SESSION_TTS_LANGUAGE", "ar")
+SESSION_TTS_DIALECT          = os.getenv("SESSION_TTS_DIALECT", "egy")
+SESSION_TTS_MULAW            = _get_env_bool("SESSION_TTS_MULAW", False)
+SESSION_TTS_STREAMING_ENABLED = _get_env_bool("SESSION_TTS_STREAMING_ENABLED", True)
+SESSION_TTS_STREAM_PACING    = _get_env_bool("SESSION_TTS_STREAM_PACING", False)
 SESSION_STT_LANGUAGE         = os.getenv("SESSION_STT_LANGUAGE", "ar")
 SESSION_STT_MODEL            = os.getenv("SESSION_STT_MODEL", "stt-rt-v4")
 SESSION_STT_BASE_URL         = os.getenv("SESSION_STT_BASE_URL", "wss://stt-rt.soniox.com/transcribe-websocket").strip()
@@ -216,10 +220,13 @@ SESSION_STT_LANGUAGE_HINTS_STRICT = _get_env_bool("SESSION_STT_LANGUAGE_HINTS_ST
 SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION = _get_env_bool("SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION", True)
 SESSION_STT_KEYTERM_LIMIT    = _get_env_int("SESSION_STT_KEYTERM_LIMIT", 40, min_value=5)
 SESSION_STT_EXTRA_KEYTERMS   = os.getenv("SESSION_STT_EXTRA_KEYTERMS", "")
-SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.0-flash")
+SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.5-flash")
 SESSION_LLM_REASONING_EFFORT = os.getenv("SESSION_LLM_REASONING_EFFORT", "low").strip().lower() or "low"
 SESSION_LLM_VERBOSITY        = os.getenv("SESSION_LLM_VERBOSITY", "low").strip().lower() or "low"
 SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 160, min_value=32)
+SESSION_LLM_TEMPERATURE      = _get_env_float("SESSION_LLM_TEMPERATURE", 0.85, min_value=0.0)
+SESSION_LLM_TOP_P            = _get_env_float("SESSION_LLM_TOP_P", 0.95, min_value=0.0)
+SESSION_LLM_THINKING_BUDGET  = _get_env_int("SESSION_LLM_THINKING_BUDGET", 0, min_value=0)
 SESSION_PREEMPTIVE_GENERATION = _get_env_bool("SESSION_PREEMPTIVE_GENERATION", False)
 CONFIG_SHARED_CACHE_ENABLED  = _get_env_bool("CONFIG_SHARED_CACHE_ENABLED", True)
 CONFIG_SHARED_CACHE_PATH     = os.getenv("CONFIG_SHARED_CACHE_PATH", f".runtime/{APP_ENV}/config_cache.json")
@@ -307,15 +314,64 @@ def _stt_provider_ready_reason() -> str | None:
     return None
 
 
-from xai_tts import TTS as XaiTTS  # noqa: E402
+from hamsa_tts import TTS as HamsaTTS  # noqa: E402
+from xai_tts import TTS as XAITTS  # noqa: E402
 
-SESSION_TTS = XaiTTS(
-    api_key=os.getenv("XAI_API_KEY", ""),
-    voice=SESSION_TTS_VOICE,
-    language=SESSION_TTS_LANGUAGE,
-)
-if not os.getenv("XAI_API_KEY"):
-    logger.warning("XAI_API_KEY is not set — TTS will fail")
+
+class _ManagedTTSStreamAdapter(lk_tts.StreamAdapter):
+    """StreamAdapter that also closes the wrapped provider when the session closes."""
+
+    async def aclose(self) -> None:
+        try:
+            await super().aclose()
+        finally:
+            await self._wrapped_tts.aclose()
+
+
+def _build_base_session_tts() -> Any:
+    model_name = SESSION_TTS_MODEL.strip().lower()
+    if model_name.startswith("xai/") or model_name.startswith("xai-") or model_name == "xai":
+        if not os.getenv("XAI_API_KEY"):
+            logger.warning("XAI_API_KEY is not set — TTS will fail")
+        return XAITTS(
+            api_key=os.getenv("XAI_API_KEY", ""),
+            voice=SESSION_TTS_VOICE,
+            language=SESSION_TTS_LANGUAGE,
+        )
+
+    if not os.getenv("HAMSA_API_KEY"):
+        logger.warning("HAMSA_API_KEY is not set — TTS will fail")
+    return HamsaTTS(
+        api_key=os.getenv("HAMSA_API_KEY", ""),
+        voice=SESSION_TTS_VOICE,
+        dialect=SESSION_TTS_DIALECT,
+        language_id=SESSION_TTS_LANGUAGE,
+        mulaw=SESSION_TTS_MULAW,
+    )
+
+
+def _build_session_tts() -> Any:
+    base_tts = _build_base_session_tts()
+    capabilities = getattr(base_tts, "capabilities", None)
+    if not SESSION_TTS_STREAMING_ENABLED:
+        logger.info("TTS streaming disabled | model=%s", SESSION_TTS_MODEL)
+        return base_tts
+    if bool(capabilities and capabilities.streaming):
+        logger.info("TTS native streaming enabled | model=%s", SESSION_TTS_MODEL)
+        return base_tts
+
+    logger.info(
+        "TTS streaming adapter enabled | model=%s | pacing=%s",
+        SESSION_TTS_MODEL,
+        SESSION_TTS_STREAM_PACING,
+    )
+    return _ManagedTTSStreamAdapter(
+        tts=base_tts,
+        text_pacing=SESSION_TTS_STREAM_PACING,
+    )
+
+
+SESSION_TTS = _build_session_tts()
 SESSION_STT_PROVIDER = "soniox"
 if SESSION_LLM_MODEL.startswith("gpt-") or SESSION_LLM_MODEL.startswith("o"):
     SESSION_LLM = openai.LLM(
@@ -326,8 +382,22 @@ if SESSION_LLM_MODEL.startswith("gpt-") or SESSION_LLM_MODEL.startswith("o"):
     )
     logger.info("LLM provider: OpenAI | model=%s", SESSION_LLM_MODEL)
 else:
-    SESSION_LLM = google.LLM(model=SESSION_LLM_MODEL)
-    logger.info("LLM provider: Google | model=%s", SESSION_LLM_MODEL)
+    from google.genai import types as _genai_types  # noqa: E402
+    _gemini_kwargs: dict[str, Any] = {
+        "model": SESSION_LLM_MODEL,
+        "temperature": SESSION_LLM_TEMPERATURE,
+        "top_p": SESSION_LLM_TOP_P,
+        "max_output_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
+    }
+    if SESSION_LLM_MODEL.startswith("gemini-2.5"):
+        _gemini_kwargs["thinking_config"] = _genai_types.ThinkingConfig(
+            thinking_budget=SESSION_LLM_THINKING_BUDGET,
+        )
+    SESSION_LLM = google.LLM(**_gemini_kwargs)
+    logger.info(
+        "LLM provider: Google | model=%s | temp=%.2f | top_p=%.2f | thinking_budget=%d",
+        SESSION_LLM_MODEL, SESSION_LLM_TEMPERATURE, SESSION_LLM_TOP_P, SESSION_LLM_THINKING_BUDGET,
+    )
 SESSION_VAD = silero.VAD.load(
     min_silence_duration=0.25,
     prefix_padding_duration=0.2,
@@ -1779,6 +1849,121 @@ async def submit_complaint(ud: "UserData", text: str, ctype: str) -> dict | None
         "logged_at":      datetime.now(timezone.utc).isoformat(),
         "channel":        "voice_agent",
     }, ud.call_id, idempotency_action="complaint", write_health=ud.write_health)
+
+
+def _call_outcome_and_failure_reason(ud: "UserData", close_reason: str) -> tuple[str, str]:
+    if ud.order_confirmed:
+        return "order_confirmed", ""
+    if ud.reservation_confirmed:
+        return "reservation_confirmed", ""
+    if ud.complaint_logged:
+        return "complaint_logged", ""
+    if ud.handoff_target:
+        return "handoff", ""
+
+    if close_reason == "inactivity_timeout":
+        return "abandoned", "customer_inactive"
+    if close_reason == "call_timeout":
+        return "failed", "max_duration_reached"
+    if close_reason == "session_error":
+        return "failed", "session_error"
+
+    flow = (ud.active_flow or "").strip().lower()
+    if flow in {"takeaway", "delivery"}:
+        if not ud.order:
+            return "closed_without_action", "no_order_items"
+        if not ud.customer_name:
+            return "closed_without_action", "missing_name"
+        if not ud.customer_phone:
+            return "closed_without_action", "missing_phone"
+        if flow == "delivery" and not ud.delivery_address:
+            return "closed_without_action", "missing_address"
+        return "closed_without_action", "order_not_confirmed"
+
+    if flow == "reservation":
+        if not ud.reservation_time:
+            return "closed_without_action", "missing_reservation_time"
+        if not ud.guests_count:
+            return "closed_without_action", "missing_guests_count"
+        if len(ud.restaurant.branches) > 1 and not ud.selected_branch:
+            return "closed_without_action", "missing_branch"
+        if not ud.customer_name:
+            return "closed_without_action", "missing_name"
+        if not ud.customer_phone:
+            return "closed_without_action", "missing_phone"
+        return "closed_without_action", "reservation_not_confirmed"
+
+    if flow == "complaint":
+        if not ud.complaint_text:
+            return "closed_without_action", "missing_complaint_text"
+        if not ud.complaint_type:
+            return "closed_without_action", "missing_complaint_type"
+        if not ud.customer_phone:
+            return "closed_without_action", "missing_phone"
+        return "closed_without_action", "complaint_not_submitted"
+
+    return "closed_without_action", "ended_without_action"
+
+
+def _call_review_status(outcome: str, failure_reason: str) -> str:
+    if outcome in {"order_confirmed", "reservation_confirmed", "complaint_logged", "handoff"}:
+        return "reviewed"
+    if failure_reason in {"ended_without_action", ""}:
+        return "needs_review"
+    return "needs_review"
+
+
+def _call_ai_response_summary(ud: "UserData", outcome: str, close_reason: str) -> str:
+    summary = (ud.last_agent_message or "").strip()
+    if summary:
+        return summary
+    if outcome == "order_confirmed":
+        return f"تم تثبيت الطلب {ud.order_id or ''}".strip()
+    if outcome == "reservation_confirmed":
+        return f"تم تثبيت الحجز {ud.reservation_id or ''}".strip()
+    if outcome == "complaint_logged":
+        return "تم تسجيل الشكوى وهيتم المتابعة"
+    if outcome == "handoff":
+        return f"تم تحويل المكالمة إلى {ud.handoff_target}".strip()
+    if close_reason == "inactivity_timeout":
+        return "المكالمة اتقفلت بسبب عدم الرد"
+    if close_reason == "call_timeout":
+        return "المكالمة اتقفلت بعد انتهاء الوقت المتاح"
+    if close_reason == "session_error":
+        return "المكالمة اتقفلت بعد خطأ تقني"
+    return "انتهت المكالمة بدون إجراء نهائي"
+
+
+async def submit_call_log(
+    ud: "UserData",
+    *,
+    close_reason: str,
+    duration_seconds: int,
+    started_at_iso: str,
+    ended_at_iso: str,
+) -> dict | None:
+    outcome, failure_reason = _call_outcome_and_failure_reason(ud, close_reason)
+    return await _post("/calls/upsert", {
+        "call_id": ud.call_id,
+        "customer_name": ud.customer_name or "",
+        "customer_phone": ud.customer_phone or "",
+        "flow": ud.active_flow or "",
+        "transcript_excerpt": (ud.last_user_message or "")[:280],
+        "agent_reply_excerpt": (ud.last_agent_message or "")[:280],
+        "last_message": (ud.last_user_message or "")[:280],
+        "ai_response": _call_ai_response_summary(ud, outcome, close_reason)[:280],
+        "status": "closed",
+        "order_total": float(ud.order_total or 0.0),
+        "outcome": outcome,
+        "failure_reason": failure_reason,
+        "close_reason": close_reason,
+        "review_status": _call_review_status(outcome, failure_reason),
+        "review_notes": "",
+        "handoff_target": ud.handoff_target or None,
+        "duration_seconds": max(0, int(duration_seconds)),
+        "started_at": started_at_iso,
+        "ended_at": ended_at_iso,
+    }, ud.call_id, idempotency_action="call-log", write_health=ud.write_health)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3337,6 +3522,7 @@ async def _safe_close_session_once(
         return
     if farewell:
         with contextlib.suppress(Exception):
+            session.userdata.last_agent_message = farewell
             await session.say(
                 _voice_safe_text(farewell),
                 allow_interruptions=False,
