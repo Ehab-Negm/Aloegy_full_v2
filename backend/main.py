@@ -9,6 +9,7 @@ import tempfile
 import threading
 import uuid
 from contextlib import asynccontextmanager, suppress
+from urllib.parse import quote
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -104,15 +105,47 @@ JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
 JWT_ALGORITHM = "HS256"
 JWT_TTL_MINUTES = max(10, int(os.getenv("JWT_TTL_MINUTES", "720")))
 OTP_TTL_MINUTES = max(1, int(os.getenv("OTP_TTL_MINUTES", "10")))
-DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "").strip() or None
-DEV_OTP_BYPASS_ENABLED = APP_ENV == "dev" and bool(DEV_OTP_BYPASS)
 BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "mock_secret_key").strip()
+
+# ── Bird WhatsApp OTP delivery ──────────────────────────
+BIRD_API_BASE = os.getenv("BIRD_API_BASE", "https://api.bird.com").strip().rstrip("/")
+BIRD_API_KEY = os.getenv("BIRD_API_KEY", "").strip()
+BIRD_WORKSPACE_ID = os.getenv("BIRD_WORKSPACE_ID", "").strip()
+BIRD_CHANNEL_ID = os.getenv("BIRD_CHANNEL_ID", "").strip()
+BIRD_OTP_TEMPLATE_PROJECT_ID = os.getenv("BIRD_OTP_TEMPLATE_PROJECT_ID", "").strip()
+BIRD_OTP_TEMPLATE_VERSION = os.getenv("BIRD_OTP_TEMPLATE_VERSION", "latest").strip() or "latest"
+BIRD_OTP_TEMPLATE_LOCALE = os.getenv("BIRD_OTP_TEMPLATE_LOCALE", "ar").strip() or "ar"
+BIRD_OTP_TEMPLATE_VARIABLE = os.getenv("BIRD_OTP_TEMPLATE_VARIABLE", "otp").strip() or "otp"
+BIRD_HTTP_TIMEOUT = max(2.0, float(os.getenv("BIRD_HTTP_TIMEOUT", "10")))
+BIRD_ENABLED = bool(
+    BIRD_API_KEY and BIRD_WORKSPACE_ID and BIRD_CHANNEL_ID and BIRD_OTP_TEMPLATE_PROJECT_ID
+)
+
+# ── Bird WhatsApp order-confirmation delivery ────────────
+BIRD_ORDER_CONFIRM_TEMPLATE_PROJECT_ID = os.getenv("BIRD_ORDER_CONFIRM_TEMPLATE_PROJECT_ID", "").strip()
+BIRD_ORDER_CONFIRM_TEMPLATE_VERSION = os.getenv("BIRD_ORDER_CONFIRM_TEMPLATE_VERSION", "latest").strip() or "latest"
+BIRD_ORDER_CONFIRM_TEMPLATE_LOCALE = os.getenv("BIRD_ORDER_CONFIRM_TEMPLATE_LOCALE", "ar").strip() or "ar"
+BIRD_ORDER_CONFIRM_VAR_NAME = os.getenv("BIRD_ORDER_CONFIRM_VAR_NAME", "name").strip() or "name"
+BIRD_ORDER_CONFIRM_VAR_ITEMS = os.getenv("BIRD_ORDER_CONFIRM_VAR_ITEMS", "items").strip() or "items"
+BIRD_ORDER_CONFIRM_VAR_ADDRESS = os.getenv("BIRD_ORDER_CONFIRM_VAR_ADDRESS", "address").strip() or "address"
+BIRD_ORDER_CONFIRM_VAR_TOTAL = os.getenv("BIRD_ORDER_CONFIRM_VAR_TOTAL", "total").strip() or "total"
+BIRD_ORDER_CONFIRM_TAKEAWAY_ADDRESS = os.getenv(
+    "BIRD_ORDER_CONFIRM_TAKEAWAY_ADDRESS", "استلام من المطعم"
+).strip() or "استلام من المطعم"
+BIRD_ORDER_CONFIRM_ENABLED = bool(
+    BIRD_API_KEY and BIRD_WORKSPACE_ID and BIRD_CHANNEL_ID and BIRD_ORDER_CONFIRM_TEMPLATE_PROJECT_ID
+)
 
 if APP_ENV == "prod":
     if JWT_SECRET == "change-me-in-production":
         raise RuntimeError("FATAL: JWT_SECRET must be set in production")
     if BACKEND_API_KEY == "mock_secret_key":
         raise RuntimeError("FATAL: BACKEND_API_KEY must be set in production")
+    if not BIRD_ENABLED:
+        raise RuntimeError(
+            "FATAL: Bird WhatsApp OTP delivery is not configured "
+            "(set BIRD_API_KEY, BIRD_WORKSPACE_ID, BIRD_CHANNEL_ID, BIRD_OTP_TEMPLATE_PROJECT_ID)"
+        )
 
 LIVEKIT_URL = os.getenv("LIVEKIT_URL", "").strip()
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "").strip()
@@ -135,11 +168,6 @@ ALLOW_CREDENTIALS = APP_ENV == "prod"
 BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1").strip() or "127.0.0.1"
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
 DEFAULT_COLLECTION_LIMIT = max(20, int(os.getenv("DEFAULT_COLLECTION_LIMIT", "200")))
-
-if DEV_OTP_BYPASS_ENABLED:
-    logger.warning("DEV_OTP_BYPASS is enabled for APP_ENV=dev")
-elif DEV_OTP_BYPASS:
-    logger.warning("DEV_OTP_BYPASS is set but ignored outside APP_ENV=dev")
 MAX_COLLECTION_LIMIT = max(DEFAULT_COLLECTION_LIMIT, int(os.getenv("MAX_COLLECTION_LIMIT", "500")))
 MAX_REQUEST_BODY_BYTES = max(1024 * 1024, int(os.getenv("MAX_REQUEST_BODY_BYTES", str(10 * 1024 * 1024))))
 
@@ -772,6 +800,124 @@ def hash_otp(phone: str, code: str) -> str:
     return hashlib.sha256(f"{normalize_phone(phone)}::{code}::{JWT_SECRET}".encode("utf-8")).hexdigest()
 
 
+def send_otp_via_bird(phone: str, code: str) -> None:
+    """Send the OTP code to a phone number over WhatsApp using Bird's Channels API.
+
+    Raises HTTPException(502) when Bird rejects the request so callers surface a clear error.
+    When Bird is not configured, behavior depends on APP_ENV: dev logs the code, prod raises.
+    """
+    if not BIRD_ENABLED:
+        if APP_ENV == "prod":
+            raise HTTPException(status_code=500, detail="OTP delivery is not configured")
+        logger.warning("bird not configured | dev OTP=%s phone=%s", code, phone)
+        return
+
+    url = (
+        f"{BIRD_API_BASE}/workspaces/{BIRD_WORKSPACE_ID}"
+        f"/channels/{BIRD_CHANNEL_ID}/messages"
+    )
+    payload = {
+        "receiver": {"contacts": [{"identifierValue": phone}]},
+        "template": {
+            "projectId": BIRD_OTP_TEMPLATE_PROJECT_ID,
+            "version": BIRD_OTP_TEMPLATE_VERSION,
+            "locale": BIRD_OTP_TEMPLATE_LOCALE,
+            "variables": {BIRD_OTP_TEMPLATE_VARIABLE: code},
+        },
+    }
+    body = json.dumps(payload).encode("utf-8")
+    from urllib import error as _urlerror
+    from urllib import request as _urlrequest
+
+    req = _urlrequest.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"AccessKey {BIRD_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with _urlrequest.urlopen(req, timeout=BIRD_HTTP_TIMEOUT) as resp:
+            logger.info("bird otp sent | phone=%s status=%s", phone, resp.status)
+    except _urlerror.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        logger.error("bird otp http error | phone=%s status=%s body=%s", phone, exc.code, detail[:500])
+        raise HTTPException(status_code=502, detail="Failed to send WhatsApp OTP") from exc
+    except _urlerror.URLError as exc:
+        logger.error("bird otp network error | phone=%s reason=%s", phone, exc.reason)
+        raise HTTPException(status_code=502, detail="WhatsApp OTP service unreachable") from exc
+
+
+def send_order_confirmation_via_bird(
+    *,
+    phone: str,
+    customer_name: str,
+    items_summary: str,
+    address: str,
+    total: str,
+) -> None:
+    """Fire-and-forget WhatsApp order confirmation via Bird. Never raises —
+    delivery failures must not block order creation. Requires an approved
+    utility template configured via BIRD_ORDER_CONFIRM_TEMPLATE_PROJECT_ID.
+    """
+    if not BIRD_ORDER_CONFIRM_ENABLED:
+        if APP_ENV != "prod":
+            logger.warning(
+                "bird order-confirm not configured | phone=%s items=%s total=%s",
+                phone, items_summary, total,
+            )
+        return
+
+    url = (
+        f"{BIRD_API_BASE}/workspaces/{BIRD_WORKSPACE_ID}"
+        f"/channels/{BIRD_CHANNEL_ID}/messages"
+    )
+    payload = {
+        "receiver": {"contacts": [{"identifierValue": phone}]},
+        "template": {
+            "projectId": BIRD_ORDER_CONFIRM_TEMPLATE_PROJECT_ID,
+            "version": BIRD_ORDER_CONFIRM_TEMPLATE_VERSION,
+            "locale": BIRD_ORDER_CONFIRM_TEMPLATE_LOCALE,
+            "variables": {
+                BIRD_ORDER_CONFIRM_VAR_NAME: customer_name or "",
+                BIRD_ORDER_CONFIRM_VAR_ITEMS: items_summary or "",
+                BIRD_ORDER_CONFIRM_VAR_ADDRESS: address or "",
+                BIRD_ORDER_CONFIRM_VAR_TOTAL: total or "",
+            },
+        },
+    }
+    body = json.dumps(payload).encode("utf-8")
+    from urllib import error as _urlerror
+    from urllib import request as _urlrequest
+
+    req = _urlrequest.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"AccessKey {BIRD_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with _urlrequest.urlopen(req, timeout=BIRD_HTTP_TIMEOUT) as resp:
+            logger.info("bird order-confirm sent | phone=%s status=%s", phone, resp.status)
+    except _urlerror.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        logger.error(
+            "bird order-confirm http error | phone=%s status=%s body=%s",
+            phone, exc.code, detail[:500],
+        )
+    except _urlerror.URLError as exc:
+        logger.error("bird order-confirm network error | phone=%s reason=%s", phone, exc.reason)
+    except Exception:
+        logger.exception("bird order-confirm unexpected error | phone=%s", phone)
+
+
 def create_access_token(user: User) -> str:
     expires_at = utc_now() + timedelta(minutes=JWT_TTL_MINUTES)
     payload = {
@@ -784,6 +930,29 @@ def create_access_token(user: User) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+STREAM_TICKET_TTL_SECONDS = 30
+
+
+def create_stream_ticket(user: User) -> str:
+    expires_at = utc_now() + timedelta(seconds=STREAM_TICKET_TTL_SECONDS)
+    payload = {
+        "sub": str(user.id),
+        "role": user.role,
+        "restaurant_id": user.restaurant_id,
+        "type": "stream",
+        "exp": int(expires_at.timestamp()),
+        "iat": int(utc_now().timestamp()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_stream_ticket(token: str) -> dict[str, Any]:
+    payload = decode_access_token(token)
+    if payload.get("type") != "stream":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid stream ticket")
+    return payload
+
+
 def decode_access_token(token: str) -> dict[str, Any]:
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -791,8 +960,26 @@ def decode_access_token(token: str) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token") from exc
 
 
+def enforce_restaurant_scope(user: CurrentUser, resource_restaurant_id: int | None) -> None:
+    """Admins bypass. All other roles require a bound restaurant_id that matches the resource."""
+    if user.role == "admin":
+        return
+    if user.restaurant_id is None or user.restaurant_id != resource_restaurant_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+
+
 def resolve_current_user_from_token(db: Session, token: str) -> CurrentUser:
     payload = decode_access_token(token)
+    if payload.get("type") == "stream":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid token type")
+    user = db.get(User, int(payload["sub"]))
+    if not user or not user.active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="user not found")
+    return CurrentUser.model_validate(user)
+
+
+def resolve_stream_user_from_ticket(db: Session, ticket: str) -> CurrentUser:
+    payload = decode_stream_ticket(ticket)
     user = db.get(User, int(payload["sub"]))
     if not user or not user.active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="user not found")
@@ -1901,6 +2088,7 @@ def _run_migrations() -> None:
     """Add columns that were introduced after the initial schema."""
     import sqlalchemy as sa
 
+    datetime_type = "TIMESTAMP" if engine.dialect.name == "postgresql" else "DATETIME"
     migrations: list[tuple[str, str, str]] = [
         ("reservations", "reservation_time_iso", "VARCHAR(64)"),
         ("otp_codes", "attempts", "INTEGER DEFAULT 0"),
@@ -1917,8 +2105,8 @@ def _run_migrations() -> None:
         ("call_logs", "review_notes", "TEXT DEFAULT ''"),
         ("call_logs", "handoff_target", "VARCHAR(80)"),
         ("call_logs", "duration_seconds", "INTEGER DEFAULT 0"),
-        ("call_logs", "started_at", "DATETIME"),
-        ("call_logs", "ended_at", "DATETIME"),
+        ("call_logs", "started_at", datetime_type),
+        ("call_logs", "ended_at", datetime_type),
     ]
     existing_by_table: dict[str, set[str]] = {}
     with engine.connect() as conn:
@@ -1995,6 +2183,15 @@ def health() -> dict[str, Any]:
     return {"status": "ok", "env": APP_ENV}
 
 
+@app.get("/ready")
+def readiness(db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"database unavailable: {exc.__class__.__name__}") from exc
+    return {"status": "ready", "env": APP_ENV}
+
+
 @app.post("/contact")
 @limiter.limit("5/minute")
 def submit_contact_form(
@@ -2028,7 +2225,8 @@ def send_otp(
     )
     db.commit()
     logger.info("otp generated | phone=%s", phone)
-    return {"success": True}
+    send_otp_via_bird(phone, code)
+    return {"success": True, "channel": "whatsapp"}
 
 
 @app.post("/auth/verify-otp")
@@ -2057,8 +2255,6 @@ def verify_otp(
     if otp_row and ensure_utc_datetime(otp_row.expires_at) >= utc_now() and otp_row.code_hash == hash_otp(phone, otp):
         otp_is_valid = True
         otp_row.consumed_at = utc_now()
-    elif DEV_OTP_BYPASS_ENABLED and otp == DEV_OTP_BYPASS:
-        otp_is_valid = True
 
     if not otp_is_valid:
         if otp_row:
@@ -2137,8 +2333,7 @@ def update_call_review(
     call = db.get(CallLog, call_log_id)
     if not call:
         raise HTTPException(status_code=404, detail="call not found")
-    if user.role != "admin" and call.restaurant_id != user.restaurant_id:
-        raise HTTPException(status_code=403, detail="forbidden")
+    enforce_restaurant_scope(user, call.restaurant_id)
     call.review_status = payload.review_status
     call.failure_reason = payload.failure_reason.strip()
     call.review_notes = payload.review_notes.strip()
@@ -2180,13 +2375,26 @@ def fetch_orders(
     return [serialize_order(order) for order in orders]
 
 
+@app.post("/auth/stream-ticket")
+def issue_stream_ticket(
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    user_row = db.get(User, user.id)
+    if not user_row or not user_row.active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="user not found")
+    return {"ticket": create_stream_ticket(user_row), "expires_in": STREAM_TICKET_TTL_SECONDS}
+
+
 @app.get("/orders/stream")
 async def stream_orders(
-    token: str | None = Query(default=None),
+    ticket: str | None = Query(default=None),
     restaurant_id: int | None = Query(default=None, alias="restaurantId"),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    user = authenticate_current_user(db, access_token=token)
+    if not ticket:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing stream ticket")
+    user = resolve_stream_user_from_ticket(db, ticket)
     if user.role not in {"admin", "owner", "employee"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
 
@@ -2227,8 +2435,7 @@ def update_order_status(
     order = db.scalar(select(Order).where(Order.public_id == order_public_id))
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    if user.role != "admin" and order.restaurant_id != user.restaurant_id:
-        raise HTTPException(status_code=403, detail="forbidden")
+    enforce_restaurant_scope(user, order.restaurant_id)
     order.status = _normalize_order_status(payload.status)
     order.driver_phone = normalize_phone(payload.driverPhone) if payload.driverPhone else None
     db.commit()
@@ -2310,13 +2517,15 @@ def download_file(
     asset = db.get(FileAsset, file_id)
     if not asset:
         raise HTTPException(status_code=404, detail="file not found")
-    if user.role != "admin" and asset.restaurant_id != user.restaurant_id:
-        raise HTTPException(status_code=403, detail="forbidden")
+    enforce_restaurant_scope(user, asset.restaurant_id)
     file_path = _resolve_asset_path(asset)
     response = FileResponse(file_path, filename=asset.name)
     if inline:
-        safe_name = asset.name.replace('"', "")
-        response.headers["Content-Disposition"] = f'inline; filename="{safe_name}"'
+        ascii_fallback = re.sub(r"[^A-Za-z0-9._-]", "_", asset.name)[:100] or "file"
+        encoded_name = quote(asset.name, safe="")
+        response.headers["Content-Disposition"] = (
+            f'inline; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_name}'
+        )
     return response
 
 
@@ -2332,8 +2541,7 @@ def preview_file(
     asset = db.get(FileAsset, file_id)
     if not asset:
         raise HTTPException(status_code=404, detail="file not found")
-    if user.role != "admin" and asset.restaurant_id != user.restaurant_id:
-        raise HTTPException(status_code=403, detail="forbidden")
+    enforce_restaurant_scope(user, asset.restaurant_id)
     _resolve_asset_path(asset)
     access_token = extract_access_token(authorization=authorization, access_token=token)
     return {"url": _build_file_access_url(request, file_id=file_id, token=access_token, inline=True)}
@@ -3041,6 +3249,21 @@ def create_agent_order(
                     return {"order_id": existing.public_id, "estimated_time": restaurant.delivery_minutes if existing.type == "delivery" else restaurant.wait_minutes}
             raise HTTPException(status_code=409, detail="order conflict, please retry") from exc
         publish_order_event(restaurant, order, "created")
+        try:
+            confirmation_address = (
+                order.delivery_address or BIRD_ORDER_CONFIRM_TAKEAWAY_ADDRESS
+                if order.type == "delivery"
+                else BIRD_ORDER_CONFIRM_TAKEAWAY_ADDRESS
+            )
+            send_order_confirmation_via_bird(
+                phone=order.phone,
+                customer_name=order.customer_name or "",
+                items_summary=order.items_summary or "",
+                address=confirmation_address,
+                total=f"{order.amount:.2f}".rstrip("0").rstrip("."),
+            )
+        except Exception:
+            logger.exception("order-confirm dispatch failed | order=%s", order.public_id)
         return {"order_id": order.public_id, "estimated_time": restaurant.delivery_minutes if payload.type == "delivery" else restaurant.wait_minutes}
     except HTTPException:
         raise

@@ -69,4 +69,10 @@ def is_plausible_partial_phone_digits(digits: str) -> bool:
         return True
     if len(local_digits) >= 3 and any(local_digits.startswith(prefix) for prefix in PHONE_PREFIXES):
         return True
+    # Accept any 3+ digit chunk even without a 01X prefix — it may be a middle
+    # segment of a phone number spoken in pieces (e.g. STT catches "788 950"
+    # while the leading "012" went to a previous turn). Final validate_phone()
+    # still gates commitment once the full number is assembled.
+    if len(local_digits) >= 3:
+        return True
     return False

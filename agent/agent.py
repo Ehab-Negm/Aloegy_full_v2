@@ -3447,8 +3447,26 @@ def _next_step_hint(context: RunContext_T) -> str:
     return _next_step_hint_for_flow(_current_flow_name(context), context.userdata)
 
 
-def _inactivity_reprompt(ud: "UserData", flow: str = "") -> str:
-    """Flow-aware reprompt when the user goes silent."""
+_INACTIVITY_SOFT_CHECKIN = [
+    "لسه معايا يا فندم؟",
+    "أنا معاك يا فندم",
+    "ألو؟ سامعني؟",
+    "فيه حد على الخط؟",
+]
+
+
+def _inactivity_reprompt(ud: "UserData", flow: str = "", *, prompt_count: int = 1) -> str:
+    """Flow-aware reprompt when the user goes silent.
+
+    First reprompt is always a soft check-in — "are you still there?" —
+    because jumping straight to re-asking a field feels abrupt when the
+    customer may have been briefly distracted.  Subsequent reprompts
+    (count >= 2) escalate to the specific missing-field question so we
+    actually make progress.
+    """
+    if prompt_count <= 1:
+        return _random.choice(_INACTIVITY_SOFT_CHECKIN)
+
     if flow == "takeaway":
         missing = _takeaway_next_missing_slot(ud)
     elif flow == "delivery":
@@ -3456,7 +3474,7 @@ def _inactivity_reprompt(ud: "UserData", flow: str = "") -> str:
     elif flow == "reservation":
         missing = _reservation_next_missing_slot(ud, ud.restaurant)
     else:
-        return _random.choice(["لسه معايا يا فندم؟", "أنا معاك يا فندم", "ألو؟"])
+        return _random.choice(_INACTIVITY_SOFT_CHECKIN)
     if missing == "الطلب":
         return _random.choice(["تحب تطلب إيه يا فندم؟", "قولي تحب إيه؟"])
     if missing == "الاسم":
@@ -3471,7 +3489,7 @@ def _inactivity_reprompt(ud: "UserData", flow: str = "") -> str:
         return _random.choice(["كام فرد يا فندم؟", "هتكونوا كام؟"])
     if not missing:
         return _random.choice(["كده تمام يا فندم؟", "خلصنا يا فندم؟"])
-    return _random.choice(["لسه معايا يا فندم؟", "أنا معاك يا فندم"])
+    return _random.choice(_INACTIVITY_SOFT_CHECKIN)
 
 
 async def _maybe_submit_pending_complaint(context: RunContext_T) -> str:

@@ -17,7 +17,6 @@ from livekit.agents.metrics import EOUMetrics, LLMMetrics, STTMetrics, TTSMetric
 from livekit.agents.voice import AgentSession
 from livekit.agents.voice.room_io import RoomInputOptions
 from livekit.plugins import noise_cancellation
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from backend.config import RestaurantConfig
 from health import HealthServerHandle, start_health_server
@@ -90,11 +89,17 @@ async def entrypoint(ctx: JobContext):
     await _agent._ensure_config_refresh_started()
     session_stt = _agent._build_session_stt(cfg, client_reference_id=call_id)
     stt_context_terms = _agent._stt_context_terms_for_config(cfg)
+    # Derive config_available from the actual cfg this call is using, not from
+    # shared worker-level runtime_health. The latter is process-wide and can be
+    # briefly flipped to False by a concurrent call that fell back to degraded,
+    # producing the confusing "config_available=False | config_source=backend"
+    # readout even when this call fetched a valid backend config.
+    config_available_for_call = cfg.config_source != "degraded_fallback"
     logger.info(
         "call=%s | startup readiness | deps_ready=%s | config_available=%s | write_available=%s | config_source=%s | degraded=%s | stt_provider=%s | stt_context_terms=%d | preemptive=%s",
         call_id,
         _agent.session_dependencies_ready(),
-        _agent.backend_config_available(),
+        config_available_for_call,
         _agent.backend_write_available(userdata.write_health),
         cfg.config_source,
         cfg.degraded_mode,
@@ -126,7 +131,9 @@ async def entrypoint(ctx: JobContext):
         llm            = _agent.SESSION_LLM,
         tts            = _agent.SESSION_TTS,
         vad            = _agent.SESSION_VAD,
-        turn_detection = MultilingualModel(),
+        # turn_detection omitted intentionally: MultilingualModel does not support Arabic
+        # and emits "Turn detector does not support language ar" warnings. VAD + endpointing
+        # delays provide stable end-of-turn detection for ar without the multilingual model.
         allow_interruptions=True,
         min_interruption_duration=_agent.MIN_INTERRUPTION_DURATION_SECONDS,
         min_endpointing_delay=_agent.MIN_ENDPOINTING_DELAY_SECONDS,
@@ -275,7 +282,9 @@ async def entrypoint(ctx: JobContext):
                     idle_for_s=round(idle_for, 3),
                     count=inactivity_prompt_count,
                 )
-                reprompt_text = _agent._inactivity_reprompt(userdata, flow_name)
+                reprompt_text = _agent._inactivity_reprompt(
+                    userdata, flow_name, prompt_count=inactivity_prompt_count,
+                )
                 with contextlib.suppress(Exception):
                     userdata.last_agent_message = reprompt_text
                     await session.say(
