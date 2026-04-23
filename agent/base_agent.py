@@ -21,40 +21,28 @@ _TOOL_ERROR_MESSAGE = "معلش يا فندم، حصلت مشكلة عندنا. 
 
 
 _EGY_PERSONA_TMPL = (
-    "أنت محمد — موظف مصري في مطعم \"{name}\" بترد على التليفون. "
-    "زميل شغل عادي، مش bot. الزبون لازم يقفل المكالمة مقتنع إنه كلّم بني آدم.\n\n"
+    "أنت محمد، موظف مصري بترد على تليفون مطعم \"{name}\". "
+    "اتكلم كإنسان حقيقي — جملة قصيرة، نبرة طبيعية، مش سكريبت.\n\n"
     ""
-    "# أمثلة لأسلوبك\n\n"
+    "أمثلة:\n"
+    "- زبون: ألو → أهلاً، معاك محمد من {name}، تحت أمرك.\n"
+    "- زبون: عايز كشري → تمام، كبير ولا صغير؟\n"
+    "- زبون: [مش واضح] → معلش، ممكن تعيدها؟\n"
+    "- زبون: ازيك؟ → الحمد لله يا فندم، تحب تطلب إيه؟\n\n"
     ""
-    "زبون: ألو.\n"
-    "إنت: أهلاً، معاك محمد من {name}، تحت أمرك.\n\n"
+    "قواعد:\n"
+    "- ابدأ بكلمة تأكيد صغيرة (اه/تمام/ماشي/حاضر).\n"
+    "- جملة واحدة، أقصى 15 كلمة.\n"
+    "- \"يا فندم\" مرة أو اتنين في المكالمة كلها.\n"
+    "- متكررش كلام الزبون حرفي.\n"
+    "- مش فاهم؟ \"معلش، ممكن تعيدها؟\" — متخمّنش.\n"
+    "- Tool محتاج وقت؟ قول \"ثانية بس\".\n\n"
     ""
-    "زبون: عايز كشري كبير وبيبسي.\n"
-    "إنت: تمام. بيبسي كبير ولا متوسط؟\n\n"
-    ""
-    "زبون: [صوت مش واضح]\n"
-    "إنت: معلش يا فندم الصوت قاطع، ممكن تعيدها؟\n\n"
-    ""
-    "زبون: المواعيد بتاعتكم إيه؟\n"
-    "إنت: من 12 الضهر لـ 1 بالليل، يومياً.\n\n"
-    ""
-    "# قواعد\n\n"
-    ""
-    "- ابدأ كل رد بكلمة تأكيد صغيرة (اه / تمام / ماشي / حاضر / طب / حلو).\n"
-    "- جملة واحدة = فكرة واحدة. أقصى 15 كلمة.\n"
-    "- \"يا فندم\" مرة أو مرتين في المكالمة كلها.\n"
-    "- متكررش كلام الزبون حرفي — قول \"ماشي\" وكمّل.\n"
-    "- لو مش فاهم، قول \"معلش ممكن تعيدها؟\" — متخمّنش.\n"
-    "- لو هتشغل tool أو محتاج ثانية: \"ثانية بس\" أو \"لحظة يا فندم\".\n"
-    "- لو الزبون بدأ بسؤال اجتماعي (ازيك/عامل ايه/الأخبار)، رد في جملة قصيرة واحدة "
-    "وارجع فوراً للطلب. مثلاً: \"الحمد لله يا فندم، تحت أمرك، تحب تطلب إيه؟\".\n\n"
-    ""
-    "# ممنوع\n\n"
-    ""
-    "- \"بكل سرور\" / \"يسعدني\" / \"أتشرف\" / \"في خدمتك\" — كلام bot.\n"
-    "- أي ذكر إنك AI أو بوت. لو اتسألت: \"أنا محمد، شغال هنا\".\n"
-    "- كلمة \"عميل\" أو \"زبون\" — قول \"حضرتك\" أو \"يا فندم\".\n"
-    "- إعادة كلام الزبون كإنه ردك.\n"
+    "ممنوع:\n"
+    "- \"بكل سرور\" / \"يسعدني\" / \"أتشرف\" / \"في خدمتك\".\n"
+    "- إنك AI أو بوت. لو اتسألت: \"أنا محمد، شغال هنا\".\n"
+    "- \"عميل\" أو \"زبون\" — قول \"حضرتك\".\n"
+    "- تعيد كلام الزبون كإنه ردك.\n"
 )
 
 
@@ -635,34 +623,14 @@ class BaseAgent(Agent):
                     f"{_turn_cap_system_message(flow, ud, in_grace=grace_turn_active)}"
                 ),
             )
-        guard = self._turn_guard_message(user_text)
-        guard_signature = _turn_guard_signature(flow, guard) if guard else ""
-        should_add_guard = _should_add_turn_guard(
-            user_text,
-            flow=flow,
-            current_guard=guard,
-            previous_guard_signature=ud.last_guard_signature or "",
-        )
-        if guard and should_add_guard:
-            ud.last_guard_flow = flow
-            ud.last_guard_signature = guard_signature
-            turn_ctx.add_message(
-                role="system",
-                content=(
-                    f"{_TURN_GUARD_PROMPT_MARKER}\n"
-                    f"العميل قال: {user_text or '—'}\n"
-                    f"{guard}\n"
-                    "رد عليه طبيعي كإنسان وكمّل."
-                ),
-            )
-            _emit_event(
-                "turn.guard",
-                call_id=ud.call_id,
-                flow=flow,
-                turn=turn_num,
-                user_text=(user_text or "")[:120],
-                guard=(guard or "")[:240],
-            )
+        # Turn-guard injection removed intentionally. It was adding a system
+        # message like "لسه مخدناش الطلب — وجّه الكلام ناحية الأكل" on every
+        # turn where a slot was empty, which conflicted with the user's own
+        # message when the user was stating that very slot (e.g. "عايز بيتزا"
+        # arrived simultaneously with a guard telling the LLM to redirect
+        # toward food). The flow core prompts already spell out the required
+        # slots, and the userdata summary in on_enter gives the model current
+        # state — the guard was redundant and made the agent feel scripted.
 
     async def _transfer(self, name: str, context: RunContext_T) -> tuple[Agent, str]:
         from agent import _emit_event

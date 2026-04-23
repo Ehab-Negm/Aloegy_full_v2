@@ -22,6 +22,14 @@ export interface Call {
   startedAt?: string | null;
   endedAt?: string | null;
   createdAt: string;
+  // Linked-order details — populated when the call produced a confirmed order.
+  orderId?: string | null;
+  orderType?: string | null;
+  orderItems?: string;
+  specialRequests?: string | null;
+  deliveryAddress?: string | null;
+  deliveryZone?: string | null;
+  deliveryLandmark?: string | null;
 }
 
 export interface CallReviewUpdate {

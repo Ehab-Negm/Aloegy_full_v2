@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import struct
 from urllib.parse import quote
 
@@ -11,10 +13,21 @@ import websockets
 from livekit.agents import APIConnectionError, APIConnectOptions, APIStatusError, APITimeoutError, tts
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 
+logger = logging.getLogger("restaurant.hamsa_tts")
+
 WS_URL = "wss://api.tryhamsa.com/v1/realtime/ws"
 NUM_CHANNELS = 1
 MAX_TEXT_LEN = 2000
-DEFAULT_PCM_SAMPLE_RATE = 22050  # used only if WAV header is missing
+# Per Hamsa REST streaming docs: "after collecting the chunks, you need to add
+# the wav header manually to the data" — i.e. the stream is raw PCM without a
+# header and Hamsa does not document the exact sample rate anywhere public.
+# Empirically the realtime endpoint emits 16 kHz PCM for the prebuilt Arabic
+# voices. Override via HAMSA_DEFAULT_SAMPLE_RATE if your voice sounds faster
+# (rate too high) or slower (rate too low) than natural:
+#   voice sounds sped up / chipmunky -> lower the rate
+#   voice sounds slowed / deep       -> raise the rate
+# Common valid values: 8000, 16000, 22050, 24000, 48000.
+DEFAULT_PCM_SAMPLE_RATE = int(os.getenv("HAMSA_DEFAULT_SAMPLE_RATE", "16000"))
 MULAW_SAMPLE_RATE = 8000
 
 
@@ -124,6 +137,10 @@ class ChunkedStream(tts.ChunkedStream):
                             parsed = _parse_wav_header(bytes(pending_audio))
                             if parsed is not None:
                                 sample_rate, header_size = parsed
+                                logger.info(
+                                    "hamsa tts | detected WAV header | sample_rate=%dHz | header_size=%d",
+                                    sample_rate, header_size,
+                                )
                                 if not initialized:
                                     output_emitter.initialize(
                                         request_id=request_id,
@@ -138,7 +155,13 @@ class ChunkedStream(tts.ChunkedStream):
                                 if payload:
                                     output_emitter.push(payload)
                             elif len(pending_audio) >= 4 and pending_audio[:4] != b"RIFF":
-                                # No WAV header — treat as raw PCM with default sample rate.
+                                # No WAV header — treat as raw PCM at the configured
+                                # default rate. Log the first bytes so we can adjust
+                                # HAMSA_DEFAULT_SAMPLE_RATE if the voice sounds off.
+                                logger.warning(
+                                    "hamsa tts | no WAV header detected | first_bytes=%r | using_sample_rate=%dHz",
+                                    bytes(pending_audio[:16]), self._tts._sample_rate,
+                                )
                                 if not initialized:
                                     output_emitter.initialize(
                                         request_id=request_id,

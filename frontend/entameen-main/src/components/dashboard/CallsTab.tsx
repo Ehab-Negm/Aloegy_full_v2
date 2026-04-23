@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, PhoneCall, Search, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, MapPin, PhoneCall, Receipt, Search, ShieldCheck, User, Wallet } from "lucide-react";
 import { motion } from "framer-motion";
 
 import { useToast } from "@/hooks/use-toast";
@@ -195,11 +195,13 @@ const CallsTab = ({ calls, readOnly, onCallUpdated }: CallsTabProps) => {
             }`}
           >
             <div className="mb-2 flex items-start justify-between gap-2">
-              <div>
-                <p className="text-sm font-medium text-foreground" dir="ltr">
-                  {call.phone || "غير معروف"}
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold text-foreground">
+                  {call.customerName || "بدون اسم"}
                 </p>
-                <p className="text-xs text-muted-foreground">{call.customerName || "بدون اسم"}</p>
+                <p className="text-xs text-muted-foreground" dir="ltr">
+                  {call.phone || "رقم غير معروف"}
+                </p>
               </div>
               {callStatusBadge(call.status)}
             </div>
@@ -208,6 +210,13 @@ const CallsTab = ({ calls, readOnly, onCallUpdated }: CallsTabProps) => {
               {outcomeBadge(call.outcome)}
               {reviewStatusBadge(call.reviewStatus)}
             </div>
+
+            {call.deliveryAddress && (
+              <p className="mb-2 line-clamp-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+                <MapPin size={12} className="shrink-0" />
+                <span className="truncate">{call.deliveryAddress}</span>
+              </p>
+            )}
 
             <p className="line-clamp-2 text-xs text-muted-foreground">
               {call.lastMessage || call.transcriptExcerpt || "مفيش transcript واضح للمكالمة دي"}
@@ -234,10 +243,16 @@ const CallsTab = ({ calls, readOnly, onCallUpdated }: CallsTabProps) => {
           <Card className="border-border/50">
             <CardHeader className="pb-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <CardTitle className="text-base font-heading">مراجعة المكالمة</CardTitle>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <User size={18} className="shrink-0 text-primary" />
+                    <CardTitle className="text-lg font-heading truncate">
+                      {selectedCall.customerName || "بدون اسم"}
+                    </CardTitle>
+                  </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {selectedCall.callId} • {selectedCall.customerName || "بدون اسم"}
+                    {selectedCall.callId}
+                    {selectedCall.orderId ? ` • ${selectedCall.orderId}` : ""}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -270,6 +285,57 @@ const CallsTab = ({ calls, readOnly, onCallUpdated }: CallsTabProps) => {
                   </div>
                 ))}
               </div>
+
+              {(selectedCall.orderItems || selectedCall.deliveryAddress || selectedCall.orderId) && (
+                <div className="rounded-xl border border-border/50 bg-muted/10 p-4">
+                  <div className="mb-3 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                    <Receipt size={14} />
+                    <span>تفاصيل الطلب</span>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {selectedCall.orderItems && (
+                      <div className="md:col-span-2">
+                        <p className="text-[11px] text-muted-foreground mb-1">الأصناف</p>
+                        <p className="text-sm text-foreground">{selectedCall.orderItems}</p>
+                      </div>
+                    )}
+                    {selectedCall.deliveryAddress && (
+                      <div className="md:col-span-2">
+                        <p className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+                          <MapPin size={12} /> العنوان
+                        </p>
+                        <p className="text-sm text-foreground">
+                          {selectedCall.deliveryAddress}
+                          {selectedCall.deliveryZone ? ` — ${selectedCall.deliveryZone}` : ""}
+                          {selectedCall.deliveryLandmark ? ` (${selectedCall.deliveryLandmark})` : ""}
+                        </p>
+                      </div>
+                    )}
+                    {selectedCall.specialRequests && (
+                      <div className="md:col-span-2">
+                        <p className="text-[11px] text-muted-foreground mb-1">طلبات خاصة</p>
+                        <p className="text-sm text-foreground">{selectedCall.specialRequests}</p>
+                      </div>
+                    )}
+                    <div>
+                      <p className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+                        <Wallet size={12} /> الإجمالي
+                      </p>
+                      <p className="text-sm font-medium text-foreground">
+                        {selectedCall.orderTotal || "—"}
+                      </p>
+                    </div>
+                    {selectedCall.orderType && (
+                      <div>
+                        <p className="text-[11px] text-muted-foreground mb-1">نوع الطلب</p>
+                        <p className="text-sm text-foreground">
+                          {FLOW_LABELS[selectedCall.orderType] || selectedCall.orderType}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="grid gap-4 lg:grid-cols-2">
                 <div className="rounded-2xl rounded-tr-sm bg-muted px-4 py-3">

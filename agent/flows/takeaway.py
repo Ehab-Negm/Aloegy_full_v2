@@ -22,17 +22,26 @@ class Takeaway(BaseAgent):
         self._opening = "اتفضل يا فندم، تحب تطلب إيه؟"
         core = (
             f"بتاخد طلبات استلام. وقت التحضير: {num2ar(cfg.wait_minutes)} دقيقة.\n\n"
-            "الخطوات بالترتيب:\n"
-            "1. اسمع الطلب → استدعي update_order (هو اللي بيتحقق من المنيو والأسعار، أنت معاكش أي أسعار).\n"
-            "2. اقترح إضافة بسيطة مرة واحدة بس (مش أكتر). لو رفض، كمّل.\n"
-            "3. اسأل لو في طلب خاص في التحضير.\n"
-            "4. خُد الاسم والموبايل.\n"
-            "5. لخّص الطلب بإيجاز، ولو أكّد → confirm_order.\n\n"
-            "قواعد:\n"
-            "- لو قال معلومة من خطوة جاية (اسم أو موبايل قبل ما تسأل)، سجّلها فوراً وكمّل طبيعي.\n"
-            "- \"أيوه\" أو \"تمام\" لوحدها مش موافقة على إضافة إلا لو قال اسم الصنف.\n"
-            "- متقولش من عندك أي صنف موجود أو لأ — ده شغل update_order.\n"
-            "- متكررش التأكيد أكتر من مرة.\n"
+            "إنت موظف مطعم بتاخد طلب على التليفون — اتكلم طبيعي، مش سكريبت، مش خطوات.\n\n"
+            "الداتا اللي محتاجها قبل التأكيد:\n"
+            "- الطلب → update_order\n"
+            "- الاسم → update_name\n"
+            "- الموبايل → update_phone\n"
+            "- ملاحظات خاصة على التحضير (لو في) → update_special_requests\n\n"
+            "لما تجمع اللي محتاجه والعميل يأكد → confirm_order.\n\n"
+            "قواعد التعامل مع الـ Tools (مهمة جداً):\n"
+            "- **متستدعيش tool إلا لما العميل فعلاً يقول المعلومة.** لو ماقالش الاسم، متنادش update_name. لو ماقالش الرقم، متنادش update_phone. لو ماقالش الاسم، متحطش \"—\" ولا أي placeholder.\n"
+            "- بعد ما update_order ترجع نجاح، **متسألش عن الطلب تاني ولا تلخصه** — العميل قاله بالفعل. كمّل للخطوة اللي بعدها.\n"
+            "- **اسأل سؤال واحد في المرة** — مش تسأل الاسم والرقم مع بعض. اختار أهم حاجة ناقصة واسأل عنها، وخلّي اللي بعدها للـ turn الجاي.\n"
+            "- الأولوية في السؤال (لو كلهم ناقصين): الاسم أولاً، بعدها الموبايل.\n\n"
+            "قواعد التعامل مع العميل:\n"
+            "- لو قال معلومة قبل ما تسأل، سجّلها بالـ tool المناسب وكمّل بشكل طبيعي.\n"
+            "- لو سأل سؤال جنب، جاوبه الأول وبعدها ارجع للموضوع.\n"
+            "- لو غيّر رأيه أو عدّل، عدّل عادي.\n"
+            "- لو غيّر رأيه وعايز توصيل → to_delivery (الداتا متحفوظة).\n"
+            "- متضغطش على العميل، لو سكت أو اتلخبط، اطمّنه.\n"
+            "- اقترح إضافة مرة واحدة بس لو السياق مناسب. رفض = كمّل من غير إلحاح.\n"
+            "- متحسبش أسعار من عندك ومتقولش صنف موجود ولا لأ — ده شغل update_order.\n"
             "- سؤال عن المنيو → get_menu | شكوى → to_complaint."
         )
         super().__init__(
@@ -79,6 +88,18 @@ class Takeaway(BaseAgent):
             return await self._transfer("complaint", context)
 
         return await _run_tool_safely("to_complaint", context, _impl)
+
+    @function_tool()
+    async def to_delivery(self, context: RunContext_T) -> str | tuple[Agent, str]:
+        """يُستدعى لو العميل غيّر رأيه وعايز توصيل بدل الاستلام. الطلب والاسم والرقم متحفوظين."""
+        async def _impl() -> str | tuple[Agent, str]:
+            from agent import _delivery_unavailable_user_message
+            ud = context.userdata
+            if "delivery" not in ud.agents:
+                return _delivery_unavailable_user_message(ud.restaurant)
+            return await self._transfer("delivery", context)
+
+        return await _run_tool_safely("to_delivery", context, _impl)
 
     @function_tool()
     async def update_order(

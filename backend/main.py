@@ -1121,8 +1121,8 @@ def resolve_restaurant_scope(
     return restaurant_or_404(db, user.restaurant_id)
 
 
-def serialize_call(call: CallLog) -> dict[str, Any]:
-    return {
+def serialize_call(call: CallLog, linked_order: "Order | None" = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "id": call.id,
         "callId": call.call_id or f"CALL-{call.id:04d}",
         "customerName": call.customer_name,
@@ -1146,7 +1146,29 @@ def serialize_call(call: CallLog) -> dict[str, Any]:
         "startedAt": call.started_at.isoformat() if call.started_at else None,
         "endedAt": call.ended_at.isoformat() if call.ended_at else None,
         "createdAt": call.created_at.isoformat(),
+        # Linked-order fields default to empty; populated below when a matching
+        # Order exists (takeaway/delivery calls with a confirmed submission).
+        "orderId": None,
+        "orderType": None,
+        "orderItems": "",
+        "specialRequests": None,
+        "deliveryAddress": None,
+        "deliveryZone": None,
+        "deliveryLandmark": None,
     }
+    if linked_order is not None:
+        payload["orderId"] = linked_order.public_id
+        payload["orderType"] = linked_order.type
+        payload["orderItems"] = linked_order.items_summary or ""
+        payload["specialRequests"] = linked_order.special_requests
+        payload["deliveryAddress"] = linked_order.delivery_address
+        payload["deliveryZone"] = linked_order.delivery_zone
+        payload["deliveryLandmark"] = linked_order.delivery_landmark
+        # If the call log didn't have the customer name (agent didn't send one
+        # on that upsert path), fall back to the one captured on the order.
+        if not payload["customerName"] and linked_order.customer_name:
+            payload["customerName"] = linked_order.customer_name
+    return payload
 
 
 def serialize_order(order: Order) -> dict[str, Any]:
@@ -2320,7 +2342,19 @@ def fetch_calls(
         .offset(_effective_collection_skip(skip))
         .limit(_effective_collection_limit(limit))
     ).all()
-    return [serialize_call(call) for call in calls]
+    # Batch-fetch linked orders to avoid N+1 when serializing. Multiple orders
+    # may share a call_id on edit/retry paths; keep the most recent by id.
+    call_ids = [c.call_id for c in calls if c.call_id]
+    orders_by_call: dict[str, Order] = {}
+    if call_ids:
+        order_rows = db.scalars(
+            select(Order)
+            .where(Order.restaurant_id == restaurant.id, Order.call_id.in_(call_ids))
+            .order_by(Order.id)
+        ).all()
+        for order in order_rows:
+            orders_by_call[order.call_id] = order  # last write wins (newest id)
+    return [serialize_call(call, orders_by_call.get(call.call_id)) for call in calls]
 
 
 @app.patch("/calls/{call_log_id}/review")

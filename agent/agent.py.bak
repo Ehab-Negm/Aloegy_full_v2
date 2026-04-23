@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 
 from livekit.agents import StopResponse, cli, llm, tts as lk_tts
 from livekit.agents.voice import AgentSession, RunContext
-from livekit.plugins import google, openai, silero
+from livekit.plugins import elevenlabs, google, openai, silero
 try:
     from livekit.plugins import soniox
 except ImportError:
@@ -189,11 +189,11 @@ BACKEND_RETRY_BASE_SECONDS   = _get_env_float("BACKEND_RETRY_BASE_SECONDS", 0.2,
 CONFIG_FETCH_RETRIES         = _get_env_int("CONFIG_FETCH_RETRIES", 2, min_value=1)
 CONFIG_FETCH_BACKOFF_SECONDS = _get_env_float("CONFIG_FETCH_BACKOFF_SECONDS", 0.15, min_value=0.01)
 CONFIG_FETCH_TOTAL_BUDGET_SECONDS = _get_env_float("CONFIG_FETCH_TOTAL_BUDGET_SECONDS", 0.6, min_value=0.1)
-CONFIG_REFRESH_INTERVAL_SECONDS  = _get_env_float("CONFIG_REFRESH_INTERVAL_SECONDS", 300.0, min_value=30.0)
-MAX_CONCURRENT_SESSIONS          = _get_env_int("MAX_CONCURRENT_SESSIONS", 100, min_value=1)
-MAX_TURNS_PER_SESSION            = _get_env_int("MAX_TURNS_PER_SESSION", 50, min_value=10)
-TURN_CAP_WARNING_TURNS           = _get_env_int("TURN_CAP_WARNING_TURNS", 5, min_value=1)
-TURN_CAP_GRACE_TURNS             = _get_env_int("TURN_CAP_GRACE_TURNS", 3, min_value=0)
+CONFIG_REFRESH_INTERVAL_SECONDS   = _get_env_float("CONFIG_REFRESH_INTERVAL_SECONDS", 300.0, min_value=30.0)
+MAX_CONCURRENT_SESSIONS           = _get_env_int("MAX_CONCURRENT_SESSIONS", 100, min_value=1)
+MAX_TURNS_PER_SESSION             = _get_env_int("MAX_TURNS_PER_SESSION", 50, min_value=10)
+TURN_CAP_WARNING_TURNS            = _get_env_int("TURN_CAP_WARNING_TURNS", 5, min_value=1)
+TURN_CAP_GRACE_TURNS              = _get_env_int("TURN_CAP_GRACE_TURNS", 3, min_value=0)
 PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 2, min_value=2)
 TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 10, min_value=8)
 MAX_TOOL_STEPS               = _get_env_int("MAX_TOOL_STEPS", 10, min_value=6)
@@ -207,7 +207,7 @@ NO_SPEECH_CLOSE_SECONDS           = _get_env_float("NO_SPEECH_CLOSE_SECONDS", 28
 NO_SPEECH_REPROMPT_LIMIT          = _get_env_int("NO_SPEECH_REPROMPT_LIMIT", 2, min_value=1)
 NO_SPEECH_REPROMPT_GAP_SECONDS    = _get_env_float("NO_SPEECH_REPROMPT_GAP_SECONDS", 8.0, min_value=0.5)
 SESSION_TTS_MODEL            = os.getenv("SESSION_TTS_MODEL", "hamsa/tts-realtime")
-SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "Nermin")
+SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "Salma")
 SESSION_TTS_LANGUAGE         = os.getenv("SESSION_TTS_LANGUAGE", "ar")
 SESSION_TTS_DIALECT          = os.getenv("SESSION_TTS_DIALECT", "egy")
 SESSION_TTS_MULAW            = _get_env_bool("SESSION_TTS_MULAW", False)
@@ -220,7 +220,10 @@ SESSION_STT_LANGUAGE_HINTS_STRICT = _get_env_bool("SESSION_STT_LANGUAGE_HINTS_ST
 SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION = _get_env_bool("SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION", True)
 SESSION_STT_KEYTERM_LIMIT    = _get_env_int("SESSION_STT_KEYTERM_LIMIT", 40, min_value=5)
 SESSION_STT_EXTRA_KEYTERMS   = os.getenv("SESSION_STT_EXTRA_KEYTERMS", "")
-SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.5-flash")
+SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.5-flash").strip()
+# Strip provider prefix ("openai/gpt-4.1-mini" → "gpt-4.1-mini") for routing.
+if "/" in SESSION_LLM_MODEL:
+    SESSION_LLM_MODEL = SESSION_LLM_MODEL.split("/", 1)[1]
 SESSION_LLM_REASONING_EFFORT = os.getenv("SESSION_LLM_REASONING_EFFORT", "low").strip().lower() or "low"
 SESSION_LLM_VERBOSITY        = os.getenv("SESSION_LLM_VERBOSITY", "low").strip().lower() or "low"
 SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 160, min_value=32)
@@ -339,6 +342,20 @@ def _build_base_session_tts() -> Any:
             language=SESSION_TTS_LANGUAGE,
         )
 
+    if model_name.startswith("eleven") or model_name.startswith("elevenlabs/"):
+        if not os.getenv("ELEVEN_API_KEY"):
+            logger.warning("ELEVEN_API_KEY is not set — TTS will fail")
+        el_model = model_name.split("/", 1)[1] if "/" in model_name else model_name
+        el_kwargs: dict[str, Any] = {
+            "api_key": os.getenv("ELEVEN_API_KEY", ""),
+            "model": el_model,
+            "language": SESSION_TTS_LANGUAGE,
+        }
+        voice_id = os.getenv("ELEVEN_VOICE_ID", "").strip()
+        if voice_id:
+            el_kwargs["voice_id"] = voice_id
+        return elevenlabs.TTS(**el_kwargs)
+
     if not os.getenv("HAMSA_API_KEY"):
         logger.warning("HAMSA_API_KEY is not set — TTS will fail")
     return HamsaTTS(
@@ -374,19 +391,16 @@ def _build_session_tts() -> Any:
 SESSION_TTS = _build_session_tts()
 SESSION_STT_PROVIDER = "soniox"
 if SESSION_LLM_MODEL.startswith("gpt-") or SESSION_LLM_MODEL.startswith("o"):
-    # reasoning_effort / verbosity are only supported on reasoning models
-    # (o1, o3, gpt-5 family). Passing them to gpt-4.1 / gpt-4o / etc. is a
-    # 400 invalid_request_error. Gate them by model name.
-    _is_reasoning_model = (
-        SESSION_LLM_MODEL.startswith("o1")
-        or SESSION_LLM_MODEL.startswith("o3")
-        or SESSION_LLM_MODEL.startswith("o4")
-        or SESSION_LLM_MODEL.startswith("gpt-5")
-    )
     _openai_kwargs: dict[str, Any] = {
         "model": SESSION_LLM_MODEL,
         "max_completion_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
     }
+    # reasoning_effort / verbosity are only supported on reasoning models
+    # (o1/o3/o4/gpt-5). gpt-4.x rejects them with 400 Unknown parameter.
+    _is_reasoning_model = (
+        SESSION_LLM_MODEL.startswith("o")
+        or SESSION_LLM_MODEL.startswith("gpt-5")
+    )
     if _is_reasoning_model:
         _openai_kwargs["reasoning_effort"] = SESSION_LLM_REASONING_EFFORT
         _openai_kwargs["verbosity"] = SESSION_LLM_VERBOSITY
@@ -420,36 +434,6 @@ SESSION_VAD = silero.VAD.load(
     prefix_padding_duration=0.2,
     activation_threshold=0.5,
 )
-
-
-async def warmup_llm() -> None:
-    """Fire-and-forget minimal completion to prime the OpenAI HTTP/2 pool so the
-    first real user turn doesn't pay the TLS-handshake + cold-connection tax.
-
-    Safe to await (it's cheap, <100ms typically) or schedule as a background
-    task — silently swallows errors because this is a best-effort optimization,
-    not a correctness requirement.
-    """
-    if not SESSION_LLM_MODEL.startswith(("gpt-", "o1", "o3", "o4")):
-        return  # only OpenAI benefits; Gemini/etc. handled by their own SDKs
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        return
-    try:
-        from openai import AsyncOpenAI  # type: ignore
-
-        client = AsyncOpenAI(api_key=api_key)
-        try:
-            await client.chat.completions.create(
-                model=SESSION_LLM_MODEL,
-                messages=[{"role": "user", "content": "hi"}],
-                max_completion_tokens=1,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                await client.close()
-    except Exception as exc:
-        logger.debug("llm warmup skipped | %s", exc)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared httpx client — delegates to backend.client singleton
@@ -2214,7 +2198,7 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
         ud.phone_capture_failures += 1
         _set_phone_capture_mode(ud, True)
         _emit_event("phone.capture", call_id=ud.call_id, flow=flow_name, result="failure", reason="no_digits")
-        return _phone_capture_failure_reply(ud)
+        return "Status: Failed to capture phone. No digits found. Ask user to repeat the phone number."
 
     direct_valid = validate_phone(incoming_digits)
     combined_digits = _merge_phone_digits(ud.pending_phone_digits, incoming_digits)
@@ -2236,22 +2220,10 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
         )
         complaint_note = await _maybe_submit_pending_complaint_for_flow(ud, flow_name)
         note = _clean_followup_note(complaint_note)
-        followup = _followup_after_phone(flow_name, ud)
-        critical_followup = _is_confirmation_prompt(followup)
-        phone_confirm = f"تمام، {phone2ar(cleaned)}" if was_chunked else _ack()
+        
         if note:
-            return _voice_safe_text(
-                _join_user_phrases(note, followup),
-                max_chars=200,
-                critical=critical_followup,
-            )
-        if followup:
-            return _voice_safe_text(
-                _join_user_phrases(phone_confirm, followup),
-                max_chars=200,
-                critical=critical_followup,
-            )
-        return _voice_safe_text(f"{phone_confirm}.")
+            return f"Status: Phone captured successfully as {cleaned}. Note: {note}"
+        return f"Status: Phone captured successfully as {cleaned}."
 
     partial_digits = combined_digits if _is_plausible_partial_phone_digits(combined_digits) else ""
     if partial_digits:
@@ -2266,33 +2238,30 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
             result="partial",
             buffered_digits=len(partial_digits),
         )
-        return _phone_capture_short_reply(ud, partial_digits)
+        return f"Status: Partial phone digits captured: {partial_digits}. Ask user to complete the number."
 
     ud.pending_phone_digits = ""
     ud.phone_capture_failures += 1
     _set_phone_capture_mode(ud, True)
     _emit_event("phone.capture", call_id=ud.call_id, flow=flow_name, result="failure", reason="invalid_number")
-    return _phone_capture_failure_reply(ud)
+    return "Status: Failed to capture phone. Invalid number. Ask user to repeat the phone number clearly."
 
 
 async def _apply_name_update(ud: "UserData", name_text: str, *, flow_name: str) -> str:
     cleaned = _extract_name_candidate(name_text)
     if not cleaned:
         _emit_event("name.capture", call_id=ud.call_id, flow=flow_name, result="failure")
-        return _voice_safe_text("الاسم مش واضح، قولي الاسم بس يا فندم.")
+        return "Status: Failed to capture name. The provided text was not clear. Ask user for their name again."
     ud.customer_name = cleaned
     logger.info("call=%s | name=%s", ud.call_id, cleaned)
     _emit_event("name.capture", call_id=ud.call_id, flow=flow_name, result="success")
     complaint_note = await _maybe_submit_pending_complaint_for_flow(ud, flow_name)
     note = _clean_followup_note(complaint_note)
     _set_phone_capture_mode(ud, _flow_missing_phone(flow_name, ud))
-    followup = _followup_after_name(flow_name, ud)
+    
     if note:
-        return _voice_safe_text(_join_user_phrases(note, followup), max_chars=200)
-    return _voice_safe_text(
-        f"{_ack()} يا {cleaned}. {followup}",
-        max_chars=200,
-    )
+        return f"Status: Name captured as {cleaned}. Note: {note}"
+    return f"Status: Name captured successfully as {cleaned}."
 
 
 _COMPLAINT_TYPE_ALIASES = {
@@ -2388,7 +2357,8 @@ _NEGATIVE_FORMS = frozenset(_normalize_ar(word) for word in NEGATIVE_WORDS)
 
 POSITIVE_CONFIRMATION_WORDS = {
     "صح", "صح كده", "ايوه", "أيوه", "ماشي", "مظبوط", "تمام", "تمام كده",
-    "تمام يا فندم", "أوكي", "اوكي", "yes",
+    "تمام يا فندم", "أوكي", "اوكي", "yes", "أه", "اه", "آه", "اه تمام", "آه تمام",
+    "اه ماشي", "آه ماشي", "اه أيوه", "آه أيوه",
 }
 
 UPSELL_ACCEPT_WORDS = {
@@ -2397,6 +2367,11 @@ UPSELL_ACCEPT_WORDS = {
     "عايزها", "عايزه", "عاوزها", "عاوزه", "ماشي ضيفها", "تمام ضيفها",
     "ايوه ضيفها", "أيوه ضيفها", "ايوه حطها", "أيوه حطها",
     "هضيف", "هضيفها", "هحط", "هحطها", "هزود", "هزودها", "اضيف", "أضيف",
+    # Egyptian first-person plural forms
+    "نضيف", "نضيفها", "نضيفه", "نضيفهم", "نحط", "نحطها", "نحطه", "نحطهم",
+    "نزود", "نزودها", "نزوده", "نزودهم", "نجيب", "نجيبها", "نجيبه",
+    "خليها", "خليه", "خليهم", "خليها معاه", "خليها معاها",
+    "ok", "اوكي", "أوكي",
 }
 
 UPSELL_ITEM_REQUEST_WORDS = {
@@ -2440,7 +2415,7 @@ _ACK_PHRASES = [
     "تمام يا فندم", "حاضر يا فندم", "ماشي يا فندم", "تمام",
     "أكيد", "حاضر", "طبعاً", "ماشي",
 ]
-_ACK_GOT_IT = ["معايا", "سجلت", "أخدت", "تمام معايا", "حلو"]
+_ACK_GOT_IT = ["معايا", "سجلت", "أخدت", "حلو"]
 _NEXT_NAME = [
     "اسمك إيه يا فندم؟", "الاسم إيه يا فندم؟", "ممكن اسم حضرتك؟",
     "والاسم إيه؟", "اسمك إيه؟",
@@ -2460,6 +2435,10 @@ _NEXT_ADDRESS = [
 _EMPTY_TAIL_WORDS = {
     "تمام", "خلاص", "كده", "بس", "شكرا", "شكرًا", "ميرسي", "متشكر",
     "يا", "فندم", "لو", "سمحت", "حضرتك", "اوكي", "أوكي", "ماشي", "حاضر",
+    # common trailing tokens after a negation like "لا مفيش حاجة خاصة"
+    "مفيش", "حاجه", "حاجة", "خاصه", "خاصة", "طلب", "طلبات", "ملاحظه", "ملاحظة",
+    "مش", "محتاج", "محتاجه", "محتاجة", "عايز", "عاوز", "عايزه", "عاوزه",
+    "عادي", "ابدا", "أبدا", "ابدًا", "نهائي", "نهائيا", "خالص",
 }
 _SPECIAL_REQUEST_HINTS = {
     "من غير", "بدون", "سخنه", "سخنة", "حار", "بارد", "صوص", "شطه", "شطة",
@@ -2548,6 +2527,7 @@ _NEGATE_SPECIAL_PHRASES = {
     "مفيش طلبات", "مفيش طلب خاص", "مفيش حاجة خاصة", "مفيش ملاحظات",
     "مفيش طلبات خاصة", "لا مفيش", "من غير طلبات", "لا عادي",
     "لا مفيش حاجة", "كده وبس", "بس كده", "خلاص كده",
+    "خلينا كده", "كفاية كده", "كفايه كده",
 }
 
 def _upsell_reply_negates_special(text: str) -> bool:
@@ -2573,8 +2553,16 @@ def _extract_special_request_candidate(text: str | None) -> str | None:
         return None
 
     normalized = _normalize_ar(cleaned)
-    if any(_normalize_ar(hint) in normalized for hint in _SPECIAL_REQUEST_HINTS):
-        return cleaned
+    # Use whole-word matching so short stems like "خلي" don't spuriously match
+    # inside unrelated words like "خلينا" (= "leave us"). Multi-word hints
+    # (e.g. "من غير") fall back to substring, which is safe.
+    for hint in _SPECIAL_REQUEST_HINTS:
+        norm_hint = _normalize_ar(hint)
+        if " " in norm_hint:
+            if norm_hint in normalized:
+                return cleaned
+        elif _normalized_phrase_present(normalized, norm_hint):
+            return cleaned
     return None
 
 
@@ -2949,21 +2937,11 @@ def _greeter_turn_decision(
             reason="delivery_unavailable",
         )
     if intent == "order_ambiguous":
-        if not has_delivery_agent and not cfg.degraded_mode:
-            # Delivery not offered — the LLM would have no meaningful choice to
-            # ask about; route directly to takeaway.
-            return GreeterTurnDecision(
-                action="route",
-                target_agent="takeaway",
-                reason="order_ambiguous_takeaway_only",
-            )
-        # Let the LLM ask the question naturally in its own words; no canned text.
         return GreeterTurnDecision(
             message="",
             reason="order_ambiguous",
         )
-    # Any remaining case — greeting, identity question, off-topic — is handed
-    # to the LLM to respond to naturally from the persona.
+    # Unknown intent or greeting — let the LLM respond naturally
     return GreeterTurnDecision(
         message="",
         reason="unknown_passthrough",
@@ -3464,8 +3442,8 @@ def _flow_turn_guard_message(flow: str, ud: UserData, user_text: str) -> str:
             )
         if missing == "الاسم":
             return (
-                "العنوان اتسجل — محتاج الاسم دلوقتي. "
-                "لو العميل رد على سؤال الطلبات الخاصة أو العلامة المميزة، انتقل للاسم."
+                "العنوان اتسجل خلاص — محتاج الاسم دلوقتي. "
+                "متسألش على العنوان تاني، اطلب الاسم على طول."
             )
         if missing == "رقم الموبايل":
             return "الاسم اتسجل — محتاج رقم الموبايل. متأكدش الطلب قبل الرقم."
@@ -3504,26 +3482,8 @@ def _next_step_hint(context: RunContext_T) -> str:
     return _next_step_hint_for_flow(_current_flow_name(context), context.userdata)
 
 
-_INACTIVITY_SOFT_CHECKIN = [
-    "لسه معايا يا فندم؟",
-    "أنا معاك يا فندم",
-    "ألو؟ سامعني؟",
-    "فيه حد على الخط؟",
-]
-
-
-def _inactivity_reprompt(ud: "UserData", flow: str = "", *, prompt_count: int = 1) -> str:
-    """Flow-aware reprompt when the user goes silent.
-
-    First reprompt is always a soft check-in — "are you still there?" —
-    because jumping straight to re-asking a field feels abrupt when the
-    customer may have been briefly distracted.  Subsequent reprompts
-    (count >= 2) escalate to the specific missing-field question so we
-    actually make progress.
-    """
-    if prompt_count <= 1:
-        return _random.choice(_INACTIVITY_SOFT_CHECKIN)
-
+def _inactivity_reprompt(ud: "UserData", flow: str = "") -> str:
+    """Flow-aware reprompt when the user goes silent."""
     if flow == "takeaway":
         missing = _takeaway_next_missing_slot(ud)
     elif flow == "delivery":
@@ -3531,7 +3491,7 @@ def _inactivity_reprompt(ud: "UserData", flow: str = "", *, prompt_count: int = 
     elif flow == "reservation":
         missing = _reservation_next_missing_slot(ud, ud.restaurant)
     else:
-        return _random.choice(_INACTIVITY_SOFT_CHECKIN)
+        return _random.choice(["لسه معايا يا فندم؟", "أنا معاك يا فندم", "ألو؟"])
     if missing == "الطلب":
         return _random.choice(["تحب تطلب إيه يا فندم؟", "قولي تحب إيه؟"])
     if missing == "الاسم":
@@ -3546,7 +3506,7 @@ def _inactivity_reprompt(ud: "UserData", flow: str = "", *, prompt_count: int = 
         return _random.choice(["كام فرد يا فندم؟", "هتكونوا كام؟"])
     if not missing:
         return _random.choice(["كده تمام يا فندم؟", "خلصنا يا فندم؟"])
-    return _random.choice(_INACTIVITY_SOFT_CHECKIN)
+    return _random.choice(["لسه معايا يا فندم؟", "أنا معاك يا فندم"])
 
 
 async def _maybe_submit_pending_complaint(context: RunContext_T) -> str:

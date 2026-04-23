@@ -87,6 +87,9 @@ async def entrypoint(ctx: JobContext):
     userdata.worker_context = _agent.worker_context()
     await _agent._ensure_backend_queue_worker_started()
     await _agent._ensure_config_refresh_started()
+    # Fire-and-forget LLM warmup so the first user turn doesn't pay the
+    # cold-connection tax (TLS handshake, HTTP/2 setup, first-token latency).
+    asyncio.create_task(_agent.warmup_llm(), name=f"llm_warmup_{call_id}")
     session_stt = _agent._build_session_stt(cfg, client_reference_id=call_id)
     stt_context_terms = _agent._stt_context_terms_for_config(cfg)
     # Derive config_available from the actual cfg this call is using, not from
