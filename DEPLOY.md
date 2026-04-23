@@ -3,7 +3,7 @@
 ## What you need
 
 - Hostinger VPS (Ubuntu 22.04 or 24.04) — minimum 4GB RAM, 2 vCPU
-- Domain pointed to VPS IP (e.g. `aloegy.com`)
+- Domain pointed to VPS IP (e.g. `aloegy.ai`)
 - SSH access to VPS
 
 ---
@@ -18,9 +18,9 @@ A    lk      → YOUR_VPS_IP
 ```
 
 This gives you:
-- `aloegy.com` → frontend
-- `api.aloegy.com` → backend
-- `lk.aloegy.com` → LiveKit server (voice)
+- `aloegy.ai` → frontend
+- `api.aloegy.ai` → backend
+- `lk.aloegy.ai` → LiveKit server (voice)
 
 ---
 
@@ -64,6 +64,8 @@ This will output something like:
 API Key:    APIxxxxxxxxxx
 API Secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
+API Key:  APICCqUMXRRWoH9
+API Secret:  VPxSH79KUaf6kpafHIJRsdQqOihe41Ryz6IE1UfUi97B
 
 **Save these — you'll need them for agent + backend + frontend.**
 
@@ -81,11 +83,11 @@ rtc:
   use_external_ip: true
 turn:
   enabled: true
-  domain: lk.aloegy.com
+  domain: lk.aloegy.ai
   tls_port: 5349
   udp_port: 3478
 keys:
-  YOUR_API_KEY: YOUR_API_SECRET
+  APICCqUMXRRWoH9: VPxSH79KUaf6kpafHIJRsdQqOihe41Ryz6IE1UfUi97B
 logging:
   level: info
 EOF
@@ -157,9 +159,9 @@ BACKEND_HOST=127.0.0.1
 BACKEND_PORT=8000
 BACKEND_API_KEY=GENERATE_A_STRONG_KEY_HERE
 JWT_SECRET=GENERATE_A_STRONG_SECRET_HERE
-CORS_ORIGINS=https://aloegy.com,https://www.aloegy.com
+CORS_ORIGINS=https://aloegy.ai,https://www.aloegy.ai
 DATABASE_URL=postgresql://YOUR_SUPABASE_URL_HERE
-LIVEKIT_URL=wss://lk.aloegy.com
+LIVEKIT_URL=wss://lk.aloegy.ai
 LIVEKIT_API_KEY=YOUR_LIVEKIT_KEY
 LIVEKIT_API_SECRET=YOUR_LIVEKIT_SECRET
 
@@ -190,6 +192,7 @@ Generate strong secrets:
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+----7tCCRpm-6MCV-bjs7jBJuAEHut9szbdUhRYbbfYJj6U
 
 > ⚠️ **`BIRD_*` keys are required for prod.** The backend has an explicit
 > `raise RuntimeError("FATAL: Bird WhatsApp OTP delivery is not configured ...")`
@@ -216,7 +219,7 @@ nano .env
 
 Edit `/opt/aloegy/agent/.env`:
 ```env
-LIVEKIT_URL=wss://lk.aloegy.com
+LIVEKIT_URL=wss://lk.aloegy.ai
 LIVEKIT_API_KEY=YOUR_LIVEKIT_KEY
 LIVEKIT_API_SECRET=YOUR_LIVEKIT_SECRET
 APP_ENV=prod
@@ -225,7 +228,7 @@ APP_ENV=prod
 BACKEND_BASE_URL=http://127.0.0.1:8000
 BACKEND_API_KEY=SAME_KEY_AS_BACKEND
 
-# LLM — OpenAI is the default. gpt-4.1-nano is fastest; gpt-4.1-mini is a
+# LLM — OpenAI is the de   fault. gpt-4.1-nano is fastest; gpt-4.1-mini is a
 # quality trade-off. Reasoning models (o1/o3/gpt-5) are supported but slower.
 OPENAI_API_KEY=sk-proj-...
 SESSION_LLM_MODEL=gpt-4.1-nano
@@ -269,7 +272,7 @@ npm install
 # Build with the backend URL. VITE_SESSION_API_BASE_URL falls back to
 # VITE_API_BASE_URL if unset, so a single var is enough unless you split
 # traffic across two hosts.
-VITE_API_BASE_URL=https://api.aloegy.com npm run build
+VITE_API_BASE_URL=https://api.aloegy.ai npm run build
 
 # Output will be in dist/
 ```
@@ -343,13 +346,13 @@ systemctl status livekit aloegy-backend aloegy-agent
 
 ## Step 9: Configure Nginx
 
-### LiveKit (lk.aloegy.com)
+### LiveKit (lk.aloegy.ai)
 
 ```bash
 cat > /etc/nginx/sites-available/aloegy-livekit << 'EOF'
 server {
     listen 80;
-    server_name lk.aloegy.com;
+    server_name lk.aloegy.ai;
 
     location / {
         proxy_pass http://127.0.0.1:7880;
@@ -369,13 +372,13 @@ server {
 EOF
 ```
 
-### Backend (api.aloegy.com)
+### Backend (api.aloegy.ai)
 
 ```bash
 cat > /etc/nginx/sites-available/aloegy-api << 'EOF'
 server {
     listen 80;
-    server_name api.aloegy.com;
+    server_name api.aloegy.ai;
 
     client_max_body_size 10M;
 
@@ -395,13 +398,13 @@ server {
 EOF
 ```
 
-### Frontend (aloegy.com)
+### Frontend (aloegy.ai)
 
 ```bash
 cat > /etc/nginx/sites-available/aloegy-frontend << 'EOF'
 server {
     listen 80;
-    server_name aloegy.com www.aloegy.com;
+    server_name aloegy.ai www.aloegy.ai;
 
     root /opt/aloegy/frontend/entameen-main/dist;
     index index.html;
@@ -435,7 +438,7 @@ systemctl restart nginx
 ## Step 10: SSL with Let's Encrypt
 
 ```bash
-certbot --nginx -d aloegy.com -d www.aloegy.com -d api.aloegy.com -d lk.aloegy.com
+certbot --nginx -d aloegy.ai -d www.aloegy.ai -d api.aloegy.ai -d lk.aloegy.ai
 
 # Auto-renewal (already set up by certbot, but verify):
 certbot renew --dry-run
@@ -475,7 +478,7 @@ systemctl restart livekit
 
 # Rebuild frontend after changes
 cd /opt/aloegy/frontend/entameen-main
-VITE_API_BASE_URL=https://api.aloegy.com npm run build
+VITE_API_BASE_URL=https://api.aloegy.ai npm run build
 
 # Check what's running
 systemctl status livekit aloegy-backend aloegy-agent nginx
@@ -485,21 +488,21 @@ systemctl status livekit aloegy-backend aloegy-agent nginx
 
 ## Quick checklist
 
-- [ ] DNS: `aloegy.com`, `api.aloegy.com`, `lk.aloegy.com` all point to VPS IP
+- [ ] DNS: `aloegy.ai`, `api.aloegy.ai`, `lk.aloegy.ai` all point to VPS IP
 - [ ] LiveKit server running on port 7880 with generated keys
-- [ ] Backend .env: `APP_ENV=prod`, strong `JWT_SECRET`, `BACKEND_API_KEY`, `LIVEKIT_URL=wss://lk.aloegy.com`
+- [ ] Backend .env: `APP_ENV=prod`, strong `JWT_SECRET`, `BACKEND_API_KEY`, `LIVEKIT_URL=wss://lk.aloegy.ai`
 - [ ] Backend .env: **all `BIRD_*` keys set** (prod startup will fail otherwise)
-- [ ] Agent .env: `LIVEKIT_URL=wss://lk.aloegy.com` + same LiveKit keys
+- [ ] Agent .env: `LIVEKIT_URL=wss://lk.aloegy.ai` + same LiveKit keys
 - [ ] Agent .env: `OPENAI_API_KEY`, `SONIOX_API_KEY`, `HAMSA_API_KEY` (all three required for the default stack)
 - [ ] Agent .env: `SESSION_LLM_MODEL=gpt-4.1-nano`, `SESSION_TTS_MODEL=hamsa`, `SESSION_TTS_VOICE=<voice>`
-- [ ] Frontend built with `VITE_API_BASE_URL=https://api.aloegy.com`
+- [ ] Frontend built with `VITE_API_BASE_URL=https://api.aloegy.ai`
 - [ ] All 3 systemd services running (livekit, backend, agent)
 - [ ] Nginx configured with WebSocket support for LiveKit
 - [ ] SSL certificates on all 3 subdomains
 - [ ] Firewall: 22, 80, 443, 7881, 5349, 3478, 50000-60000/udp
-- [ ] Test: `https://api.aloegy.com/health` → `{"status": "ok", "env": "prod"}`
-- [ ] Test: `https://aloegy.com` loads frontend
-- [ ] Test: Voice call connects through `wss://lk.aloegy.com`
+- [ ] Test: `https://api.aloegy.ai/health` → `{"status": "ok", "env": "prod"}`
+- [ ] Test: `https://aloegy.ai` loads frontend
+- [ ] Test: Voice call connects through `wss://lk.aloegy.ai`
 
 ---
 
