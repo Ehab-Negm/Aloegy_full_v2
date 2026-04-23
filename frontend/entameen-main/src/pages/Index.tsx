@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { motion } from "framer-motion";
-import { PhoneCall, PhoneIncoming, TrendingUp, Utensils, Zap, ArrowLeft, BarChart3 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { motion, useInView, useMotionValue, useSpring, useTransform } from "framer-motion";
+import { Mic, PhoneCall, PhoneIncoming, TrendingUp, Utensils, Zap, ArrowLeft, BarChart3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import Navbar from "@/components/Navbar";
@@ -8,6 +8,7 @@ import Footer from "@/components/Footer";
 import VoiceAssistantWidget from "@/components/VoiceAssistantWidget";
 import { Link } from "react-router-dom";
 import logo from "@/assets/logo.png";
+import mascot from "@/assets/aloegy-mascot.png";
 import { submitContactForm } from "@/services/api";
 
 const services = [
@@ -44,10 +45,10 @@ const services = [
 ];
 
 const advantages = [
-  { value: "٢٠٪+", label: "زيادة في المبيعات", desc: "من الإضافات الذكية اللي بيقترحها" },
-  { value: "٠", label: "مكالمة ضايعة", desc: "كل تليفون بيترد عليه" },
-  { value: "∞", label: "مكالمة في وقت واحد", desc: "مفيش حدود خالص" },
-  { value: "٢٤/٧", label: "شغال من غير ما يقفل", desc: "مفيش إجازات ولا أوفر تايم" },
+  { value: "٢٠٪+", counter: { to: 20, suffix: "٪+" }, label: "زيادة في المبيعات", desc: "من الإضافات الذكية اللي بيقترحها" },
+  { value: "٠", counter: { to: 0, suffix: "" }, label: "مكالمة ضايعة", desc: "كل تليفون بيترد عليه" },
+  { value: "∞", counter: null, label: "مكالمة في وقت واحد", desc: "مفيش حدود خالص" },
+  { value: "٢٤/٧", counter: null, label: "شغال من غير ما يقفل", desc: "مفيش إجازات ولا أوفر تايم" },
 ];
 
 const fadeUp = {
@@ -57,6 +58,114 @@ const fadeUp = {
     y: 0,
     transition: { delay: i * 0.1, duration: 0.5, ease: "easeOut" as const },
   }),
+};
+
+// Convert Western digits to Arabic-Indic for UI display.
+const AR_DIGIT_MAP = ["٠","١","٢","٣","٤","٥","٦","٧","٨","٩"];
+const toArabicDigits = (n: number): string =>
+  String(Math.round(n))
+    .split("")
+    .map((c) => (c >= "0" && c <= "9" ? AR_DIGIT_MAP[+c] : c))
+    .join("");
+
+// Counter that animates 0 → `to` when the node scrolls into view.
+const AnimatedCounter = ({ to, prefix = "", suffix = "" }: { to: number; prefix?: string; suffix?: string }) => {
+  const ref = useRef<HTMLSpanElement>(null);
+  const inView = useInView(ref, { once: true, margin: "-80px" });
+  const value = useMotionValue(0);
+  const spring = useSpring(value, { duration: 1.6, bounce: 0 });
+  const display = useTransform(spring, (v) => `${prefix}${toArabicDigits(v)}${suffix}`);
+  useEffect(() => {
+    if (inView) value.set(to);
+  }, [inView, to, value]);
+  return <motion.span ref={ref}>{display}</motion.span>;
+};
+
+// The mascot character with a layered in-place idle animation (float + sway
+// + tilt + breathing scale), concentric voice-wave rings, and subtle
+// mouse-parallax.  The PNG has a transparent background so no blend tricks
+// are needed.
+const HeroMascot = () => {
+  const mx = useMotionValue(0);
+  const my = useMotionValue(0);
+  // Parallax tilt follows the mouse; spring-smoothed so motion feels organic.
+  const parallaxX = useSpring(useTransform(mx, [-0.5, 0.5], [-8, 8]), { stiffness: 70, damping: 16 });
+  const parallaxY = useSpring(useTransform(my, [-0.5, 0.5], [-8, 8]), { stiffness: 70, damping: 16 });
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    mx.set((e.clientX - rect.left) / rect.width - 0.5);
+    my.set((e.clientY - rect.top) / rect.height - 0.5);
+  };
+  const handleMouseLeave = () => {
+    mx.set(0);
+    my.set(0);
+  };
+
+  return (
+    <div
+      className="relative flex items-center justify-center"
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
+      style={{ perspective: 1200 }}
+    >
+      {/* Voice wave rings — 3 concentric pulses at staggered delays. */}
+      {[0, 1, 2].map((i) => (
+        <motion.div
+          key={i}
+          className="absolute rounded-full border border-primary/30"
+          initial={{ width: 170, height: 170, opacity: 0 }}
+          animate={{
+            width: [170, 280, 340],
+            height: [170, 280, 340],
+            opacity: [0.5, 0.18, 0],
+          }}
+          transition={{ duration: 2.8, repeat: Infinity, delay: i * 0.9, ease: "easeOut" }}
+        />
+      ))}
+
+      {/* Soft primary-colour glow behind the mascot. */}
+      <motion.div
+        className="absolute w-[300px] h-[300px] rounded-full bg-primary/20 blur-[70px] pointer-events-none"
+        animate={{ opacity: [0.6, 0.9, 0.6] }}
+        transition={{ duration: 2.6, repeat: Infinity, ease: "easeInOut" }}
+      />
+
+      {/* Parallax layer: follows the mouse with a gentle spring. */}
+      <motion.div
+        style={{ x: parallaxX, y: parallaxY }}
+        className="relative z-10"
+      >
+        {/* Float + sway + head-tilt layer: idle-in-place motion. Each axis
+           has its own duration so the combined motion never loops exactly,
+           which reads as "alive" instead of "looping". */}
+        <motion.div
+          animate={{
+            y: [0, -12, -4, -10, 0],
+            rotate: [-2.5, 2.5, -1.5, 2, -2.5],
+          }}
+          transition={{
+            y: { duration: 3.4, repeat: Infinity, ease: "easeInOut" },
+            rotate: { duration: 5.2, repeat: Infinity, ease: "easeInOut" },
+          }}
+        >
+          {/* Breathing scale — short/subtle, inner wrapper so it doesn't
+             interfere with the sway rotation. */}
+          <motion.div
+            animate={{ scale: [1, 1.035, 1] }}
+            transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
+          >
+            <img
+              src={mascot}
+              alt="ألو إيچي"
+              className="w-[180px] md:w-[230px] drop-shadow-[0_20px_40px_rgba(59,130,246,0.4)] select-none"
+              draggable={false}
+            />
+          </motion.div>
+        </motion.div>
+      </motion.div>
+    </div>
+  );
 };
 
 const Index = () => {
@@ -83,65 +192,71 @@ const Index = () => {
       <Navbar />
 
       {/* Hero Section */}
-      <section className="relative pt-28 pb-24 overflow-hidden gradient-hero">
+      <section className="relative pt-24 pb-20 overflow-hidden gradient-hero">
         <div className="absolute inset-0 pointer-events-none">
           <div className="absolute top-10 start-1/4 w-[500px] h-[500px] rounded-full bg-primary/4 blur-[100px]" />
           <div className="absolute bottom-0 end-1/4 w-[400px] h-[400px] rounded-full bg-brand-glow/5 blur-[80px]" />
         </div>
 
         <div className="container mx-auto px-4 relative">
-          <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.7 }}
-            className="max-w-3xl mx-auto text-center"
-          >
-            <motion.span
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ delay: 0.2 }}
-              className="inline-block px-4 py-1.5 rounded-full text-xs font-semibold bg-primary/10 text-primary mb-8 border border-primary/15"
+          <div className="grid md:grid-cols-2 gap-10 items-center">
+            {/* Text column */}
+            <motion.div
+              initial={{ opacity: 0, y: 40 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.7 }}
+              className="text-center md:text-start"
             >
-              الذكاء الاصطناعي المتربي في مصر
-            </motion.span>
-            
-            {/* Logo + Title */}
-            <div className="flex items-center justify-center gap-5 mb-5">
-              <motion.img
-                src={logo}
-                alt="ألو إيچي"
-                className="w-20 h-20 md:w-24 md:h-24 object-contain drop-shadow-lg"
-                animate={{ y: [0, -6, 0] }}
-                transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
-              />
-              <h1 className="text-5xl md:text-7xl font-heading font-extrabold text-foreground leading-tight">
+              <motion.span
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: 0.2 }}
+                className="inline-block px-4 py-1.5 rounded-full text-xs font-semibold bg-primary/10 text-primary mb-6 border border-primary/15"
+              >
+                الذكاء الاصطناعي المتربي في مصر
+              </motion.span>
+
+              <h1 className="text-5xl md:text-7xl font-heading font-extrabold text-foreground leading-tight mb-4">
                 ألو إيچي
               </h1>
-            </div>
 
-            <p className="text-2xl md:text-3xl font-heading font-semibold text-foreground/75 mb-2">
-              أسرع ألو في مصر
-            </p>
-            <p className="text-lg text-muted-foreground mb-3">
-              ذكاء اصطناعي بلسان مصري
-            </p>
-            <p className="text-base text-muted-foreground mb-10 max-w-xl mx-auto leading-relaxed">
-              وكيل صوتي ابن بلد بيتكلم مصري زيك بالظبط، بيأخد أوردرات المطاعم بدل الموظف، وبيزوّد مبيعاتك ٢٠٪ من الإضافات الذكية. مفيش تليفون هيرن ومحدش يرد عليه تاني.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-3 justify-center">
-              <a href="#services">
-                <Button size="lg" className="rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 shadow-brand px-8 gap-2 h-12">
-                  اعرف أكتر
-                  <ArrowLeft size={18} />
+              <p className="text-2xl md:text-3xl font-heading font-semibold text-foreground/75 mb-2">
+                أسرع ألو في مصر
+              </p>
+              <p className="text-lg text-muted-foreground mb-3">
+                ذكاء اصطناعي بلسان مصري
+              </p>
+              <p className="text-base text-muted-foreground mb-8 max-w-xl md:mx-0 mx-auto leading-relaxed">
+                وكيل صوتي ابن بلد بيتكلم مصري زيك بالظبط، بيأخد أوردرات المطاعم بدل الموظف، وبيزوّد مبيعاتك ٢٠٪ من الإضافات الذكية. مفيش تليفون هيرن ومحدش يرد عليه تاني.
+              </p>
+              <div className="flex flex-col sm:flex-row gap-3 md:justify-start justify-center">
+                <Button
+                  size="lg"
+                  onClick={() => window.dispatchEvent(new Event("aloegy:open-voice"))}
+                  className="rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 shadow-brand px-8 gap-2 h-12"
+                >
+                  <Mic size={18} />
+                  جرب صوت ألو إيچي
                 </Button>
-              </a>
-              <Link to="/pricing">
-                <Button size="lg" variant="outline" className="rounded-lg border-border px-8 h-12 hover:bg-muted/50">
-                  شوف الأسعار
-                </Button>
-              </Link>
-            </div>
-          </motion.div>
+                <a href="#services">
+                  <Button size="lg" variant="outline" className="rounded-lg border-border px-8 h-12 hover:bg-muted/50 gap-2 w-full sm:w-auto">
+                    اعرف أكتر
+                    <ArrowLeft size={18} />
+                  </Button>
+                </a>
+              </div>
+            </motion.div>
+
+            {/* Mascot column */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.85 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.8, delay: 0.2 }}
+              className="flex justify-center md:justify-end"
+            >
+              <HeroMascot />
+            </motion.div>
+          </div>
         </div>
       </section>
 
@@ -159,7 +274,11 @@ const Index = () => {
                 variants={fadeUp}
                 className="text-center"
               >
-                <div className="text-4xl md:text-5xl font-heading font-extrabold text-primary mb-1">{item.value}</div>
+                <div className="text-4xl md:text-5xl font-heading font-extrabold text-primary mb-1">
+                  {item.counter
+                    ? <AnimatedCounter to={item.counter.to} suffix={item.counter.suffix} />
+                    : item.value}
+                </div>
                 <div className="font-heading font-semibold text-foreground text-sm mb-0.5">{item.label}</div>
                 <div className="text-xs text-muted-foreground">{item.desc}</div>
               </motion.div>
@@ -234,15 +353,21 @@ const Index = () => {
               </p>
               <div className="flex gap-10">
                 <div>
-                  <div className="text-3xl font-heading font-extrabold text-primary">+٢٠٠</div>
+                  <div className="text-3xl font-heading font-extrabold text-primary">
+                    <AnimatedCounter prefix="+" to={200} />
+                  </div>
                   <div className="text-xs text-muted-foreground mt-0.5">مطعم معانا</div>
                 </div>
                 <div>
-                  <div className="text-3xl font-heading font-extrabold text-primary">+٥٠ ألف</div>
+                  <div className="text-3xl font-heading font-extrabold text-primary">
+                    <AnimatedCounter prefix="+" to={50} suffix=" ألف" />
+                  </div>
                   <div className="text-xs text-muted-foreground mt-0.5">مكالمة اتأخدت</div>
                 </div>
                 <div>
-                  <div className="text-3xl font-heading font-extrabold text-primary">٢٠٪+</div>
+                  <div className="text-3xl font-heading font-extrabold text-primary">
+                    <AnimatedCounter to={20} suffix="٪+" />
+                  </div>
                   <div className="text-xs text-muted-foreground mt-0.5">زيادة مبيعات</div>
                 </div>
               </div>

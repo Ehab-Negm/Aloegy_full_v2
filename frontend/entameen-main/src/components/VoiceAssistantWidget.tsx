@@ -23,6 +23,14 @@ const VoiceAssistantWidget = () => {
   const mountedRef = useRef(true);
   const audioContainerRef = useRef<HTMLDivElement | null>(null);
 
+  // External pages (e.g. Hero "try voice" CTA) can dispatch window events
+  // to open the widget programmatically.
+  useEffect(() => {
+    const handler = () => setOpen(true);
+    window.addEventListener("aloegy:open-voice", handler);
+    return () => window.removeEventListener("aloegy:open-voice", handler);
+  }, []);
+
   const removeAttachedAudio = () => {
     const container = audioContainerRef.current;
     if (!container) {

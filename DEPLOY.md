@@ -162,12 +162,38 @@ DATABASE_URL=postgresql://YOUR_SUPABASE_URL_HERE
 LIVEKIT_URL=wss://lk.aloegy.com
 LIVEKIT_API_KEY=YOUR_LIVEKIT_KEY
 LIVEKIT_API_SECRET=YOUR_LIVEKIT_SECRET
+
+# ── Bird WhatsApp (REQUIRED in prod — backend refuses to start without these)
+# Get these from Bird dashboard → Channels → WhatsApp, and Studio → Templates.
+BIRD_API_KEY=YOUR_BIRD_ACCESS_KEY
+BIRD_WORKSPACE_ID=YOUR_BIRD_WORKSPACE_UUID
+BIRD_CHANNEL_ID=YOUR_BIRD_WHATSAPP_CHANNEL_UUID
+
+# OTP auth template (approved "authentication" category in Bird Studio)
+BIRD_OTP_TEMPLATE_PROJECT_ID=YOUR_OTP_TEMPLATE_PROJECT_ID
+BIRD_OTP_TEMPLATE_VERSION=latest
+BIRD_OTP_TEMPLATE_LOCALE=ar
+BIRD_OTP_TEMPLATE_VARIABLE=otp
+
+# Order-confirmation utility template (vars: name/items/address/total)
+BIRD_ORDER_CONFIRM_TEMPLATE_PROJECT_ID=YOUR_ORDER_CONFIRM_TEMPLATE_PROJECT_ID
+BIRD_ORDER_CONFIRM_TEMPLATE_VERSION=latest
+BIRD_ORDER_CONFIRM_TEMPLATE_LOCALE=ar
+BIRD_ORDER_CONFIRM_VAR_NAME=name
+BIRD_ORDER_CONFIRM_VAR_ITEMS=items
+BIRD_ORDER_CONFIRM_VAR_ADDRESS=address
+BIRD_ORDER_CONFIRM_VAR_TOTAL=total
+BIRD_ORDER_CONFIRM_TAKEAWAY_ADDRESS=استلام من المطعم
 ```
 
 Generate strong secrets:
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+
+> ⚠️ **`BIRD_*` keys are required for prod.** The backend has an explicit
+> `raise RuntimeError("FATAL: Bird WhatsApp OTP delivery is not configured ...")`
+> at startup when `APP_ENV=prod` and any of the core Bird keys are missing.
 
 ---
 
@@ -193,12 +219,42 @@ Edit `/opt/aloegy/agent/.env`:
 LIVEKIT_URL=wss://lk.aloegy.com
 LIVEKIT_API_KEY=YOUR_LIVEKIT_KEY
 LIVEKIT_API_SECRET=YOUR_LIVEKIT_SECRET
-XAI_API_KEY=your_xai_key
-GOOGLE_API_KEY=your_google_key
-SONIOX_API_KEY=your_soniox_key
 APP_ENV=prod
+
+# Backend (agent talks to backend over the loopback interface)
 BACKEND_BASE_URL=http://127.0.0.1:8000
 BACKEND_API_KEY=SAME_KEY_AS_BACKEND
+
+# LLM — OpenAI is the default. gpt-4.1-nano is fastest; gpt-4.1-mini is a
+# quality trade-off. Reasoning models (o1/o3/gpt-5) are supported but slower.
+OPENAI_API_KEY=sk-proj-...
+SESSION_LLM_MODEL=gpt-4.1-nano
+SESSION_LLM_MAX_COMPLETION_TOKENS=180
+SESSION_PREEMPTIVE_GENERATION=true
+
+# STT — Soniox (Arabic realtime)
+SONIOX_API_KEY=your_soniox_key
+SESSION_STT_MODEL=stt-rt-v4
+SESSION_STT_LANGUAGE=ar
+SESSION_STT_LANGUAGE_HINTS_STRICT=true
+
+# TTS — Hamsa (Arabic, low-latency WebSocket streaming)
+# Prebuilt voices: Amjad, Lyali, Salma, Mariam, Dalal, Lana, Jasem, Samir, Carla, Nada
+# Or use a cloned voice's UUID from the Hamsa dashboard.
+HAMSA_API_KEY=your_hamsa_key
+SESSION_TTS_MODEL=hamsa
+SESSION_TTS_VOICE=Lyali
+SESSION_TTS_DIALECT=egy
+SESSION_TTS_LANGUAGE=ar
+
+# Tuning (optional — leave defaults unless you know why)
+MIN_ENDPOINTING_DELAY_SECONDS=0.35
+MAX_ENDPOINTING_DELAY_SECONDS=0.75
+MAX_CALL_DURATION=600
+
+# Optional alternates (only needed if you switch provider):
+# GOOGLE_API_KEY=...   # for Gemini LLM (SESSION_LLM_MODEL=gemini-2.5-flash)
+# ELEVEN_API_KEY=...   # for ElevenLabs TTS (SESSION_TTS_MODEL=elevenlabs)
 ```
 
 ---
@@ -210,7 +266,9 @@ cd /opt/aloegy/frontend/entameen-main
 
 npm install
 
-# Set API URL and build
+# Build with the backend URL. VITE_SESSION_API_BASE_URL falls back to
+# VITE_API_BASE_URL if unset, so a single var is enough unless you split
+# traffic across two hosts.
 VITE_API_BASE_URL=https://api.aloegy.com npm run build
 
 # Output will be in dist/
@@ -259,7 +317,9 @@ Type=simple
 User=root
 WorkingDirectory=/opt/aloegy/agent
 Environment=PATH=/opt/aloegy/agent/.venv/bin:/usr/bin
-ExecStart=/opt/aloegy/agent/.venv/bin/python agent.py start
+# main.py is the canonical LiveKit AgentServer entrypoint; agent.py also
+# works via a compat shim but main.py is preferred in production.
+ExecStart=/opt/aloegy/agent/.venv/bin/python main.py start
 Restart=always
 RestartSec=5
 
@@ -428,7 +488,10 @@ systemctl status livekit aloegy-backend aloegy-agent nginx
 - [ ] DNS: `aloegy.com`, `api.aloegy.com`, `lk.aloegy.com` all point to VPS IP
 - [ ] LiveKit server running on port 7880 with generated keys
 - [ ] Backend .env: `APP_ENV=prod`, strong `JWT_SECRET`, `BACKEND_API_KEY`, `LIVEKIT_URL=wss://lk.aloegy.com`
-- [ ] Agent .env: `LIVEKIT_URL=wss://lk.aloegy.com` + same LiveKit keys + all AI API keys (fresh)
+- [ ] Backend .env: **all `BIRD_*` keys set** (prod startup will fail otherwise)
+- [ ] Agent .env: `LIVEKIT_URL=wss://lk.aloegy.com` + same LiveKit keys
+- [ ] Agent .env: `OPENAI_API_KEY`, `SONIOX_API_KEY`, `HAMSA_API_KEY` (all three required for the default stack)
+- [ ] Agent .env: `SESSION_LLM_MODEL=gpt-4.1-nano`, `SESSION_TTS_MODEL=hamsa`, `SESSION_TTS_VOICE=<voice>`
 - [ ] Frontend built with `VITE_API_BASE_URL=https://api.aloegy.com`
 - [ ] All 3 systemd services running (livekit, backend, agent)
 - [ ] Nginx configured with WebSocket support for LiveKit
