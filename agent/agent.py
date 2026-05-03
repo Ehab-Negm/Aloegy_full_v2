@@ -33,10 +33,6 @@ try:
     from livekit.plugins import soniox
 except ImportError:
     soniox = None
-try:
-    from livekit.plugins import deepgram
-except ImportError:
-    deepgram = None
 
 from backend.config import CachedConfigEntry, RestaurantConfig
 from nlp.arabic import (
@@ -73,7 +69,6 @@ from backend.client import (
     retry_delay as _retry_delay,
     should_retry_backend_error as _should_retry_backend_error,
 )
-from core.telemetry import emit_event as _core_emit_event
 from utils.money import _int_to_ar, money2ar, num2ar, phone2ar
 from utils.voice import _voice_safe_text
 
@@ -91,6 +86,7 @@ _WORKER_HEALTH_SNAPSHOT_LOCK = threading.Lock()
 # ── Structured telemetry ─────────────────────────────────────────────────────
 # Emits JSON events for key call lifecycle moments.
 # Separate logger so it can be routed to a different handler (file, stdout, etc.)
+_telemetry_logger = logging.getLogger("restaurant.telemetry")
 _TELEMETRY_ENABLED = os.getenv("TELEMETRY_ENABLED", "true").lower() in {"1", "true", "yes"}
 
 
@@ -98,7 +94,15 @@ def _emit_event(event: str, *, call_id: str = "", flow: str = "", **kwargs: Any)
     """Emit a structured telemetry event as JSON."""
     if not _TELEMETRY_ENABLED:
         return
-    _core_emit_event(event, call_id=call_id, flow=flow, **kwargs)
+    payload = {
+        "event": event,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "call_id": call_id,
+    }
+    if flow:
+        payload["flow"] = flow
+    payload.update(kwargs)
+    _telemetry_logger.info(_json.dumps(payload, ensure_ascii=False))
 try:
     CAIRO_TZ = ZoneInfo("Africa/Cairo")
 except Exception:
@@ -190,9 +194,9 @@ MAX_CONCURRENT_SESSIONS          = _get_env_int("MAX_CONCURRENT_SESSIONS", 100, 
 MAX_TURNS_PER_SESSION            = _get_env_int("MAX_TURNS_PER_SESSION", 50, min_value=10)
 TURN_CAP_WARNING_TURNS           = _get_env_int("TURN_CAP_WARNING_TURNS", 5, min_value=1)
 TURN_CAP_GRACE_TURNS             = _get_env_int("TURN_CAP_GRACE_TURNS", 3, min_value=0)
-PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 12, min_value=2)
-TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 36, min_value=8)
-MAX_TOOL_STEPS               = _get_env_int("MAX_TOOL_STEPS", 10, min_value=6)
+PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 2, min_value=2)
+TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 10, min_value=8)
+MAX_TOOL_STEPS               = _get_env_int("MAX_TOOL_STEPS", 4, min_value=2)
 MIN_INTERRUPTION_DURATION_SECONDS = _get_env_float("MIN_INTERRUPTION_DURATION_SECONDS", 0.35, min_value=0.0)
 MIN_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MIN_ENDPOINTING_DELAY_SECONDS", 0.2, min_value=0.05)
 MAX_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MAX_ENDPOINTING_DELAY_SECONDS", 0.55, min_value=0.1)
@@ -216,23 +220,12 @@ SESSION_STT_LANGUAGE_HINTS_STRICT = _get_env_bool("SESSION_STT_LANGUAGE_HINTS_ST
 SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION = _get_env_bool("SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION", True)
 SESSION_STT_KEYTERM_LIMIT    = _get_env_int("SESSION_STT_KEYTERM_LIMIT", 40, min_value=5)
 SESSION_STT_EXTRA_KEYTERMS   = os.getenv("SESSION_STT_EXTRA_KEYTERMS", "")
-# Phase 1.2 — Deepgram Nova-3 A/B branch.
-#   SESSION_STT_PROVIDER=soniox       (default — current production)
-#   SESSION_STT_PROVIDER=deepgram     (Nova-3 with menu-keyterm prompting)
-# A/B percentage (0-100) is applied per-call: when set, that fraction of
-# calls is routed to Deepgram even if the default provider is Soniox. This
-# lets us collect comparison data on a small slice of production traffic
-# without flipping every call. The picked provider is stamped on every
-# turn.received event via SESSION_STT_PROVIDER (mutable module global).
-SESSION_STT_PROVIDER_DEFAULT = (os.getenv("SESSION_STT_PROVIDER", "soniox") or "soniox").strip().lower()
-SESSION_STT_DEEPGRAM_AB_PERCENT = _get_env_int("SESSION_STT_DEEPGRAM_AB_PERCENT", 0, min_value=0)
-SESSION_STT_DEEPGRAM_MODEL = os.getenv("SESSION_STT_DEEPGRAM_MODEL", "nova-3").strip() or "nova-3"
-SESSION_STT_DEEPGRAM_LANGUAGE = (os.getenv("SESSION_STT_DEEPGRAM_LANGUAGE", "multi") or "multi").strip()
-SESSION_STT_DEEPGRAM_ENDPOINTING_MS = _get_env_int("SESSION_STT_DEEPGRAM_ENDPOINTING_MS", 200, min_value=10)
 SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.5-flash")
-SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 260, min_value=32)
-SESSION_LLM_TEMPERATURE      = _get_env_float("SESSION_LLM_TEMPERATURE", 0.25, min_value=0.0)
-SESSION_LLM_TOP_P            = _get_env_float("SESSION_LLM_TOP_P", 0.85, min_value=0.0)
+SESSION_LLM_REASONING_EFFORT = os.getenv("SESSION_LLM_REASONING_EFFORT", "low").strip().lower() or "low"
+SESSION_LLM_VERBOSITY        = os.getenv("SESSION_LLM_VERBOSITY", "low").strip().lower() or "low"
+SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 160, min_value=32)
+SESSION_LLM_TEMPERATURE      = _get_env_float("SESSION_LLM_TEMPERATURE", 0.85, min_value=0.0)
+SESSION_LLM_TOP_P            = _get_env_float("SESSION_LLM_TOP_P", 0.95, min_value=0.0)
 SESSION_LLM_THINKING_BUDGET  = _get_env_int("SESSION_LLM_THINKING_BUDGET", 0, min_value=0)
 SESSION_PREEMPTIVE_GENERATION = _get_env_bool("SESSION_PREEMPTIVE_GENERATION", False)
 CONFIG_SHARED_CACHE_ENABLED  = _get_env_bool("CONFIG_SHARED_CACHE_ENABLED", True)
@@ -264,33 +257,6 @@ def _setup_worker_process(proc: Any) -> None:
     proc.userdata["worker_context"] = _WORKER_CONTEXT
     logger.info("worker process setup | pid=%d | context_id=%d", os.getpid(), id(_WORKER_CONTEXT))
     _write_worker_health_snapshot_sync(reason="worker_setup")
-    # Prewarm the default-restaurant config in a background thread so the
-    # first call doesn't pay the 1-1.5s backend round-trip. Best-effort —
-    # any failure just means the first call falls through to the regular
-    # fetch path. Default key (`__default__`) is what fetch_config uses
-    # when no restaurant_id is in the room metadata.
-    if _get_env_bool("CONFIG_PREWARM_ENABLED", True):
-        def _prewarm_default_config() -> None:
-            try:
-                started = time.monotonic()
-                asyncio.run(fetch_config(call_id="prewarm", restaurant_id=""))
-                logger.info(
-                    "config prewarm complete | pid=%d | took_ms=%d",
-                    os.getpid(), int((time.monotonic() - started) * 1000),
-                )
-            except Exception as exc:
-                logger.warning("config prewarm failed | pid=%d | %s", os.getpid(), exc)
-        threading.Thread(target=_prewarm_default_config, daemon=True, name="config_prewarm").start()
-
-    # Note: TTS prewarm was tried here but broke the Google Cloud TTS
-    # plugin. Running the synth in a background thread's asyncio.run()
-    # binds the gRPC channel to the wrong loop; every subsequent synth
-    # fails with "Unsupported audio encoding" / cross-loop Future
-    # errors. The right place to prewarm TTS is inside the worker's
-    # actual event loop on first call, but the cold-start cost (~200ms)
-    # is small enough that we accept it on call #1 and rely on the
-    # provider's connection-pool reuse for calls #2+. Don't reintroduce
-    # a prewarm without solving the loop-affinity problem.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TTS/STT/LLM — session-level فقط، مفيش per-agent overrides
@@ -335,128 +301,17 @@ def _session_stt_options(*, context_terms: list[str] | None = None, client_refer
         "enable_language_identification": SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION,
         "client_reference_id": client_reference_id,
     }
-    # Soniox enforces ``max_endpoint_delay_ms`` ∈ [500, 3000]. Setting the
-    # floor (500) commits final transcripts as fast as Soniox allows.
-    # End-of-utterance delays >500ms in production are then network/STT
-    # processing latency we can't tune from the client side. Override via
-    # env if you want a longer wait window for hesitant speakers.
-    max_endpoint_delay_ms = _get_env_int("SESSION_STT_MAX_ENDPOINT_DELAY_MS", 500, min_value=500)
-    if soniox is not None:
-        option_kwargs["max_endpoint_delay_ms"] = max_endpoint_delay_ms
-        return soniox.STTOptions(**option_kwargs)
-    option_kwargs["max_endpoint_delay_ms"] = max_endpoint_delay_ms
-    return SimpleNamespace(**option_kwargs)
+    if soniox is None:
+        return SimpleNamespace(**option_kwargs)
+    return soniox.STTOptions(**option_kwargs)
 
 
-def _resolve_stt_provider(*, override: str | None = None) -> str:
-    """Resolve which STT provider this call should use.
-
-    ``override`` wins absolutely (used by tests / dashboard). Otherwise
-    ``SESSION_STT_DEEPGRAM_AB_PERCENT`` rolls a per-call dice; if the
-    primary provider is Soniox and the dice falls below the percent, the
-    call goes to Deepgram. When the chosen provider isn't installed or
-    has no API key we fall back to whichever provider is ready, so the
-    call still goes through.
-    """
-    requested = (override or SESSION_STT_PROVIDER_DEFAULT or "soniox").strip().lower()
-    if requested not in {"soniox", "deepgram"}:
-        requested = "soniox"
-    if (
-        override is None
-        and requested == "soniox"
-        and SESSION_STT_DEEPGRAM_AB_PERCENT > 0
-        and _random.randint(1, 100) <= SESSION_STT_DEEPGRAM_AB_PERCENT
-    ):
-        requested = "deepgram"
-
-    def _ready(provider: str) -> bool:
-        if provider == "soniox":
-            return soniox is not None and bool(os.getenv("SONIOX_API_KEY"))
-        if provider == "deepgram":
-            return deepgram is not None and bool(os.getenv("DEEPGRAM_API_KEY"))
-        return False
-
-    if _ready(requested):
-        return requested
-    fallback = "soniox" if requested == "deepgram" else "deepgram"
-    if _ready(fallback):
-        logger.warning(
-            "STT provider %s unavailable — falling back to %s", requested, fallback,
-        )
-        return fallback
-    return requested  # Will surface as a not-ready error below.
-
-
-def _stt_provider_ready_reason(provider: str | None = None) -> str | None:
-    target = (provider or SESSION_STT_PROVIDER_DEFAULT or "soniox").strip().lower()
-    if target == "deepgram":
-        if deepgram is None:
-            return "livekit-plugins-deepgram is not installed"
-        if not os.getenv("DEEPGRAM_API_KEY"):
-            return "DEEPGRAM_API_KEY is missing"
-        return None
+def _stt_provider_ready_reason() -> str | None:
     if soniox is None:
         return "livekit-plugins-soniox is not installed"
     if not os.getenv("SONIOX_API_KEY"):
         return "SONIOX_API_KEY is missing"
     return None
-
-
-async def prewarm_stt_connection(stt_instance: Any) -> None:
-    """Pre-open a Soniox WebSocket so DNS/TLS/auth are cached before the
-    user's first audio arrives.
-
-    Production logs were showing 2.7-3.3 s end-of-utterance delay on the
-    first turn (with a "Timeout during Soniox … connection/initialization"
-    error and an automatic retry). After the first connection succeeded the
-    EOU dropped to ~870 ms, which is normal. Opening a throwaway stream at
-    call start absorbs that cold-start cost in parallel with config fetch
-    so the customer's first turn doesn't pay it.
-
-    Best-effort: silently swallows failures because this is a latency
-    optimisation, not a correctness requirement.
-    """
-    if soniox is None:
-        return
-    target = stt_instance
-    # When STT is wrapped in a FallbackAdapter (Phase 3.2), reach
-    # inside to find the soniox.STT primary so the prewarm still helps.
-    if not isinstance(target, soniox.STT):
-        for attr in ("_stt", "_primary", "_stts", "stts"):
-            inner = getattr(stt_instance, attr, None)
-            if isinstance(inner, soniox.STT):
-                target = inner
-                break
-            if isinstance(inner, (list, tuple)):
-                for entry in inner:
-                    if isinstance(entry, soniox.STT):
-                        target = entry
-                        break
-                if isinstance(target, soniox.STT):
-                    break
-        if not isinstance(target, soniox.STT):
-            return
-    try:
-        from livekit import rtc as _rtc  # noqa: E402
-
-        stream = target.stream()
-        # 100 ms of silence at 16 kHz mono 16-bit = 1600 samples * 2 bytes
-        silence_frame = _rtc.AudioFrame(
-            data=b"\x00" * 3200,
-            sample_rate=16000,
-            num_channels=1,
-            samples_per_channel=1600,
-        )
-        stream.push_frame(silence_frame)
-        # Wait briefly for the WebSocket handshake to land, then tear
-        # down. The aiohttp connection pool keeps DNS + TLS state cached
-        # for the real call's stream that opens a moment later.
-        await asyncio.sleep(0.6)
-        with contextlib.suppress(Exception):
-            await stream.aclose()
-        logger.debug("Soniox STT pre-warm completed")
-    except Exception as exc:
-        logger.debug("Soniox STT pre-warm skipped | %s", exc)
 
 
 from hamsa_tts import TTS as HamsaTTS  # noqa: E402
@@ -484,112 +339,13 @@ def _build_base_session_tts() -> Any:
             language=SESSION_TTS_LANGUAGE,
         )
 
-    # Phase 1.3 — Azure Cognitive Services TTS branch.
-    # Triggered by SESSION_TTS_MODEL starting with "azure" (e.g. "azure",
-    # "azure-neural"). Voice comes from SESSION_TTS_VOICE — for Egyptian
-    # Arabic use ``ar-EG-SalmaNeural`` (female) or ``ar-EG-ShakirNeural``
-    # (male). Both are MOS ~4.3 on Cairo dialect — purpose-built for
-    # ar-EG, which Gemini Aoede is not.
-    if model_name.startswith("azure"):
-        try:
-            from livekit.plugins import azure as _azure_plugin  # noqa: E402
-        except ImportError as exc:
-            raise RuntimeError(
-                "livekit-plugins-azure is not installed; "
-                "`pip install livekit-plugins-azure` to enable Azure TTS"
-            ) from exc
-        speech_key = os.getenv("AZURE_SPEECH_KEY", "").strip()
-        speech_region = os.getenv("AZURE_SPEECH_REGION", "").strip()
-        if not speech_key or not speech_region:
-            logger.warning(
-                "AZURE_SPEECH_KEY/AZURE_SPEECH_REGION not set — Azure TTS will fail",
-            )
-        # Default voice if the user left SESSION_TTS_VOICE on a Gemini
-        # name like ``Aoede``. SalmaNeural is the strongest Egyptian
-        # female voice; flip to ShakirNeural for male.
-        voice = SESSION_TTS_VOICE.strip()
-        if not voice or voice in {"Aoede", "Kore", "Sulafat", "Charon", "Puck"}:
-            voice = "ar-EG-SalmaNeural"
-        language = (SESSION_TTS_LANGUAGE or "ar-EG").strip() or "ar-EG"
-        if "-" not in language and language.lower() == "ar":
-            language = "ar-EG"
-        return _azure_plugin.TTS(
-            voice=voice,
-            language=language,
-            speech_key=speech_key or None,
-            speech_region=speech_region or None,
-        )
-
     if model_name.startswith("gemini"):
-        # Three paths for Gemini TTS, picked by model name:
-        #
-        #   1. **Gemini Live API** (streaming via websocket, target <600ms ttfb)
-        #      Triggered when the model id contains "live" — e.g.
-        #      ``gemini-3.1-flash-live-preview``. We open a Live session,
-        #      send text via ``send_realtime_input`` and stream PCM audio
-        #      chunks through. Per Google's docs the classic speech-
-        #      generation REST endpoint does NOT stream — the Live API is
-        #      the only sub-second TTFB path for 3.1.
-        #
-        #   2. **Google Cloud TTS streaming** (~200-400ms ttfb) — requires a
-        #      service-account JSON via GOOGLE_APPLICATION_CREDENTIALS.
-        #      Supported models: gemini-2.5-flash-tts (GA),
-        #      gemini-2.5-flash-lite-preview-tts, gemini-2.5-pro-tts.
-        #
-        #   3. **Gemini API beta** (non-streaming, ~2.5s ttfb) — uses
-        #      GOOGLE_API_KEY. Models: gemini-2.5-flash-preview-tts,
-        #      gemini-2.5-pro-preview-tts. Last-resort fallback.
-        #
-        # Routing precedence: model name contains "live" → (1); else if
-        # service-account creds are present → (2); else → (3).
-        if "live" in model_name:
-            from gemini_live_tts import GeminiLiveTTS  # noqa: E402
-
-            instructions = os.getenv("SESSION_TTS_INSTRUCTIONS") or None
-            language = (SESSION_TTS_LANGUAGE or "ar-EG").strip() or "ar-EG"
-            if "-" not in language and language.lower() == "ar":
-                language = "ar-EG"
-            if not os.getenv("GOOGLE_API_KEY"):
-                logger.warning("GOOGLE_API_KEY is not set — Gemini Live TTS will fail")
-            return GeminiLiveTTS(
-                model=SESSION_TTS_MODEL,
-                voice_name=SESSION_TTS_VOICE,
-                language=language,
-                instructions=instructions,
-            )
-        cloud_creds_file = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-        use_cloud_tts = bool(cloud_creds_file) and os.path.isfile(cloud_creds_file)
-        if use_cloud_tts:
-            from livekit.plugins.google import TTS as GoogleCloudTTS  # noqa: E402
-
-            instructions = os.getenv("SESSION_TTS_INSTRUCTIONS") or (
-                "Speak in clear Egyptian Arabic (Cairo dialect) with a warm, "
-                "friendly customer-service tone. Don't add or omit any words."
-            )
-            language = (SESSION_TTS_LANGUAGE or "ar-EG").strip() or "ar-EG"
-            if "-" not in language and language.lower() == "ar":
-                language = "ar-EG"
-            return GoogleCloudTTS(
-                model_name=SESSION_TTS_MODEL,
-                voice_name=SESSION_TTS_VOICE,
-                language=language,
-                prompt=instructions,
-                credentials_file=cloud_creds_file,
-                use_streaming=True,
-            )
-
-        if not os.getenv("GOOGLE_API_KEY"):
-            logger.warning("GOOGLE_API_KEY is not set — Gemini TTS will fail")
-        from livekit.plugins.google.beta import GeminiTTS  # noqa: E402
-
-        instructions = os.getenv("SESSION_TTS_INSTRUCTIONS") or (
-            "Speak in clear Egyptian Arabic (Cairo dialect) with a warm, "
-            "friendly customer-service tone. Don't add or omit any words."
-        )
-        return GeminiTTS(
+        from gemini_live_tts import GeminiLiveTTS
+        return GeminiLiveTTS(
             model=SESSION_TTS_MODEL,
             voice_name=SESSION_TTS_VOICE,
-            instructions=instructions,
+            language=SESSION_TTS_LANGUAGE,
+            api_key=os.getenv("GOOGLE_API_KEY", ""),
         )
 
     if not os.getenv("HAMSA_API_KEY"):
@@ -624,168 +380,32 @@ def _build_session_tts() -> Any:
     )
 
 
-def _classify_tts_provider(model_name: str) -> str:
-    name = (model_name or "").strip().lower()
-    if name.startswith("xai"):
-        return "xai"
-    if name.startswith("gemini"):
-        if "live" in name:
-            return "gemini-live"
-        cloud_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-        if cloud_creds and os.path.isfile(cloud_creds):
-            return "gemini-cloud"
-        return "gemini-beta"
-    if name.startswith("azure"):
-        return "azure"
-    if name.startswith("hamsa") or not name:
-        return "hamsa"
-    return name
-
-
 SESSION_TTS = _build_session_tts()
-# Mutable: set per-call by ``_build_session_stt`` so telemetry can stamp
-# every turn with the actual provider that handled it (matters for the
-# Phase 1.2 A/B comparison).
-SESSION_STT_PROVIDER = SESSION_STT_PROVIDER_DEFAULT
-# Phase 1.3 — TTS provider tag for telemetry / dashboard split.
-SESSION_TTS_PROVIDER = _classify_tts_provider(SESSION_TTS_MODEL)
-# Optional Azure A/B branch. When SESSION_TTS_AZURE_AB_PERCENT > 0 we
-# build a second TTS instance up-front so per-call routing is a cheap
-# pointer swap, not a cold-start. Skipped when the primary already is
-# Azure (no swap needed) or when Azure creds aren't configured.
-SESSION_TTS_AZURE_AB_PERCENT = _get_env_int("SESSION_TTS_AZURE_AB_PERCENT", 0, min_value=0)
-SESSION_TTS_AZURE_VOICE = os.getenv("SESSION_TTS_AZURE_VOICE", "ar-EG-SalmaNeural").strip() or "ar-EG-SalmaNeural"
-SESSION_TTS_AZURE: Any = None
-if (
-    SESSION_TTS_AZURE_AB_PERCENT > 0
-    and SESSION_TTS_PROVIDER != "azure"
-    and os.getenv("AZURE_SPEECH_KEY")
-    and os.getenv("AZURE_SPEECH_REGION")
-):
-    try:
-        from livekit.plugins import azure as _azure_plugin  # noqa: E402
-        _azure_lang = (SESSION_TTS_LANGUAGE or "ar-EG").strip() or "ar-EG"
-        if "-" not in _azure_lang and _azure_lang.lower() == "ar":
-            _azure_lang = "ar-EG"
-        _azure_base = _azure_plugin.TTS(
-            voice=SESSION_TTS_AZURE_VOICE,
-            language=_azure_lang,
-            speech_key=os.getenv("AZURE_SPEECH_KEY", "").strip() or None,
-            speech_region=os.getenv("AZURE_SPEECH_REGION", "").strip() or None,
-        )
-        # Honor the same streaming-adapter logic as SESSION_TTS so latency
-        # behavior matches between the A and B legs.
-        if SESSION_TTS_STREAMING_ENABLED:
-            _azure_caps = getattr(_azure_base, "capabilities", None)
-            if _azure_caps and _azure_caps.streaming:
-                SESSION_TTS_AZURE = _azure_base
-            else:
-                SESSION_TTS_AZURE = _ManagedTTSStreamAdapter(
-                    tts=_azure_base, text_pacing=SESSION_TTS_STREAM_PACING,
-                )
-        else:
-            SESSION_TTS_AZURE = _azure_base
-        logger.info(
-            "Azure TTS A/B armed | voice=%s | language=%s | percent=%d",
-            SESSION_TTS_AZURE_VOICE, _azure_lang, SESSION_TTS_AZURE_AB_PERCENT,
-        )
-    except Exception as _azure_exc:
-        logger.warning("Azure TTS A/B init failed | %s", _azure_exc)
-        SESSION_TTS_AZURE = None
-
-
-def pick_session_tts(*, provider_override: str | None = None) -> tuple[Any, str]:
-    """Return ``(tts_instance, provider_label)`` for this call.
-
-    Prefers the explicit override; otherwise rolls the Azure A/B dice.
-    Falls back to the primary TTS when Azure isn't armed.
-    """
-    if provider_override:
-        target = provider_override.strip().lower()
-        if target == "azure" and SESSION_TTS_AZURE is not None:
-            return SESSION_TTS_AZURE, "azure"
-        return SESSION_TTS, SESSION_TTS_PROVIDER
-    if (
-        SESSION_TTS_AZURE is not None
-        and SESSION_TTS_AZURE_AB_PERCENT > 0
-        and _random.randint(1, 100) <= SESSION_TTS_AZURE_AB_PERCENT
-    ):
-        return SESSION_TTS_AZURE, "azure"
-    return SESSION_TTS, SESSION_TTS_PROVIDER
-
-# ── LLM routing ──────────────────────────────────────────────────────────
-# Three providers supported:
-#   1. OpenRouter (model contains "/", e.g. "qwen/qwen3-32b-instruct")
-#      → OpenAI-compatible API at https://openrouter.ai/api/v1, key
-#        OPENROUTER_API_KEY. Lets you swap LLMs (Qwen, Claude, Gemini,
-#        Llama, …) with just an env change — same plugin, same code path.
-#   2. OpenAI direct (model starts with "gpt-" / "o1" / "o3" / "o4")
-#   3. Google Gemini direct (anything else — typically "gemini-2.5-flash")
-_openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-_is_openrouter = "/" in SESSION_LLM_MODEL and bool(_openrouter_key)
-
-# Qwen3 family (qwen3-32b, qwen3-14b, qwen3-235b-a22b, …) defaults to
-# "thinking" mode on OpenRouter — the model emits a hidden chain-of-thought
-# before responding, which adds 5-7 s of TTFT. That's catastrophic for a
-# voice agent. The /no_think directive in the system prompt switches the
-# model into the fast "non-thinking" mode used for general conversation.
-# base_agent.on_enter checks this flag and prepends /no_think to the
-# per-flow state snapshot when set.
-SESSION_LLM_NO_THINK = (
-    _is_openrouter
-    and SESSION_LLM_MODEL.startswith(("qwen/qwen3-", "qwen/qwen3.5", "qwen/qwen3.6"))
-)
-
-if _is_openrouter:
-    # OpenRouter speaks the OpenAI Chat Completions API verbatim, so the
-    # ``openai.LLM`` plugin works against it via ``base_url`` override.
-    # Optional ``HTTP-Referer`` + ``X-Title`` headers help OpenRouter's
-    # analytics; provide a stable identity for the agent.
-    _openrouter_referer = os.getenv("OPENROUTER_HTTP_REFERER", "https://aloegy.local").strip()
-    _openrouter_title = os.getenv("OPENROUTER_X_TITLE", "AloEgy Voice Agent").strip()
+SESSION_STT_PROVIDER = "soniox"
+if SESSION_LLM_MODEL.startswith("gpt-") or SESSION_LLM_MODEL.startswith("o"):
+    # reasoning_effort / verbosity are only supported on reasoning models
+    # (o1, o3, gpt-5 family). Passing them to gpt-4.1 / gpt-4o / etc. is a
+    # 400 invalid_request_error. Gate them by model name.
+    _is_reasoning_model = (
+        SESSION_LLM_MODEL.startswith("o1")
+        or SESSION_LLM_MODEL.startswith("o3")
+        or SESSION_LLM_MODEL.startswith("o4")
+        or SESSION_LLM_MODEL.startswith("gpt-5")
+    )
     _openai_kwargs: dict[str, Any] = {
         "model": SESSION_LLM_MODEL,
-        "api_key": _openrouter_key,
-        "base_url": os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip(),
         "max_completion_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
-        "parallel_tool_calls": False,
-        "temperature": SESSION_LLM_TEMPERATURE,
-        "top_p": SESSION_LLM_TOP_P,
     }
-    # Inject OpenRouter analytics headers if the plugin supports a default-
-    # headers kwarg; some versions accept ``client`` instead. Best-effort.
-    try:
-        SESSION_LLM = openai.LLM(
-            **_openai_kwargs,
-            default_headers={
-                "HTTP-Referer": _openrouter_referer,
-                "X-Title": _openrouter_title,
-            },
-        )
-    except TypeError:
-        SESSION_LLM = openai.LLM(**_openai_kwargs)
-    logger.info(
-        "LLM provider: OpenRouter | model=%s | temp=%.2f | top_p=%.2f",
-        SESSION_LLM_MODEL, SESSION_LLM_TEMPERATURE, SESSION_LLM_TOP_P,
-    )
-elif SESSION_LLM_MODEL.startswith(("gpt-", "o1", "o3", "o4")):
-    # OpenAI direct branch. ``parallel_tool_calls=False`` forces one tool
-    # per turn — protects against the "race the engine" bug where the
-    # model would call ``update_name`` with garbage while ``update_order``
-    # was still resolving. gpt-4o(-mini) is not a reasoning model, so it
-    # uses temperature/top_p (reasoning_effort / verbosity are only valid
-    # for o-series and gpt-5.x and would 400 here).
-    _openai_kwargs = {
-        "model": SESSION_LLM_MODEL,
-        "max_completion_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
-        "parallel_tool_calls": False,
-        "temperature": SESSION_LLM_TEMPERATURE,
-        "top_p": SESSION_LLM_TOP_P,
-    }
+    if _is_reasoning_model:
+        _openai_kwargs["reasoning_effort"] = SESSION_LLM_REASONING_EFFORT
+        _openai_kwargs["verbosity"] = SESSION_LLM_VERBOSITY
+    else:
+        _openai_kwargs["temperature"] = SESSION_LLM_TEMPERATURE
+        _openai_kwargs["top_p"] = SESSION_LLM_TOP_P
     SESSION_LLM = openai.LLM(**_openai_kwargs)
     logger.info(
-        "LLM provider: OpenAI | model=%s | temp=%.2f | top_p=%.2f",
-        SESSION_LLM_MODEL, SESSION_LLM_TEMPERATURE, SESSION_LLM_TOP_P,
+        "LLM provider: OpenAI | model=%s | reasoning=%s",
+        SESSION_LLM_MODEL, _is_reasoning_model,
     )
 else:
     from google.genai import types as _genai_types  # noqa: E402
@@ -804,241 +424,79 @@ else:
         "LLM provider: Google | model=%s | temp=%.2f | top_p=%.2f | thinking_budget=%d",
         SESSION_LLM_MODEL, SESSION_LLM_TEMPERATURE, SESSION_LLM_TOP_P, SESSION_LLM_THINKING_BUDGET,
     )
-
-# Phase 3.2 — LLM fallback. Set SESSION_LLM_FALLBACK_MODEL to a backup
-# model id; when the primary 5xxs or times out, livekit's
-# ``llm.FallbackAdapter`` retries against the secondary. Provider for
-# the fallback is inferred from the model name the same way as primary.
-SESSION_LLM_FALLBACK_MODEL = os.getenv("SESSION_LLM_FALLBACK_MODEL", "").strip()
-SESSION_LLM_FALLBACK_PROVIDER = (os.getenv("SESSION_LLM_FALLBACK_PROVIDER", "") or "").strip().lower()
-
-
-def _build_llm_for_model(model_id: str, *, provider_hint: str = "") -> Any:
-    """Build a single LLM instance for ``model_id``.
-
-    Provider routing mirrors the primary block above (OpenRouter when the
-    id contains ``/`` AND OPENROUTER_API_KEY is set, OpenAI for ``gpt-`` /
-    ``o1`` / ``o3`` / ``o4`` prefixes, Google otherwise) — overridable
-    via ``provider_hint`` for forced routing.
-    """
-    provider = (provider_hint or "").lower()
-    if not provider:
-        if "/" in model_id and os.getenv("OPENROUTER_API_KEY"):
-            provider = "openrouter"
-        elif model_id.startswith(("gpt-", "o1", "o3", "o4")):
-            provider = "openai"
-        else:
-            provider = "google"
-    if provider == "openrouter":
-        kwargs: dict[str, Any] = {
-            "model": model_id,
-            "api_key": os.getenv("OPENROUTER_API_KEY", "").strip(),
-            "base_url": os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip(),
-            "max_completion_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
-            "parallel_tool_calls": False,
-            "temperature": SESSION_LLM_TEMPERATURE,
-            "top_p": SESSION_LLM_TOP_P,
-        }
-        return openai.LLM(**kwargs)
-    if provider == "openai":
-        return openai.LLM(
-            model=model_id,
-            max_completion_tokens=SESSION_LLM_MAX_COMPLETION_TOKENS,
-            parallel_tool_calls=False,
-            temperature=SESSION_LLM_TEMPERATURE,
-            top_p=SESSION_LLM_TOP_P,
-        )
-    # Google
-    from google.genai import types as _genai_types  # noqa: E402
-    _kwargs: dict[str, Any] = {
-        "model": model_id,
-        "temperature": SESSION_LLM_TEMPERATURE,
-        "top_p": SESSION_LLM_TOP_P,
-        "max_output_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
-    }
-    if model_id.startswith("gemini-2.5"):
-        _kwargs["thinking_config"] = _genai_types.ThinkingConfig(
-            thinking_budget=SESSION_LLM_THINKING_BUDGET,
-        )
-    return google.LLM(**_kwargs)
-
-
-if SESSION_LLM_FALLBACK_MODEL:
-    try:
-        _fallback_llm = _build_llm_for_model(
-            SESSION_LLM_FALLBACK_MODEL, provider_hint=SESSION_LLM_FALLBACK_PROVIDER,
-        )
-        from livekit.agents.llm import FallbackAdapter as _LLMFallbackAdapter  # noqa: E402
-        SESSION_LLM = _LLMFallbackAdapter([SESSION_LLM, _fallback_llm])
-        logger.info(
-            "LLM fallback chain armed | primary=%s | fallback=%s",
-            SESSION_LLM_MODEL, SESSION_LLM_FALLBACK_MODEL,
-        )
-    except Exception as _llm_fallback_exc:
-        logger.warning(
-            "LLM fallback init failed | %s — primary only", _llm_fallback_exc,
-        )
-
-# ── Realtime mode (Gemini Live API) ──────────────────────────────────────────
-# When SESSION_REALTIME_ENABLED=1 the session uses a single RealtimeModel
-# instead of the STT → LLM → TTS pipeline. The realtime model owns audio
-# in/out and tool calling. main.py inspects SESSION_REALTIME and, if set,
-# wires it as ``llm=`` to AgentSession (no stt/tts/vad).
-#
-# 3.1 (gemini-3.1-flash-live-preview) has documented limits: ``send_client_content``
-# is restricted to initial history seeding only; ``generate_reply``,
-# ``update_instructions``, ``update_chat_ctx`` are not reliably honoured after
-# the first model turn. base_agent.on_enter is hardened to swallow those
-# failures so multi-flow handoff still works (state flows via tool results).
-SESSION_REALTIME_ENABLED     = _get_env_bool("SESSION_REALTIME_ENABLED", False)
-SESSION_REALTIME_MODEL       = os.getenv("SESSION_REALTIME_MODEL", "gemini-3.1-flash-live-preview").strip()
-SESSION_REALTIME_VOICE       = os.getenv("SESSION_REALTIME_VOICE", "Aoede").strip()
-SESSION_REALTIME_LANGUAGE    = os.getenv("SESSION_REALTIME_LANGUAGE", "ar-EG").strip()
-SESSION_REALTIME_TEMPERATURE = _get_env_float("SESSION_REALTIME_TEMPERATURE", 0.6, min_value=0.0)
-SESSION_REALTIME_INSTRUCTIONS = os.getenv(
-    "SESSION_REALTIME_INSTRUCTIONS",
-    "أنت موظف مصري بترد على تليفون مطعم. اتكلم بس باللهجة المصرية القاهرية، "
-    "زي راجل حقيقي مش بوت. متستخدمش إنجليزي أبداً. "
-    "\n\n"
-    "خطوات المكالمة:\n"
-    "1) سلّم على الزبون باسم المطعم.\n"
-    "2) اسأله عايز تكلَيمي/توصيل/حجز/شكوى — وحوّله للـ flow المناسب باستخدام "
-    "to_takeaway / to_delivery / to_reservation / to_complaint.\n"
-    "3) خد منه الاسم والتليفون والعنوان (لو توصيل) والطلب — واحدة واحدة، "
-    "وكل ما يقولك حاجة استخدم الـ tool المناسب فوراً (update_name، "
-    "update_phone، update_address، update_order).\n"
-    "4) بعد كل tool call، أكِّد للزبون اللي سجلته في جملة قصيرة بالعربي "
-    "(مثلاً: \"تمام، اتسجلت بيتزا مارجريتا، الإجمالي مية وعشرين جنيه — تحب "
-    "تضيف حاجة تانية؟\"). الزبون مش هيسمع تأكيد لو إنت مأكدتش.\n"
-    "5) لما الطلب يكتمل، اقفله بـ submit_order أو submit_reservation.\n\n"
-    "قواعد الكلام:\n"
-    "- جملة واحدة قصيرة، أقصى 15 كلمة.\n"
-    "- ابدأ بكلمة تأكيد صغيرة (تمام/ماشي/حاضر/اه) قبل ما تكمل.\n"
-    "- قول \"يا فندم\" مرة أو اتنين فقط في المكالمة كلها.\n"
-    "- متكررش كلام الزبون حرفي.\n"
-    "- مش فاهم؟ قول \"معلش، ممكن تعيدها؟\" — متخمّنش.\n"
-    "- لو الـ tool واخد وقت قول \"ثانية بس\" بدل ما تسكت.",
-).strip()
-
-SESSION_REALTIME: Any | None = None
-if SESSION_REALTIME_ENABLED:
-    if not os.getenv("GOOGLE_API_KEY"):
-        logger.warning("GOOGLE_API_KEY is not set — Realtime mode will fail")
-    from livekit.plugins.google.realtime import RealtimeModel as _GoogleRealtimeModel  # noqa: E402
-
-    _realtime_kwargs: dict[str, Any] = {
-        "model": SESSION_REALTIME_MODEL,
-        "voice": SESSION_REALTIME_VOICE,
-        "instructions": SESSION_REALTIME_INSTRUCTIONS,
-        "temperature": SESSION_REALTIME_TEMPERATURE,
-    }
-    # ``proactivity`` + ``enable_affective_dialog`` force the plugin onto the
-    # ``v1alpha`` API. ``gemini-3.1-flash-live-preview`` is only served on
-    # ``v1beta`` and v1alpha returns WebSocket close 1011 (internal error)
-    # for it. Only enable these flags for the 2.5 native-audio family which
-    # supports them. Operators can override by setting
-    # SESSION_REALTIME_PROACTIVITY=1 explicitly if Google extends 3.1.
-    _is_25_native = "2.5" in SESSION_REALTIME_MODEL and "native-audio" in SESSION_REALTIME_MODEL
-    _proactivity_default = "1" if _is_25_native else "0"
-    if os.getenv("SESSION_REALTIME_PROACTIVITY", _proactivity_default).strip() == "1":
-        _realtime_kwargs["proactivity"] = True
-        _realtime_kwargs["enable_affective_dialog"] = True
-    if SESSION_REALTIME_LANGUAGE and SESSION_REALTIME_LANGUAGE.lower() not in {"auto", "multi", ""}:
-        _realtime_kwargs["language"] = SESSION_REALTIME_LANGUAGE
-    SESSION_REALTIME = _GoogleRealtimeModel(**_realtime_kwargs)
-    logger.info(
-        "Realtime provider: Google Live | model=%s | voice=%s | language=%s | temp=%.2f",
-        SESSION_REALTIME_MODEL, SESSION_REALTIME_VOICE,
-        SESSION_REALTIME_LANGUAGE or "(auto)", SESSION_REALTIME_TEMPERATURE,
-    )
-
-    # ── Kickoff seed for 3.1 (which cannot proactively speak) ────────────────
-    # Per the Gemini 3.1 Live docs, the model is reactive-only — there is no
-    # ``proactivity`` flag and ``generate_reply`` is rejected. The plugin's
-    # connect path seeds initial chat history with ``turn_complete=False``,
-    # so even a seeded user message doesn't trigger a response. The
-    # workaround is to push one synthetic user turn into the session's
-    # message channel after connect with ``turn_complete=True`` — the model
-    # sees it as the caller's first utterance and responds with a greeting
-    # generated from ``SESSION_REALTIME_INSTRUCTIONS``. Disable with
-    # SESSION_REALTIME_KICKOFF_ENABLED=0 if Google later adds a native
-    # speak-first mode.
-    SESSION_REALTIME_KICKOFF_ENABLED = _get_env_bool(
-        "SESSION_REALTIME_KICKOFF_ENABLED",
-        SESSION_REALTIME_MODEL == "gemini-3.1-flash-live-preview",
-    )
-    SESSION_REALTIME_KICKOFF_TEXT = os.getenv(
-        "SESSION_REALTIME_KICKOFF_TEXT",
-        "ألو، اتصلت دلوقتي. سلّم عليّ وقولي أقدر أطلب منك إيه.",
-    ).strip()
-    if SESSION_REALTIME_KICKOFF_ENABLED and SESSION_REALTIME_KICKOFF_TEXT:
-        from google.genai import types as _gemini_live_types  # noqa: E402
-        _orig_session_factory = SESSION_REALTIME.session
-
-        # Per-call gate: ``RealtimeModel.session()`` is invoked once at call
-        # start AND again on every multi-agent handoff (greeter → delivery,
-        # etc.). The kickoff "ألو، اتصلت دلوقتي" is correct only for the
-        # opening session — replaying it on handoff makes the next agent
-        # think a fresh customer just called and act on stale carried-over
-        # state. The counter is reset by main.py via
-        # ``reset_realtime_kickoff()`` at the start of each call.
-        SESSION_REALTIME._kickoff_count = 0  # type: ignore[attr-defined]
-
-        async def _kickoff_realtime(sess: Any) -> None:
-            # Wait until the WebSocket session is actually live before pushing
-            # the seed turn — otherwise it gets dropped.
-            deadline = time.monotonic() + 8.0
-            while getattr(sess, "_active_session", None) is None:
-                if time.monotonic() > deadline:
-                    logger.warning("realtime kickoff: session never became active")
-                    return
-                if getattr(sess, "_msg_ch", None) is None or sess._msg_ch.closed:
-                    return
-                await asyncio.sleep(0.1)
-            try:
-                kickoff = _gemini_live_types.LiveClientContent(
-                    turns=[
-                        _gemini_live_types.Content(
-                            role="user",
-                            parts=[_gemini_live_types.Part(text=SESSION_REALTIME_KICKOFF_TEXT)],
-                        )
-                    ],
-                    turn_complete=True,
-                )
-                await sess._msg_ch.send(kickoff)
-                logger.info("realtime kickoff: seeded greeting trigger turn")
-            except Exception as exc:
-                logger.warning("realtime kickoff failed | %s", exc)
-
-        def _patched_session_factory() -> Any:
-            sess = _orig_session_factory()
-            count = getattr(SESSION_REALTIME, "_kickoff_count", 0) + 1
-            SESSION_REALTIME._kickoff_count = count  # type: ignore[attr-defined]
-            if count == 1:
-                asyncio.create_task(_kickoff_realtime(sess), name="gemini-realtime-kickoff")
-            else:
-                logger.info(
-                    "realtime kickoff: skipped (handoff session #%d, model has carried context)",
-                    count,
-                )
-            return sess
-
-        def reset_realtime_kickoff() -> None:
-            """Reset the per-call kickoff counter. Called by main.py at the
-            start of each new call so the next session triggers the seed.
-            """
-            SESSION_REALTIME._kickoff_count = 0  # type: ignore[attr-defined]
-
-        SESSION_REALTIME.session = _patched_session_factory  # type: ignore[method-assign]
-        SESSION_REALTIME.reset_kickoff_counter = reset_realtime_kickoff  # type: ignore[attr-defined]
-        logger.info("realtime kickoff enabled | text=%r", SESSION_REALTIME_KICKOFF_TEXT[:60])
-
 SESSION_VAD = silero.VAD.load(
-    min_silence_duration=0.25,
+    min_silence_duration=0.8,
     prefix_padding_duration=0.2,
     activation_threshold=0.5,
 )
 
+
+async def warmup_llm() -> None:
+    """Fire-and-forget minimal completion to prime the OpenAI HTTP/2 pool so the
+    first real user turn doesn't pay the TLS-handshake + cold-connection tax.
+
+    Safe to await (it's cheap, <100ms typically) or schedule as a background
+    task — silently swallows errors because this is a best-effort optimization,
+    not a correctness requirement.
+    """
+    if not SESSION_LLM_MODEL.startswith(("gpt-", "o1", "o3", "o4")):
+        return  # only OpenAI benefits; Gemini/etc. handled by their own SDKs
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return
+    try:
+        from openai import AsyncOpenAI  # type: ignore
+
+        client = AsyncOpenAI(api_key=api_key)
+        try:
+            await client.chat.completions.create(
+                model=SESSION_LLM_MODEL,
+                messages=[{"role": "user", "content": "hi"}],
+                max_completion_tokens=1,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+    except Exception as exc:
+        logger.debug("llm warmup skipped | %s", exc)
+
+
+_BACKEND_WARMED = False
+
+
+async def warmup_backend() -> None:
+    """Open a TCP/keepalive connection to the backend so the first real call
+    doesn't pay the connect handshake. Idempotent — only fires once per worker.
+    """
+    global _BACKEND_WARMED
+    if _BACKEND_WARMED:
+        return
+    _BACKEND_WARMED = True
+    try:
+        client = await _get_http_client()
+        # Cheapest endpoint: HEAD /health (or GET / fallback). We don't care about
+        # the response body, only about establishing the keepalive socket.
+        with contextlib.suppress(Exception):
+            await client.head(
+                f"{BACKEND_BASE}/health",
+                timeout=httpx.Timeout(connect=0.5, read=1.0, write=0.5, pool=1.0),
+            )
+    except Exception as exc:
+        logger.debug("backend warmup skipped | %s", exc)
+
+
+async def warmup_tts() -> None:
+    """Pre-open a Hamsa TTS WebSocket so the first utterance avoids handshake.
+    Best-effort; silent on failure.
+    """
+    try:
+        wrapped = getattr(SESSION_TTS, "_wrapped_tts", SESSION_TTS)
+        warmup_fn = getattr(wrapped, "warmup", None) or getattr(wrapped, "prewarm", None)
+        if warmup_fn is None:
+            return
+        await warmup_fn()
+    except Exception as exc:
+        logger.debug("tts warmup skipped | %s", exc)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared httpx client — delegates to backend.client singleton
@@ -1530,38 +988,13 @@ def _stt_context_terms_for_config(cfg: RestaurantConfig) -> list[str]:
     return result
 
 
-def _build_stt_for_provider(
-    provider: str,
-    cfg: RestaurantConfig,
-    *,
-    client_reference_id: str | None = None,
-) -> Any:
-    """Construct a single STT instance for ``provider``.
+def _build_session_stt(cfg: RestaurantConfig, *, client_reference_id: str | None = None) -> Any:
+    # Soniox uses language hints + context instead of provider-specific keyterms.
+    not_ready_reason = _stt_provider_ready_reason()
+    if not_ready_reason:
+        raise RuntimeError(not_ready_reason)
 
-    Caller must have already validated readiness via
-    ``_stt_provider_ready_reason``.
-    """
     context_terms = _stt_context_terms_for_config(cfg)
-    if provider == "deepgram":
-        keyterms = list(context_terms)[:120] or None
-        kwargs: dict[str, Any] = {
-            "model": SESSION_STT_DEEPGRAM_MODEL,
-            "language": SESSION_STT_DEEPGRAM_LANGUAGE,
-            "interim_results": True,
-            "punctuate": True,
-            "smart_format": True,
-            "no_delay": True,
-            "endpointing_ms": SESSION_STT_DEEPGRAM_ENDPOINTING_MS,
-            "filler_words": True,
-            "api_key": os.getenv("DEEPGRAM_API_KEY", ""),
-        }
-        if keyterms:
-            try:
-                return deepgram.STT(keyterm=keyterms, **kwargs)
-            except TypeError:
-                return deepgram.STT(keyterms=keyterms, **kwargs)
-        return deepgram.STT(**kwargs)
-
     return soniox.STT(
         base_url=SESSION_STT_BASE_URL,
         params=_session_stt_options(
@@ -1569,68 +1002,6 @@ def _build_stt_for_provider(
             client_reference_id=client_reference_id,
         ),
     )
-
-
-# Phase 3.2 — STT fallback chain. When enabled, the call's STT is wrapped
-# in livekit's ``FallbackAdapter`` so a primary outage (Soniox websocket
-# timeout, Deepgram API 5xx) automatically falls through to the secondary
-# provider without dropping the call.
-SESSION_STT_FALLBACK_ENABLED = _get_env_bool("SESSION_STT_FALLBACK_ENABLED", False)
-
-
-def _build_session_stt(
-    cfg: RestaurantConfig,
-    *,
-    client_reference_id: str | None = None,
-    provider_override: str | None = None,
-) -> Any:
-    """Build the STT instance for this call.
-
-    Phase 1.2: support a Deepgram Nova-3 branch alongside Soniox. The
-    chosen provider is recorded on ``SESSION_STT_PROVIDER`` so telemetry
-    + the dashboard can split metrics by provider.
-
-    Phase 3.2: when ``SESSION_STT_FALLBACK_ENABLED=1`` AND the *other*
-    provider is also configured, wrap both in ``FallbackAdapter`` so a
-    transient primary outage doesn't drop the call.
-    """
-    global SESSION_STT_PROVIDER
-    provider = _resolve_stt_provider(override=provider_override)
-    not_ready_reason = _stt_provider_ready_reason(provider)
-    if not_ready_reason:
-        raise RuntimeError(not_ready_reason)
-
-    SESSION_STT_PROVIDER = provider
-    primary = _build_stt_for_provider(provider, cfg, client_reference_id=client_reference_id)
-
-    if not SESSION_STT_FALLBACK_ENABLED:
-        return primary
-
-    secondary_provider = "deepgram" if provider == "soniox" else "soniox"
-    if _stt_provider_ready_reason(secondary_provider) is not None:
-        return primary  # No usable secondary; degrade silently.
-
-    try:
-        secondary = _build_stt_for_provider(
-            secondary_provider, cfg, client_reference_id=client_reference_id,
-        )
-    except Exception as exc:
-        logger.warning(
-            "STT secondary build failed | provider=%s | %s", secondary_provider, exc,
-        )
-        return primary
-
-    try:
-        from livekit.agents.stt import FallbackAdapter as _STTFallbackAdapter  # noqa: E402
-        adapter = _STTFallbackAdapter([primary, secondary])
-        logger.info(
-            "STT fallback chain armed | primary=%s | secondary=%s",
-            provider, secondary_provider,
-        )
-        return adapter
-    except Exception as exc:
-        logger.warning("STT FallbackAdapter init failed — using primary only | %s", exc)
-        return primary
 
 
 def backend_config_available() -> bool:
@@ -2751,7 +2122,6 @@ async def _maybe_submit_pending_complaint_for_flow(ud: "UserData", flow_name: st
         if result is not None:
             ud.complaint_logged = True
             logger.info("call=%s | complaint_submitted", ud.call_id)
-            _emit_event("complaint.submitted", call_id=ud.call_id, flow="complaint", complaint_type=ud.complaint_type)
             return " تم تثبيت الشكوى في النظام."
         logger.warning("call=%s | complaint_submit_skipped_reason=backend_failed", ud.call_id)
         return " الشكوى محفوظة مبدئيًا ولسه محتاجة تثبيت في النظام."
@@ -2795,18 +2165,24 @@ def _spoken_order_items(order: list[str] | None) -> str:
 
 
 def _takeaway_confirmation_prompt(ud: "UserData") -> str:
-    from core.dialogue_engine import takeaway_confirmation_prompt
-    return takeaway_confirmation_prompt(ud)
+    total_part = f"، الإجمالي {money2ar(ud.order_total)} جنيه" if ud.order_validated and ud.order_total > 0 else ""
+    return f"{_spoken_order_items(ud.order)}{total_part} باسم {ud.customer_name}، صح؟"
 
 
 def _delivery_confirmation_prompt(ud: "UserData") -> str:
-    from core.dialogue_engine import delivery_confirmation_prompt
-    return delivery_confirmation_prompt(ud)
+    total = ud.order_total
+    fee = getattr(ud, '_delivery_fee', 0.0)
+    if ud.restaurant and hasattr(ud.restaurant, 'delivery_fee'):
+        fee = float(ud.restaurant.delivery_fee or 0)
+        total += fee
+    total_part = f"، الإجمالي {money2ar(total)} جنيه" if ud.order_validated and total > 0 else ""
+    if fee > 0 and ud.order_validated:
+        total_part += " شامل التوصيل"
+    return f"{_spoken_order_items(ud.order)}{total_part} لعنوان {ud.delivery_address} باسم {ud.customer_name}، صح؟"
 
 
 def _reservation_confirmation_prompt(ud: "UserData") -> str:
-    from core.dialogue_engine import reservation_confirmation_prompt
-    return reservation_confirmation_prompt(ud)
+    return f"حجز {num2ar(ud.guests_count or 0)} ضيوف يوم {ud.reservation_time} باسم {ud.customer_name}، صح؟"
 
 
 def _is_confirmation_prompt(text: str) -> bool:
@@ -2821,23 +2197,116 @@ def _clean_followup_note(note: str) -> str:
     return re.sub(r"\s+", " ", (note or "")).strip(" .")
 
 
+def _next_step_question_for_flow(flow: str, ud: "UserData") -> str:
+    """Returns the next question or confirmation prompt for this flow.
+
+    Walks the flow's required slots in order and returns the question for
+    the first missing one. When every required slot is captured, returns
+    the flow's confirmation prompt so the agent drives to close instead
+    of going silent or re-asking a captured slot (call c4839b4b on
+    2026-04-28: name+phone+order all captured but tool returns hardcoded
+    `_ask_name()` after address tool, agent re-asks the captured name).
+    """
+    if flow == "delivery":
+        if not ud.order:
+            return "تحب تطلب إيه يا فندم؟"
+        if not ud.delivery_address:
+            return _ask_address()
+        if not ud.customer_name:
+            return _ask_name()
+        if not ud.customer_phone:
+            return _ask_phone()
+        return _delivery_confirmation_prompt(ud)
+    if flow == "takeaway":
+        if not ud.order:
+            return "تحب تطلب إيه يا فندم؟"
+        if not ud.customer_name:
+            return _ask_name()
+        if not ud.customer_phone:
+            return _ask_phone()
+        return _takeaway_confirmation_prompt(ud)
+    if flow == "reservation":
+        if not ud.reservation_time:
+            return "عايز تحجز إمتى يا فندم؟"
+        if ud.guests_count is None:
+            return "وكام شخص؟"
+        if not ud.customer_name:
+            return _ask_name()
+        return _reservation_confirmation_prompt(ud)
+    return ""
+
+
+def _handoff_opening(flow: str, ud: "UserData") -> str:
+    """Deterministic context-aware opening line right after a handoff.
+
+    When the customer mentioned details before the routing happened (e.g.
+    "محتاج اطلب بيتزا مارجريتا" — captured by the greeter prefill into
+    ud.order), the new flow's first sentence must acknowledge what was
+    captured and only ask for what's still missing — never re-ask the
+    thing the customer just said. Used by base_agent.on_enter when there
+    is captured state from a prior flow.
+    """
+    name = (ud.customer_name or "").strip()
+    items = _spoken_order_items(ud.order)
+    person = f"يا {name}" if name else "يا فندم"
+
+    if flow == "delivery":
+        if items and not ud.delivery_address:
+            return f"تمام {person}، طلبك {items}. {_ask_address()}"
+        if items and not ud.customer_name:
+            return f"تمام يا فندم، طلبك {items}. {_ask_name()}"
+        if items and not ud.customer_phone:
+            return f"تمام {person}، طلبك {items}. {_ask_phone()}"
+        if items and ud.delivery_address:
+            return f"تمام {person}، الطلب {items} لعنوان {ud.delivery_address}. أأكدلك؟"
+        if not ud.order:
+            # Greeter just routed customer here without capturing menu items.
+            # Soft, non-question opening so we don't re-ask "تحب تطلب إيه؟"
+            # when the greeter's reply already implied that question (call
+            # 59c2ba6f on 2026-04-28: "order" repeated turn 1 → turn 2).
+            return f"تمام {person}، هنوصّلك. اتفضل اطلب اللي تحبه."
+        if not ud.delivery_address:
+            return f"تمام {person}، هنوصّلك. {_ask_address()}"
+        return f"تمام {person}، اتفضل."
+
+    if flow == "takeaway":
+        if items and not ud.customer_name:
+            return f"تمام يا فندم، طلبك {items}. {_ask_name()}"
+        if items and not ud.customer_phone:
+            return f"تمام {person}، طلبك {items}. {_ask_phone()}"
+        if items:
+            return f"تمام {person}، طلبك {items}. أأكدلك؟"
+        if not ud.order:
+            return f"تمام {person}، تحت أمرك. اتفضل اطلب اللي تحبه."
+        if not ud.customer_name:
+            return f"تمام يا فندم، هنخليه استلام. {_ask_name()}"
+        return f"تمام {person}، اتفضل."
+
+    if flow == "reservation":
+        if ud.reservation_time and ud.guests_count:
+            return f"تمام {person}، حجز {ud.guests_count} يوم {ud.reservation_time}. أأكدلك؟"
+        return f"تمام {person}، تحت أمرك للحجز. لكام شخص ومتى؟"
+
+    if flow == "complaint":
+        return f"تحت أمرك {person}، قوللي المشكلة وهسجلها."
+
+    return ""
+
+
 def _followup_after_name(flow: str, ud: "UserData") -> str:
     if flow == "complaint":
         return _ask_phone() if not ud.customer_phone else "تحب حاجة تانية؟"
-    return _next_slot_question_for_flow(flow, ud)
+    return _next_step_question_for_flow(flow, ud)
 
 
 def _followup_after_phone(flow: str, ud: "UserData") -> str:
-    return _next_slot_question_for_flow(flow, ud)
-
-
-def _next_slot_question_for_flow(flow: str, ud: "UserData") -> str:
-    from core.dialogue_engine import DialogueEngine
-    return DialogueEngine().next_question(flow, ud)
+    if flow == "complaint":
+        return "تحب حاجة تانية يا فندم؟"
+    return _next_step_question_for_flow(flow, ud)
 
 
 def _followup_after_special_request(flow: str, ud: "UserData") -> str:
-    return _next_slot_question_for_flow(flow, ud)
+    return _next_step_question_for_flow(flow, ud)
 
 
 def _special_request_followup_message(flow: str, ud: "UserData", *, accepted_item: str | None = None) -> str:
@@ -2872,7 +2341,14 @@ def _complaint_followup_question(ud: "UserData") -> str:
     return "تحب حاجة تانية؟"
 
 
-async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str) -> str:
+async def _apply_phone_update(
+    ud: "UserData",
+    phone_text: str,
+    *,
+    flow_name: str,
+    holder: object | None = None,
+) -> str:
+    from base_agent import _log_tool_outcome
     incoming_digits = _phone_digits_only(phone_text)
     if not incoming_digits:
         ud.phone_capture_failures += 1
@@ -2885,8 +2361,21 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
     combined_valid = validate_phone(combined_digits)
 
     cleaned = direct_valid or combined_valid
+
+    # Idempotency: same phone re-sent (e.g. LLM repeats the tool call). Don't
+    # toggle phone-capture mode or restate; just bridge to the next step.
+    if cleaned and ud.customer_phone == cleaned:
+        logger.info("call=%s | phone idempotent skip", ud.call_id)
+        ud.pending_phone_digits = ""
+        _set_phone_capture_mode(ud, False)
+        followup = _followup_after_phone(flow_name, ud)
+        if followup:
+            return _voice_safe_text(followup, max_chars=200, critical=_is_confirmation_prompt(followup))
+        return ""
+
     if cleaned:
         ud.customer_phone = cleaned
+        ud.confirmed_facts.phone_confirmed = True
         was_chunked = bool(ud.pending_phone_digits)
         ud.pending_phone_digits = ""
         _set_phone_capture_mode(ud, False)
@@ -2898,14 +2387,15 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
             result="success",
             chunked=was_chunked,
         )
+        if holder is not None:
+            await _log_tool_outcome(
+                holder,
+                f"التليفون اتسجل: {cleaned}. متسألش العميل عن تليفونه تاني.",
+            )
         complaint_note = await _maybe_submit_pending_complaint_for_flow(ud, flow_name)
         note = _clean_followup_note(complaint_note)
         followup = _followup_after_phone(flow_name, ud)
-        critical_followup = _is_confirmation_prompt(followup) or _is_flow_ready_for_confirmation(flow_name, ud)
-        with contextlib.suppress(Exception):
-            ud.confirmation_pending = bool(critical_followup)
-            if critical_followup:
-                ud.confirmation_received = False
+        critical_followup = _is_confirmation_prompt(followup)
         phone_confirm = f"تمام، {phone2ar(cleaned)}" if was_chunked else _ack()
         if note:
             return _voice_safe_text(
@@ -2943,14 +2433,35 @@ async def _apply_phone_update(ud: "UserData", phone_text: str, *, flow_name: str
     return _phone_capture_failure_reply(ud)
 
 
-async def _apply_name_update(ud: "UserData", name_text: str, *, flow_name: str) -> str:
+async def _apply_name_update(
+    ud: "UserData",
+    name_text: str,
+    *,
+    flow_name: str,
+    holder: object | None = None,
+) -> str:
+    from base_agent import _log_tool_outcome
     cleaned = _extract_name_candidate(name_text)
     if not cleaned:
         _emit_event("name.capture", call_id=ud.call_id, flow=flow_name, result="failure")
         return _voice_safe_text("الاسم مش واضح، قولي الاسم بس يا فندم.")
+    # Idempotency: same name re-sent (LLM repeats the tool call). Don't
+    # restate "أهلاً يا أحمد" again; just bridge to the next slot.
+    if ud.customer_name == cleaned:
+        logger.info("call=%s | name idempotent skip", ud.call_id)
+        followup = _followup_after_name(flow_name, ud)
+        if followup:
+            return _voice_safe_text(followup, max_chars=200)
+        return ""
     ud.customer_name = cleaned
+    ud.confirmed_facts.name_confirmed = True
     logger.info("call=%s | name=%s", ud.call_id, cleaned)
     _emit_event("name.capture", call_id=ud.call_id, flow=flow_name, result="success")
+    if holder is not None:
+        await _log_tool_outcome(
+            holder,
+            f"الاسم اتسجل: {cleaned}. متسألش العميل عن اسمه تاني — ناديه بيه.",
+        )
     complaint_note = await _maybe_submit_pending_complaint_for_flow(ud, flow_name)
     note = _clean_followup_note(complaint_note)
     _set_phone_capture_mode(ud, _flow_missing_phone(flow_name, ud))
@@ -3119,7 +2630,7 @@ _NEXT_PHONE = [
 ]
 _NEXT_SPECIAL = [
     "في أي طلب خاص في التحضير؟", "حابب تضيف أي ملاحظة على الطلب؟",
-    "عندك أي طلب خاص؟", "في أي ملاحظة معينة في التحضير؟",
+    "عندك أي طلب خاص؟", "في حاجة معينة في التحضير؟",
 ]
 _NEXT_ADDRESS = [
     "عنوانك إيه يا فندم؟", "العنوان إيه يا فندم؟", "ممكن العنوان؟",
@@ -3297,242 +2808,44 @@ def _extract_zone_from_address(address: str, delivery_zones: list[str] | None) -
     return parts[-1].strip() if len(parts) > 1 else address.strip()
 
 
-def _quantity_token_to_int(token: str | None) -> int | None:
-    normalized = _normalize_ar(token or "")
-    if len(normalized) > 1 and normalized.startswith("و"):
-        normalized = normalized[1:]
-    if not normalized:
-        return None
-    if re.fullmatch(r"\d{1,2}", normalized):
-        value = int(normalized)
-        return value if 1 <= value <= 20 else None
-    from nlp.arabic import SPOKEN_DIGIT_MAP
-    mapped = SPOKEN_DIGIT_MAP.get(normalized)
-    if mapped and mapped.isdigit():
-        value = int(mapped)
-        return value if 1 <= value <= 20 else None
-    return None
-
-
-def _menu_token_matches_turn_token(turn_token: str, menu_token: str, *, first_menu_token: bool) -> bool:
-    if turn_token == menu_token:
-        return True
-    return first_menu_token and len(turn_token) > 1 and turn_token.startswith("و") and turn_token[1:] == menu_token
-
-
-def _quantity_before_menu_item(tokens: list[str], item_start: int) -> int | None:
-    if item_start <= 0:
-        return None
-    raw_token = tokens[item_start - 1]
-    qty = _quantity_token_to_int(raw_token)
-    if qty is None:
-        return None
-    if raw_token.startswith("و"):
-        return qty
-    if item_start == 1:
-        return qty
-    previous = tokens[item_start - 2]
-    if previous in {"عايز", "عاوزه", "عاوز", "عاوزة", "اطلب", "أطلب", "طلب", "هات", "خد", "ضيف", "زود"}:
-        return qty
-    return None
-
-
-def _extract_menu_order_items_from_text(text: str, cfg: RestaurantConfig) -> list[str]:
-    """Extract obvious menu-item mentions from a user turn as a deterministic fallback."""
-    normalized = _normalize_ar(text)
-    if not normalized:
-        return []
-    tokens = normalized.split()
-    extracted: list[tuple[int, str]] = []
-    seen: set[str] = set()
-
-    for item in cfg.menu_items or []:
-        if not item.get("available", True):
-            continue
-        name = str(item.get("name", "")).strip()
-        menu_tokens = _normalize_ar(name).split()
-        if not name or not menu_tokens:
-            continue
-
-        for idx in range(0, len(tokens) - len(menu_tokens) + 1):
-            window = tokens[idx: idx + len(menu_tokens)]
-            if not all(
-                _menu_token_matches_turn_token(turn_token, menu_token, first_menu_token=pos == 0)
-                for pos, (turn_token, menu_token) in enumerate(zip(window, menu_tokens))
-            ):
-                continue
-            key = _normalize_ar(name)
-            if key in seen:
-                break
-            before = _quantity_before_menu_item(tokens, idx)
-            after_index = idx + len(menu_tokens)
-            after = _quantity_token_to_int(tokens[after_index] if after_index < len(tokens) else None)
-            qty = before or after or 1
-            extracted.append((idx, _format_order_item(name, qty)))
-            seen.add(key)
-            break
-
-    return [item for _, item in sorted(extracted, key=lambda pair: pair[0])]
-
-
-def _turn_has_add_order_intent(text: str) -> bool:
-    """Detect "add to existing order" intents on the deterministic path.
-
-    Consults the Phase 2 mutation parser first so cues like
-    "ضيفلي / زود / كمان / هاتلي كمان" are recognised consistently with
-    the engine's mutation classifier. Falls back to the legacy hint
-    sets so historical phrasings keep working.
-    """
-    if not (text or "").strip():
-        return False
-    from core.order_mutations import parse_mutation
-
-    intent = parse_mutation(text)
-    if intent.kind == "replace":
-        return False
-    if intent.kind in {"add", "increase"}:
-        return True
-
-    normalized = _normalize_ar(text)
-    if not normalized:
-        return False
-    if _contains_normalized_phrase(normalized, _ORDER_REPLACE_HINTS):
-        return False
-    return (
-        _contains_normalized_phrase(normalized, _ORDER_ADD_HINTS)
-        or _contains_normalized_phrase(normalized, _ORDER_HINTS)
-    )
-
-
-_PHASE2_EXTRACTOR_DISABLED = os.getenv("PHASE2_ORDER_EXTRACTOR", "1") == "0"
-_MENU_INDEX_CACHE: dict[int, "MenuIndex"] = {}
-
-
-def _menu_index_for(cfg: RestaurantConfig) -> "MenuIndex":
-    """Return a cached MenuIndex for this config; rebuild on identity change."""
-    from core.menu_index import MenuIndex
-    key = id(cfg)
-    cached = _MENU_INDEX_CACHE.get(key)
-    if cached is not None and cached.config_version == _menu_index_version(cfg):
-        return cached
-    index = MenuIndex.build(
-        cfg.menu_items or [],
-        config_version=_menu_index_version(cfg),
-    )
-    _MENU_INDEX_CACHE[key] = index
-    return index
-
-
-def _menu_index_version(cfg: RestaurantConfig) -> str:
-    """Cheap fingerprint over the menu so cache invalidates on edits."""
-    items = cfg.menu_items or []
-    parts = [
-        f"{item.get('name','')}:{item.get('price','')}:{int(bool(item.get('available', True)))}"
-        for item in items
-    ]
-    return "|".join(parts)
-
-
-def _phase2_extract_items(text: str, cfg: RestaurantConfig) -> list[str]:
-    """Run the Phase 2 deterministic extractor over a turn.
-
-    Returns formatted items (e.g. ``["برجر كبير × 2", "كولا"]``) when the
-    extraction is confident and unambiguous. Otherwise returns an empty
-    list so the caller can fall back to the legacy path or the LLM.
-    """
-    if _PHASE2_EXTRACTOR_DISABLED:
-        return []
-    from core.extractors.order_extractor import extract_order
-    index = _menu_index_for(cfg)
-    if index.is_empty():
-        return []
-    extraction = extract_order(text, index)
-    if extraction.is_empty() or extraction.has_ambiguity():
-        return []
-    return extraction.formatted_items()
-
-
-def _should_capture_order_turn(flow: str, ud: UserData, text: str, cfg: RestaurantConfig) -> list[str]:
-    if flow not in {"takeaway", "delivery"} or ud.pending_upsell_item:
-        return []
-
-    # Prefer the LLM understanding (validated against the menu); fall
-    # back to the deterministic extractor when no provider is configured
-    # or the LLM call failed for this turn.
-    items: list[str] | None = None
-    try:
-        from core.understanding import get_or_extract_for_turn
-        from core.understanding_bridge import (
-            mutation_from_understanding,
-            order_items_from_understanding,
-        )
-        understanding = get_or_extract_for_turn(ud, text, flow)
-        items = order_items_from_understanding(understanding, cfg)
-        mutation = mutation_from_understanding(understanding)
-    except Exception:
-        items = None
-        mutation = None
-
-    if items is None:
-        items = _phase2_extract_items(text, cfg)
-        if not items:
-            items = _extract_menu_order_items_from_text(text, cfg)
-        mutation = None
-
-    if not items:
-        return []
-    if not ud.order:
-        return items
-    if mutation in {"add", "increase"} or _turn_has_add_order_intent(text):
-        return items
-    if mutation == "replace":
-        return items
-    return []
-
-
-def _append_order_followup_if_ready(flow: str, ud: UserData, message: str) -> str:
-    if not ud.order or ud.pending_upsell_item:
-        return message
-    if "؟" in message or "?" in message:
-        return message
-    followup = _next_slot_question_for_flow(flow, ud)
-    if not followup:
-        return message
-    return _voice_safe_text(_join_user_phrases(message, followup), max_chars=220)
-
-
-def _looks_like_delivery_address_turn(text: str, cfg: RestaurantConfig) -> bool:
-    """Decide whether a turn should be intercepted as a delivery address.
-
-    Tries the Phase 3 ``extract_address`` first for cases the legacy
-    substring scan misses (zones with the ``ال`` definite article,
-    landmark words wrapped in punctuation, etc.). Falls back to the
-    legacy heuristic when the new extractor is uncertain.
-    """
-    if not (text or "").strip():
-        return False
-    from core.extractors.address_extractor import (
-        MEDIUM_CONFIDENCE,
-        extract_address,
-    )
-    capture = extract_address(text, delivery_zones=tuple(cfg.delivery_zones or ()))
-    if capture.value is not None and capture.confidence >= MEDIUM_CONFIDENCE:
-        return True
-
-    normalized = _normalize_ar(text)
-    if not normalized or _is_phone_like_text(text):
-        return False
-    if _extract_name_candidate(text) and not any(_normalize_ar(w) in normalized for w in ADDRESS_DETAIL_WORDS):
-        return False
-    if any(_normalize_ar(word) in normalized for word in ADDRESS_DETAIL_WORDS):
-        return True
-    if cfg.delivery_zones:
-        return any(_normalize_ar(zone) in normalized for zone in cfg.delivery_zones)
-    return False
-
-
-_DELIVERY_HINTS = {"توصيل", "دليفري", "الدليفري", "وصله", "يوصل", "delivery"}
-_TAKEAWAY_HINTS = {"تيكاواي", "takeaway", "استلام", "اجي استلمه", "آجي استلمه", "هاخده", "اخده من المطعم"}
+_DELIVERY_HINTS = {
+    "توصيل", "تتوصل", "تتوصلي", "دليفري", "الدليفري", "delivery",
+    "وصله", "وصلهولي", "وصلولي", "يوصل", "ابعت", "ابعتلي", "ابعتها",
+    # explicit "make it delivery" patterns
+    "خليه توصيل", "خليها توصيل", "بدل ده توصيل", "بدل تيكاواي",
+    "بدل الاستلام", "هتوصلوهولي", "هتوصلولي",
+}
+_TAKEAWAY_HINTS = {
+    "تيكاواي", "تيك اواي", "تيك أواي", "takeaway",
+    # nouns
+    "استلام", "الاستلام", "اخد من المطعم", "اخده من المطعم",
+    "اخد من عندكم", "اخده من عندكم", "اخدها من المطعم",
+    # verb forms — Egyptian future/intention
+    "استلم", "أستلم", "هستلم", "بستلم",
+    "هاخد", "هاخده", "هاخدها", "هاخد بنفسي",
+    "اخد بنفسي", "آخده بنفسي", "اخده بنفسي",
+    # "I'll come / pass by" patterns
+    "اجي استلمه", "آجي استلمه", "اجي اخده", "آجي اخده", "اجي اخدها",
+    "هاجي اخد", "هاجي اخده", "هاجي استلم", "هاجي بنفسي", "هاجي اخدها",
+    "اروح اخد", "اروح اخده", "اروح استلم",
+    "هعدي", "هعدّي", "هعدي اخد", "هعدي استلم", "اعدي", "آعدي",
+    "ممكن اجي", "ممكن آجي", "ممكن اعدي", "ممكن آعدي",
+    "حد هييجي", "حد هاييجي", "حد ييجي ياخد", "هاييجي حد",
+    # explicit "make it takeaway" patterns
+    "خليه استلام", "خليها استلام", "خليه تيكاواي", "خليها تيكاواي",
+    "بدل التوصيل", "بدل الدليفري", "بدل ما يوصل",
+}
+# Negation phrases that, on their own, indicate the user is rejecting the
+# current flow. Paired with a positive hint they're a strong switch signal;
+# alone they're a softer "ask again" signal.
+_DELIVERY_NEGATIONS = {
+    "مش توصيل", "مش دليفري", "مش delivery", "بدون توصيل", "من غير توصيل",
+    "مش عايز توصيل", "مش عاوز توصيل", "ملوش لازمة توصيل",
+}
+_TAKEAWAY_NEGATIONS = {
+    "مش هاجي", "مش هاخد", "مش استلام", "مش takeaway", "مش تيك اواي",
+    "مش هعدي", "مش هاجي بنفسي", "مش هاخدها بنفسي",
+}
 _ORDER_HINTS = {"اوردر", "أوردر", "طلب", "اطلب", "عايز اطلب", "أطلب"}
 _MENU_HINTS = {
     "المنيو", "المتاح", "ايه المتاح", "إيه المتاح", "المتاح ايه", "إيه عندك",
@@ -3557,6 +2870,18 @@ _TOTAL_HINTS = {
     "الحساب", "الإجمالي", "الاجمالي", "التوتال", "توتال", "التوتل",
     "التوتر", "التتر", "total", "بكام كله", "كام كله", "المجموع", "السعر كله",
 }
+_ORDER_REVIEW_HINTS = {
+    # Phrasings customers use to ask the agent to read back the order.
+    # Captured from real calls (845e693e on 2026-04-28: "ممكن تراجعي
+    # معايا الطلب؟" asked 3× and never answered).
+    "راجعي معايا الطلب", "تراجعي معايا الطلب", "تراجع معايا الطلب",
+    "راجعي معايا الاوردر", "تراجعي معايا الاوردر", "راجع الطلب",
+    "تراجع الطلب", "راجعي الطلب", "تراجعي الطلب",
+    "ايه الطلب", "ايه الاوردر", "إيه الطلب", "إيه الاوردر",
+    "الاوردر فيه ايه", "الطلب فيه ايه", "الاوردر فيه إيه",
+    "الطلب فيه إيه", "هو ايه الطلب", "هو إيه الطلب",
+    "هو ايه الاوردر", "هو إيه الاوردر", "اقريلي الطلب", "اقرالي الطلب",
+}
 _GREETING_HINTS = {
     "اهلا", "اهلا بيك", "أهلا", "السلام عليكم", "مساء الخير", "صباح الخير",
     "ازيك", "عامل ايه", "هاي", "hello", "hi",
@@ -3577,16 +2902,145 @@ def _chat_message_text(message: llm.ChatMessage | None) -> str:
 
 _FLOW_STYLE_PROMPT_MARKER = "[FLOW_STYLE_PROMPT]"
 _FLOW_CONTEXT_PROMPT_MARKER = "[FLOW_CONTEXT_PROMPT]"
+_FLOW_STATE_PROMPT_MARKER = "[FLOW_STATE_PROMPT]"
+_HANDOFF_BRIEFING_MARKER = "[HANDOFF_BRIEFING]"
 _TURN_GUARD_PROMPT_MARKER = "[TURN_GUARD_PROMPT]"
 _TURN_CAP_PROMPT_MARKER = "[TURN_CAP_PROMPT]"
-# Marker for the per-flow state snapshot system message added in
-# ``base_agent.on_enter``. Carries ``ud.summarize()`` and gets refreshed at the
-# top of every ``on_user_turn_completed`` so the LLM always sees the current
-# captured state — not the frozen snapshot from when the agent first entered.
-# Without the refresh, GPT-4o was reading "customer_phone: unknown" from the
-# stale system block while chat history showed the phone was already captured,
-# producing the "بينسي هو سأل علي إيه" re-asking bug.
-_FLOW_STATE_PROMPT_MARKER = "[FLOW_STATE_PROMPT]"
+
+
+def _captured_fact_lines(ud: "UserData") -> list[str]:
+    """Plain-language list of every fact already captured for this call.
+
+    Used by both the handoff briefing (on flow entry) and the per-turn state
+    prompt. Each line uses explicit "= VALUE" form — the LLM follows
+    declarative key/value markers more reliably than parenthetical guards.
+    """
+    lines: list[str] = []
+    if ud.customer_name:
+        lines.append(f"- الاسم = {ud.customer_name}")
+    if ud.customer_phone:
+        lines.append(f"- التليفون = {ud.customer_phone}")
+    if ud.order:
+        items = "، ".join(ud.order)
+        lines.append(f"- الطلب = {items}")
+    if ud.special_requests:
+        lines.append(f"- ملاحظة على التحضير = {ud.special_requests}")
+    if ud.delivery_address:
+        addr = ud.delivery_address
+        if ud.delivery_zone:
+            addr = f"{addr} ({ud.delivery_zone})"
+        lines.append(f"- العنوان = {addr}")
+    if ud.delivery_landmark:
+        lines.append(f"- علامة مميزة = {ud.delivery_landmark}")
+    if ud.reservation_time:
+        lines.append(f"- وقت الحجز = {ud.reservation_time}")
+    if ud.guests_count is not None:
+        lines.append(f"- عدد الضيوف = {ud.guests_count}")
+    if ud.selected_branch:
+        lines.append(f"- الفرع = {ud.selected_branch}")
+    if ud.complaint_text:
+        lines.append(f"- الشكوى = {ud.complaint_text}")
+    if ud.complaint_type:
+        lines.append(f"- نوع الشكوى = {ud.complaint_type}")
+    return lines
+
+
+def _build_handoff_briefing(ud: "UserData") -> str:
+    """System message for flow entry — what was captured before this flow."""
+    lines = _captured_fact_lines(ud)
+    if not lines:
+        return ""
+    header = (
+        "🧠 ذاكرة المكالمة — دي المعلومات اللي اتسجلت للعميل لحد دلوقتي:"
+    )
+    footer = (
+        "عشان العميل ما يزهقش، كمل من الخطوة اللي بعد المعلومات دي وماتسألوش عليها تاني."
+    )
+    return f"{_HANDOFF_BRIEFING_MARKER}\n{header}\n" + "\n".join(lines) + f"\n{footer}"
+
+
+_REPETITION_ALERT_LABELS = {
+    "name": "الاسم",
+    "phone": "التليفون",
+    "address": "العنوان",
+    "order": "الطلب",
+    "time": "ميعاد الحجز",
+    "guests": "عدد الضيوف",
+}
+
+
+def _repetition_slot_still_captured(category: str, ud: "UserData") -> bool:
+    """Is the slot the LLM re-asked actually filled?
+
+    Used by the conversation_item_added listener (main.py) to decide whether
+    to escalate from a soft prompt-level alert to a hard deterministic
+    response on the next turn. We only escalate when the data really is
+    captured — otherwise the LLM was right to ask.
+    """
+    if category == "name":
+        return bool(ud.customer_name)
+    if category == "phone":
+        return bool(ud.customer_phone)
+    if category == "address":
+        return bool(ud.delivery_address)
+    if category == "order":
+        return bool(ud.order)
+    if category == "time":
+        return bool(ud.reservation_time)
+    if category == "guests":
+        return ud.guests_count is not None
+    return False
+
+
+def _build_per_turn_state_prompt(flow: str, ud: "UserData") -> str:
+    """System message refreshed every turn — captured facts + next step."""
+    lines = _captured_fact_lines(ud)
+    next_hint = _next_step_hint_for_flow(flow, ud)
+    if lines:
+        captured_section = (
+            "🧠 ذاكرة المكالمة — البنود دي العميل قالها بالفعل في المكالمة دي:\n"
+            + "\n".join(lines)
+            + "\nاستخدم المعلومات دي مباشرة، ومتسألش العميل عنها تاني عشان ميحسش إنك بتعيد الكلام."
+        )
+    else:
+        captured_section = "لسه مفيش حاجة اتسجلت."
+
+    tool_section = (
+        "\n🛠️ متى تنادي tool:\n"
+        "- لو العميل طلب أكل → update_order.\n"
+        "- لو قال اسمه → update_name. لو قال موبايله → update_phone.\n"
+        "- لو قال عنوانه → update_delivery_address.\n"
+        "- لازم الـ tool ينادى عشان البيانات تتحفظ."
+    )
+
+    return f"{_FLOW_STATE_PROMPT_MARKER}\n{captured_section}{tool_section}\n{next_hint}\n\n🚨 تحذير هام: إياك أن تتخيل أو تكتب رد العميل أبداً. اكتب فقط ما ستقوله أنت وتوقف."
+
+
+def _unanswered_asked_categories(ud: "UserData") -> list[str]:
+    """Return question categories that have been asked but aren't captured yet.
+
+    Pulled from the per-call repetition tracker. A category counts as
+    "unanswered" when it appears in asked_questions but the matching
+    UserData slot is still empty. Order matters (asked-once first) so
+    the prompt lists them in chronological order.
+    """
+    if not ud.call_id:
+        return []
+    try:
+        from observability.repetition_detector import get_tracker as _get_tracker
+        tracker = _get_tracker(ud.call_id)
+    except Exception:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for category, _turn in getattr(tracker, "asked_questions", []):
+        if category in seen:
+            continue
+        seen.add(category)
+        if _repetition_slot_still_captured(category, ud):
+            continue
+        out.append(category)
+    return out
 
 _NON_ORDER_QUANTITY_TOKENS = frozenset(
     {
@@ -3788,6 +3242,37 @@ def _is_total_question(text: str) -> bool:
     return any(_normalize_ar(hint) in normalized for hint in _TOTAL_HINTS)
 
 
+def _is_order_review_question(text: str) -> bool:
+    """Customer is asking us to read back what's in the order."""
+    normalized = _normalize_ar(text)
+    if not normalized:
+        return False
+    return any(_normalize_ar(hint) in normalized for hint in _ORDER_REVIEW_HINTS)
+
+
+def _order_review_user_message(flow: str, ud: "UserData", cfg: RestaurantConfig) -> str:
+    """Natural-sounding read-back of captured order items + total.
+
+    Used when the customer explicitly asks "review the order with me" or
+    "what's in my order". Reads from ud.order so there's no hallucination —
+    just the data we already have.
+    """
+    if not ud.order:
+        return "لسه مفيش طلب اتسجل يا فندم. تحب تطلب إيه؟"
+    items_text = "، ".join(ud.order)
+    parts = [f"الطلب فيه: {items_text}"]
+    if ud.order_validated and ud.order_total > 0:
+        if flow == "delivery":
+            total = ud.order_total + max(0.0, float(cfg.delivery_fee or 0.0))
+            if cfg.delivery_fee > 0:
+                parts.append(f"الإجمالي {money2ar(total)} جنيه شامل التوصيل")
+            else:
+                parts.append(f"الإجمالي {money2ar(total)} جنيه")
+        else:
+            parts.append(f"الإجمالي {money2ar(ud.order_total)} جنيه")
+    return ". ".join(parts) + "."
+
+
 def _order_total_user_message(flow: str, ud: "UserData", cfg: RestaurantConfig) -> str:
     if not ud.order:
         return "قولّي طلبك الأول يا فندم."
@@ -3801,56 +3286,7 @@ def _order_total_user_message(flow: str, ud: "UserData", cfg: RestaurantConfig) 
     return f"إجمالي الطلب {money2ar(ud.order_total)} جنيه."
 
 
-def _guess_request_intent(text: str, cfg: RestaurantConfig, ud: UserData | None = None) -> str:
-    """Map a user turn to a greeter routing decision.
-
-    Order of precedence:
-    1. LLM-driven ``TurnUnderstanding`` (when available and the
-       confidence tier is medium+).
-    2. Phase 3 ``intent_extractor`` cue list (offline fallback).
-    3. Legacy hint sets in this module.
-    """
-    if not (text or "").strip():
-        return "unknown"
-
-    # Try the LLM understanding first.
-    if ud is not None:
-        try:
-            from core.understanding import get_or_extract_for_turn
-            from core.understanding_bridge import intent_from_understanding
-            understanding = get_or_extract_for_turn(ud, text, "greeter")
-            mapped = intent_from_understanding(understanding)
-            if mapped is not None and mapped != "unknown":
-                if mapped == "delivery":
-                    if cfg.degraded_mode:
-                        return "delivery_degraded"
-                    return "delivery" if cfg.delivery_enabled else "delivery_unavailable"
-                if mapped in {"takeaway", "reservation", "complaint", "menu"}:
-                    return mapped
-        except Exception:
-            pass
-
-    from core.extractors.intent_extractor import detect_intent
-
-    detection = detect_intent(text)
-    kind = detection.kind
-    if kind == "complaint":
-        return "complaint"
-    if kind == "reservation":
-        return "reservation"
-    if kind in {"menu_question", "delivery_zone_question"}:
-        return "menu"
-    if kind == "delivery":
-        if cfg.degraded_mode:
-            return "delivery_degraded"
-        return "delivery" if cfg.delivery_enabled else "delivery_unavailable"
-    if kind == "takeaway":
-        return "takeaway"
-
-    # Phase-3 detector returned greeting / post_completion / total /
-    # unknown. Fall through to the legacy hint sets so we keep covering
-    # bare "اوردر" / "طلب" → ``order_ambiguous`` and any phrasing not in
-    # the new cue lists.
+def _guess_request_intent(text: str, cfg: RestaurantConfig) -> str:
     normalized = _normalize_ar(text)
     if not normalized:
         return "unknown"
@@ -3871,6 +3307,82 @@ def _guess_request_intent(text: str, cfg: RestaurantConfig, ud: UserData | None 
     return "unknown"
 
 
+def _flow_switch_ack_message(from_flow: str, to_flow: str, ud: "UserData") -> str:
+    """One-shot opening line for the new flow after a switch intercept.
+
+    Kept declarative (no question marks) so the ack doesn't immediately
+    re-ask whatever the previous flow just asked — that was the symptom
+    in call 7881a3e1 (2026-04-28): user switched delivery→takeaway and
+    the takeaway ack ended with "تحب تطلب إيه؟" — verbatim same question
+    the delivery flow had just asked. The repetition_detector flagged
+    "order" multiple times but the LLM already had the redundancy baked in.
+
+    If the user has already given us state (order/address), advance to
+    the next concrete missing slot instead of restating progress.
+    """
+    if to_flow == "takeaway":
+        if ud.order:
+            return "تمام يا فندم، الطلب اتسجل وتعدّي تاخده. اتفضل."
+        return "تمام يا فندم، هنخليه استلام من المطعم. اتفضل."
+    if to_flow == "delivery":
+        if ud.order:
+            if not ud.delivery_address:
+                return "تمام يا فندم، هنوصلك الطلب. " + _ask_address()
+            return "تمام يا فندم، هنوصلك الطلب."
+        return "تمام يا فندم، هنخليه توصيل لحضرتك. اتفضل."
+    if to_flow == "reservation":
+        return "تمام يا فندم، تحت أمرك للحجز."
+    if to_flow == "complaint":
+        return "تحت أمرك يا فندم، قوللي المشكلة وهسجلها."
+    return ""
+
+
+def _flow_switch_target(flow: str, user_text: str, cfg: RestaurantConfig) -> str | None:
+    """Detect explicit mid-call flow-switch requests.
+
+    Returns the target flow name when the user is clearly redirecting (e.g.
+    "I'll come pick it up" while in Delivery) or None when nothing should
+    change. Conservative on purpose: only fires on positive hints, or on
+    a negation paired with a positive hint for the opposite flow. The LLM
+    has been observed in production to ignore "switch" instructions in
+    its system prompt (call 94587583-5ff7-4a, 2026-04-28: user asked to
+    switch to takeaway 3 times before hanging up). Pre-LLM detection
+    guarantees these requests are honored.
+    """
+    if not user_text or not flow:
+        return None
+    normalized = _normalize_ar(user_text)
+    if not normalized:
+        return None
+
+    # Escalation paths take priority over order-flow swaps.
+    if flow != "complaint" and _contains_any_hint(normalized, _COMPLAINT_HINTS):
+        return "complaint"
+    if flow != "reservation" and _contains_any_hint(normalized, _RESERVATION_HINTS):
+        return "reservation"
+
+    has_takeaway_hint = _contains_any_hint(normalized, _TAKEAWAY_HINTS)
+    has_delivery_hint = _contains_any_hint(normalized, _DELIVERY_HINTS)
+    delivery_negated = _contains_any_hint(normalized, _DELIVERY_NEGATIONS)
+    takeaway_negated = _contains_any_hint(normalized, _TAKEAWAY_NEGATIONS)
+
+    if flow == "delivery":
+        # Strong signal: user explicitly asks to pick up themselves.
+        if has_takeaway_hint:
+            return "takeaway"
+        # User negates delivery without yet naming an alternative — only
+        # honor when delivery isn't strictly required (e.g. takeaway exists).
+        if delivery_negated and not has_delivery_hint:
+            return "takeaway"
+    elif flow == "takeaway":
+        if has_delivery_hint and not delivery_negated and cfg.delivery_enabled:
+            return "delivery"
+        if takeaway_negated and not has_takeaway_hint and cfg.delivery_enabled:
+            return "delivery"
+
+    return None
+
+
 @dataclass
 class GreeterTurnDecision:
     action: Literal["say", "route"] = "say"
@@ -3884,9 +3396,8 @@ def _greeter_turn_decision(
     cfg: RestaurantConfig,
     *,
     has_delivery_agent: bool,
-    ud: UserData | None = None,
 ) -> GreeterTurnDecision:
-    intent = _guess_request_intent(text, cfg, ud)
+    intent = _guess_request_intent(text, cfg)
     if intent == "menu":
         message = cfg.menu_text() if _available_menu_items(cfg) else _menu_unavailable_user_message(cfg)
         return GreeterTurnDecision(message=message, reason="menu")
@@ -4158,6 +3669,68 @@ def _resolve_menu_item(item_name: str, menu_items: list[dict]) -> dict | None:
     return best_match[1] if best_match else None
 
 
+def _extract_menu_items_from_text(text: str, menu_items: list[dict]) -> list[str]:
+    """Scan free-form user text for mentioned menu items.
+
+    Returns canonical menu item names that appear in the text (normalized
+    substring match against available menu items, longest-first to prefer
+    "بيتزا مارجريتا" over "بيتزا"). Used by the greeter prefill so when
+    the customer opens with "محتاج اطلب بيتزا مارجريتا", the order is
+    captured before the handoff to delivery/takeaway — so the next flow
+    doesn't re-ask "تحب تطلب إيه؟" (call 32fd356b on 2026-04-28).
+    """
+    if not text or not menu_items:
+        return []
+    normalized_text = _normalize_ar(text)
+    if not normalized_text:
+        return []
+    candidates = sorted(
+        (item for item in menu_items if item.get("available", True)),
+        key=lambda it: len(_normalize_ar(it.get("name", "") or "")),
+        reverse=True,
+    )
+    # Mark consumed character ranges so a longer item ("بيتزا مارجريتا")
+    # masks a shorter one ("بيتزا") that overlaps the same span.
+    consumed = bytearray(len(normalized_text))
+    matched: list[str] = []
+    for item in candidates:
+        canonical = str(item.get("name", "") or "").strip()
+        if not canonical:
+            continue
+        norm_name = _normalize_ar(canonical)
+        # Skip very short menu names (< 3 chars) to avoid false positives
+        # on common particles.
+        if not norm_name or len(norm_name) < 3:
+            continue
+        # Word-boundary-ish search: the item must be preceded by start /
+        # whitespace / "و" (and-) / common punctuation, and followed by
+        # end / whitespace / common punctuation. This catches "بيبسي"
+        # inside "وبيبسي" without false-matching menu items as suffixes
+        # of unrelated words.
+        prefix_chars = {" ", "و", "،", ",", ".", "؟", "!", "ال"}
+        suffix_chars = {" ", "،", ",", ".", "؟", "!"}
+        cursor = 0
+        while True:
+            idx = normalized_text.find(norm_name, cursor)
+            if idx < 0:
+                break
+            cursor = idx + 1
+            end = idx + len(norm_name)
+            before_ok = idx == 0 or any(
+                normalized_text[max(0, idx - len(p)):idx] == p for p in prefix_chars
+            )
+            after_ok = end == len(normalized_text) or normalized_text[end] in suffix_chars
+            if not (before_ok and after_ok):
+                continue
+            if any(consumed[i] for i in range(idx, end)):
+                continue
+            for i in range(idx, end):
+                consumed[i] = 1
+            matched.append(canonical)
+            break
+    return matched
+
+
 def _get_upsell_suggestion(ud: "UserData", cfg: "RestaurantConfig") -> str | None:
     """Pick an upsell item not already in the order."""
     if ud.upsell_offered or not cfg.upsell_rules:
@@ -4177,8 +3750,8 @@ def _get_upsell_suggestion(ud: "UserData", cfg: "RestaurantConfig") -> str | Non
                 price=float(price) if price is not None else None,
             )
             if price:
-                return f"تحب أضيف {item_name} بـ{_int_to_ar(int(price))} جنيه؟"
-            return rule.get("suggestion", f"تحب أضيف {item_name}؟")
+                return f"ولو تحب، أزودلك {item_name} مع الطلب بـ{_int_to_ar(int(price))} جنيه؟"
+            return rule.get("suggestion", f"ولو تحب، أزودلك {item_name} مع الطلب؟")
     return None
 
 
@@ -4189,34 +3762,17 @@ def _clear_pending_upsell(ud: "UserData", *, accepted: bool | None = None) -> No
         ud.upsell_accepted = accepted
 
 
-def _accept_pending_upsell(
-    ud: "UserData",
-    cfg: "RestaurantConfig",
-    *,
-    user_text: str | None = None,
-) -> str | None:
-    """Add the pending upsell item to the order.
-
-    If the user's reply included a quantity ("ماشي زود لي 10 كولا") we
-    honour it; otherwise we default to one. Discovered via real call
-    QA — customers routinely accept the upsell with a quantity, and
-    silently capping at 1 was producing wrong submitted orders.
-    """
+def _accept_pending_upsell(ud: "UserData", cfg: "RestaurantConfig") -> str | None:
     item_name = (ud.pending_upsell_item or "").strip()
     if not item_name:
         return None
 
-    qty = _quantity_from_upsell_reply(user_text, item_name) if user_text else 1
-
     current_items = list(ud.order or [])
-    item_with_qty = _format_order_item(item_name, qty) if qty > 1 else item_name
-    normalized_items, unknown, total = _normalize_order_items(
-        current_items + [item_with_qty], cfg.menu_items
-    )
+    normalized_items, unknown, total = _normalize_order_items(current_items + [item_name], cfg.menu_items)
     if unknown:
-        ud.order = current_items + [item_with_qty]
+        ud.order = current_items + [item_name]
         if ud.pending_upsell_price is not None:
-            ud.order_total += float(ud.pending_upsell_price) * float(qty)
+            ud.order_total += float(ud.pending_upsell_price)
     else:
         ud.order = normalized_items
         ud.order_total = total
@@ -4224,54 +3780,6 @@ def _accept_pending_upsell(
 
     _clear_pending_upsell(ud, accepted=True)
     return item_name
-
-
-def _quantity_from_upsell_reply(user_text: str | None, item_name: str) -> int:
-    """Extract the quantity the customer asked for in an upsell reply.
-
-    Handles common shapes:
-      "ماشي زود لي 10 كولا"
-      "آه، اتنين منها"
-      "تمام، خمسة كمان"
-      "اوكي، 3 لو سمحت"
-    """
-    if not user_text:
-        return 1
-    normalized = _normalize_ar(user_text)
-    if not normalized:
-        return 1
-    tokens = normalized.split()
-    item_norm = _normalize_ar(item_name)
-
-    # Try after-item-name first ("زود كولا 5").
-    if item_norm:
-        item_tokens = item_norm.split()
-        for idx in range(0, len(tokens) - len(item_tokens) + 1):
-            if tokens[idx: idx + len(item_tokens)] == item_tokens:
-                tail_idx = idx + len(item_tokens)
-                if tail_idx < len(tokens):
-                    qty = _quantity_token_to_int(tokens[tail_idx])
-                    if qty:
-                        return qty
-                if idx > 0:
-                    qty = _quantity_token_to_int(tokens[idx - 1])
-                    if qty:
-                        return qty
-
-    # Otherwise look for the largest numeric token that isn't part of
-    # an address ("شارع 5") and isn't the negative of confirming.
-    best_qty = 0
-    for i, token in enumerate(tokens):
-        qty = _quantity_token_to_int(token)
-        if not qty:
-            continue
-        prev_token = tokens[i - 1] if i > 0 else ""
-        next_token = tokens[i + 1] if i + 1 < len(tokens) else ""
-        if prev_token in _NON_ORDER_QUANTITY_TOKENS or next_token in _NON_ORDER_QUANTITY_TOKENS:
-            continue
-        if qty > best_qty:
-            best_qty = qty
-    return best_qty if best_qty > 0 else 1
 
 
 def _normalize_order_items(items: list[str], menu_items: list[dict]) -> tuple[list[str], list[str], float]:
@@ -4294,96 +3802,6 @@ def _normalize_order_items(items: list[str], menu_items: list[dict]) -> tuple[li
     return normalized, unknown, total
 
 
-_ORDER_ADD_HINTS = {
-    "ضيف", "زود", "كمان", "معاه", "معاها", "وخلي معاه", "وخلي معاها", "عايز كمان",
-}
-_ORDER_REPLACE_HINTS = {
-    "بدل", "غير", "غيرلي", "خلي", "خليه", "خليها", "شيل", "امسح", "لأ", "لا مش",
-}
-
-
-def _order_update_is_incremental(user_text: str | None) -> bool:
-    """Decide if a turn should *append* to the existing order.
-
-    The Phase 2 mutation parser handles the rich set of Egyptian cues
-    (replace / add / increase / decrease / keep / remove). Whatever the
-    parser confidently classifies wins; we only fall back to the legacy
-    hint sets when the parser returned ``unknown``.
-    """
-    if not (user_text or "").strip():
-        return False
-    from core.order_mutations import parse_mutation
-
-    intent = parse_mutation(user_text)
-    if intent.kind == "replace":
-        return False
-    if intent.kind in {"add", "increase"}:
-        return True
-    if intent.kind in {"keep", "remove", "decrease"}:
-        # The intent is a mutation that the LLM tool should reflect on;
-        # treat as non-incremental so the LLM resends the corrected order.
-        return False
-
-    normalized = _normalize_ar(user_text or "")
-    if not normalized:
-        return False
-    if _contains_normalized_phrase(normalized, _ORDER_REPLACE_HINTS):
-        return False
-    return _contains_normalized_phrase(normalized, _ORDER_ADD_HINTS)
-
-
-def _order_update_is_replace(user_text: str | None) -> bool:
-    """Return True only when a turn clearly means "replace my order".
-
-    In voice calls, customers often continue an order over multiple
-    final transcripts ("... شاورما لحمة" then "بيتزا مارجريتا منها خمسة").
-    Treating every later item turn as replace makes the agent look like
-    it forgot earlier items. Replacement therefore requires an explicit
-    correction cue.
-    """
-    if not (user_text or "").strip():
-        return False
-    from core.order_mutations import parse_mutation
-
-    intent = parse_mutation(user_text)
-    if intent.kind == "replace":
-        return True
-    if intent.kind in {"add", "increase", "keep", "remove", "decrease"}:
-        return False
-
-    normalized = _normalize_ar(user_text or "")
-    if not normalized:
-        return False
-    return _contains_normalized_phrase(normalized, _ORDER_REPLACE_HINTS)
-
-
-def _merge_incremental_order_items(
-    current_order: list[str] | None,
-    incoming_order: list[str],
-    menu_items: list[dict],
-) -> tuple[list[str], list[str], float]:
-    existing = [item for item in (current_order or []) if item and item.strip()]
-    current_norm = {_normalize_ar(item) for item in existing}
-    additions = [
-        item for item in incoming_order
-        if item and item.strip() and _normalize_ar(item) not in current_norm
-    ]
-    return _normalize_order_items(existing + additions, menu_items)
-
-
-def _merge_incremental_raw_order_items(
-    current_order: list[str] | None,
-    incoming_order: list[str],
-) -> list[str]:
-    existing = [item.strip() for item in (current_order or []) if item and item.strip()]
-    current_norm = {_normalize_ar(item) for item in existing}
-    additions = [
-        item.strip() for item in incoming_order
-        if item and item.strip() and _normalize_ar(item) not in current_norm
-    ]
-    return existing + additions
-
-
 def _build_order_items(order: list[str], menu_items: list[dict]) -> list[dict]:
     result = []
     for raw in order:
@@ -4402,23 +3820,51 @@ def _current_flow_name(context: RunContext_T) -> str:
 
 
 def _takeaway_next_missing_slot(ud: UserData) -> str | None:
-    from core.dialogue_engine import takeaway_missing_slot
-    return takeaway_missing_slot(ud)
+    if not ud.order:
+        return "الطلب"
+    if not ud.customer_name:
+        return "الاسم"
+    if not ud.customer_phone:
+        return "رقم الموبايل"
+    return None
 
 
 def _delivery_next_missing_slot(ud: UserData) -> str | None:
-    from core.dialogue_engine import delivery_missing_slot
-    return delivery_missing_slot(ud)
+    if not ud.order:
+        return "الطلب"
+    if not ud.delivery_address:
+        return "العنوان والمنطقة"
+    if not ud.customer_name:
+        return "الاسم"
+    if not ud.customer_phone:
+        return "رقم الموبايل"
+    return None
 
 
 def _reservation_next_missing_slot(ud: UserData, cfg: RestaurantConfig) -> str | None:
-    from core.dialogue_engine import reservation_missing_slot
-    return reservation_missing_slot(ud, cfg)
+    if not ud.reservation_time:
+        return "وقت الحجز"
+    if ud.guests_count is None:
+        return "عدد الضيوف"
+    if len(cfg.branches) > 1 and not ud.selected_branch:
+        return "الفرع"
+    if not ud.customer_name:
+        return "الاسم"
+    if not ud.customer_phone:
+        return "رقم الموبايل"
+    return None
 
 
 def _complaint_next_missing_slot(ud: UserData) -> str | None:
-    from core.dialogue_engine import complaint_missing_slot
-    return complaint_missing_slot(ud)
+    if not ud.complaint_text:
+        return "الشكوى"
+    if not ud.complaint_type:
+        return "نوع الشكوى"
+    if not ud.customer_name:
+        return "الاسم"
+    if not ud.customer_phone:
+        return "رقم الموبايل"
+    return None
 
 
 def _is_takeaway_ready_for_confirmation(ud: UserData) -> bool:
@@ -4431,16 +3877,6 @@ def _is_delivery_ready_for_confirmation(ud: UserData) -> bool:
 
 def _is_reservation_ready_for_confirmation(ud: UserData, cfg: RestaurantConfig) -> bool:
     return _reservation_next_missing_slot(ud, cfg) is None
-
-
-def _is_flow_ready_for_confirmation(flow: str, ud: UserData) -> bool:
-    if flow == "takeaway":
-        return _is_takeaway_ready_for_confirmation(ud)
-    if flow == "delivery":
-        return _is_delivery_ready_for_confirmation(ud)
-    if flow == "reservation":
-        return _is_reservation_ready_for_confirmation(ud, ud.restaurant)
-    return False
 
 
 def _is_near_turn_cap_completion(flow: str, ud: UserData) -> bool:
@@ -4535,8 +3971,8 @@ def _flow_turn_guard_message(flow: str, ud: UserData, user_text: str) -> str:
         missing = _takeaway_next_missing_slot(ud)
         if missing == "الطلب":
             return (
-                "لسه مخدناش الطلب. حاول توجّه الكلام ناحية الأكل بشكل طبيعي. "
-                "لو العميل بيسأل سؤال عادي جاوبه الأول وبعدين ارجع اسأله عن طلبه."
+                "الطلب غير مسجل. راجع المحادثة السابقة بدقة: إذا كان العميل قد ذكر تفاصيل طلبه بالفعل، استدعي أداة update_order فوراً لتسجيله ولا تسأله عنه مجدداً. "
+                "أما إذا لم يذكر أي طلب بعد، فاستفسر منه عن الطلب بدون استخدام صيغ محفوظة لتجنب التكرار."
             )
         if missing == "الاسم":
             return (
@@ -4551,8 +3987,8 @@ def _flow_turn_guard_message(flow: str, ud: UserData, user_text: str) -> str:
         missing = _delivery_next_missing_slot(ud)
         if missing == "الطلب":
             return (
-                "لسه مخدناش الطلب. وجّه الكلام ناحية الأكل بشكل طبيعي. "
-                "لو العميل بيسأل حاجة تانية جاوبه وبعدين ارجع."
+                "الطلب غير مسجل. راجع المحادثة السابقة بدقة: إذا كان العميل قد ذكر تفاصيل طلبه بالفعل، استدعي أداة update_order فوراً لتسجيله ولا تسأله عنه مجدداً. "
+                "أما إذا لم يذكر أي طلب بعد، فاستفسر منه عن الطلب بدون استخدام صيغ محفوظة لتجنب التكرار."
             )
         if missing == "العنوان والمنطقة":
             return (
@@ -4653,17 +4089,6 @@ async def _maybe_submit_pending_complaint(context: RunContext_T) -> str:
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Re-exports — BaseAgent, shared tools, and flow classes
-# (extracted to separate modules but re-exported here for backward compat)
-# ─────────────────────────────────────────────────────────────────────────────
-from base_agent import BaseAgent, RunContext_T, get_menu, to_greeter, update_name, update_phone  # noqa: F811,E402
-from flows.greeter import Greeter  # noqa: E402
-from flows.takeaway import Takeaway  # noqa: E402
-from flows.delivery import Delivery  # noqa: E402
-from flows.reservation import Reservation  # noqa: E402
-from flows.complaint import Complaint  # noqa: E402
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Graceful shutdown — httpx cleanup via atexit (signal handling done by SDK)
 # ─────────────────────────────────────────────────────────────────────────────
 atexit.register(_remove_worker_health_snapshot_sync)
@@ -4708,13 +4133,5 @@ async def _safe_close_session_once(
 # For backward compat, `python agent.py start` still works via lazy import.
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Lazy import to avoid the circular dependency (main.py imports agent.py).
-    # Both ``python agent.py dev`` and ``python main.py dev`` MUST give the
-    # same runtime environment — including the dev dashboard + parent health
-    # server — so the entrypoints stay symmetric. Without this, hitting the
-    # dashboard URL via the agent.py entrypoint silently 404s because the
-    # dashboard server was never started.
-    from main import server, _start_dev_dashboard, _start_parent_health_server
-    _start_parent_health_server()
-    _start_dev_dashboard()
+    from main import server  # lazy import to avoid circular dependency
     cli.run_app(server)

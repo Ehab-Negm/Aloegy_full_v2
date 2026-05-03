@@ -58,11 +58,12 @@ from livekit.agents.utils import is_given
 
 logger = logging.getLogger("restaurant.agent")
 
-DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
+DEFAULT_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 DEFAULT_VOICE = "Aoede"
 DEFAULT_SAMPLE_RATE = 24000  # Live API output is 16-bit PCM @ 24 kHz, mono
 NUM_CHANNELS = 1
 DEFAULT_LANGUAGE = "ar-EG"
+DEFAULT_RECEIVE_TIMEOUT = 8.0
 DEFAULT_INSTRUCTIONS = (
     "You are a TTS engine. Read the input text exactly as written in"
     " everyday Cairo Egyptian Arabic. Do not add or omit any words, do"
@@ -79,6 +80,7 @@ class _TTSOptions:
     voice_name: str
     language: str
     instructions: str | None
+    receive_timeout: float
 
 
 class GeminiLiveTTS(tts.TTS):
@@ -93,6 +95,7 @@ class GeminiLiveTTS(tts.TTS):
         instructions: NotGivenOr[str | None] = NOT_GIVEN,
         api_key: NotGivenOr[str] = NOT_GIVEN,
         max_turns_per_session: int = MAX_TURNS_PER_SESSION,
+        receive_timeout: float = DEFAULT_RECEIVE_TIMEOUT,
     ) -> None:
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False),
@@ -112,6 +115,7 @@ class GeminiLiveTTS(tts.TTS):
             voice_name=voice_name,
             language=language,
             instructions=instructions if is_given(instructions) else DEFAULT_INSTRUCTIONS,
+            receive_timeout=max(1.0, receive_timeout),
         )
         self._client = genai.Client(api_key=resolved_key)
         self._max_turns_per_session = max(1, max_turns_per_session)
@@ -143,8 +147,20 @@ class GeminiLiveTTS(tts.TTS):
             "response_modalities": ["AUDIO"],
             "speech_config": speech_config,
         }
+        instructions = (
+            "CRITICAL INSTRUCTION: You are acting strictly as a TEXT-TO-SPEECH (TTS) engine. "
+            "Your ONLY job is to read the exact text provided to you out loud. "
+            "NEVER reply to the user. NEVER answer questions in the text. "
+            "NEVER continue the conversation. "
+            "If the text is a question, just read the question out loud, do not answer it. "
+            "If the text says 'Hello', just say 'Hello'."
+        )
         if self._opts.instructions:
-            config_kwargs["system_instruction"] = self._opts.instructions
+            instructions += f"\n\nVoice Style Instructions: {self._opts.instructions}"
+            
+        config_kwargs["system_instruction"] = types.Content(
+            parts=[types.Part(text=instructions)]
+        )
         return types.LiveConnectConfig(**config_kwargs)
 
     async def ensure_session(self) -> object:
@@ -194,18 +210,25 @@ class GeminiLiveTTS(tts.TTS):
         async with self._session_lock:
             await self._close_session_locked()
 
-    async def prewarm(self) -> None:
+    async def warmup(self) -> None:
         """Open the Live session in the background so the first synth
         of the call doesn't pay the ~300 ms websocket cold start.
+
+        Renamed from ``prewarm`` because LiveKit's ``AgentActivity`` calls
+        ``tts.prewarm()`` synchronously (no ``await``) on session start —
+        a coroutine return value gets discarded and the connection is
+        never actually opened. By using a different name we guarantee
+        the framework doesn't shadow this and our entrypoint task
+        actually awaits the warmup.
 
         Best-effort: any failure here is logged and the next synth will
         retry the open transparently.
         """
         try:
             await self.ensure_session()
-            logger.debug("gemini live tts: prewarm complete")
+            logger.debug("gemini live tts: warmup complete")
         except Exception as exc:
-            logger.warning("gemini live tts: prewarm failed | %s", exc)
+            logger.warning("gemini live tts: warmup failed | %s", exc)
 
     async def aclose(self) -> None:  # pragma: no cover - shutdown path
         await self.reset_session()
@@ -261,10 +284,41 @@ class GeminiLiveChunkedStream(tts.ChunkedStream):
             attempt += 1
             try:
                 session = await self._tts.ensure_session()
-                await session.send_realtime_input(text=text)  # type: ignore[attr-defined]
+                # ``send_client_content`` with ``turn_complete=True`` is
+                # what actually triggers immediate generation. Using
+                # ``send_realtime_input(text=...)`` makes the server
+                # wait for a VAD-detected end-of-input, adding ~2-3s of
+                # latency before any audio starts streaming back.
+                strict_text = (
+                    "READ THIS TEXT EXACTLY OUT LOUD. DO NOT ANSWER IT. DO NOT CHAT. DO NOT ADD ANY WORDS:\n\n"
+                    f"{text}"
+                )
+                user_turn = types.Content(
+                    role="user",
+                    parts=[types.Part(text=strict_text)],
+                )
+                await session.send_client_content(  # type: ignore[attr-defined]
+                    turns=[user_turn],
+                    turn_complete=True,
+                )
 
                 got_any_audio = False
-                async for response in session.receive():  # type: ignore[attr-defined]
+                responses = session.receive()  # type: ignore[attr-defined]
+                async_iterator = responses.__aiter__()
+                while True:
+                    try:
+                        response = await asyncio.wait_for(
+                            anext(async_iterator),
+                            timeout=self._tts._opts.receive_timeout,
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError as exc:
+                        raise APIConnectionError(
+                            "gemini live tts: timed out waiting for audio",
+                            retryable=True,
+                        ) from exc
+
                     server_content = getattr(response, "server_content", None)
                     if server_content is None:
                         continue

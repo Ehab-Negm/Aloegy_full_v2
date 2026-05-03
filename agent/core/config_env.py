@@ -105,8 +105,8 @@ MAX_CONCURRENT_SESSIONS           = _get_env_int("MAX_CONCURRENT_SESSIONS", 100,
 MAX_TURNS_PER_SESSION             = _get_env_int("MAX_TURNS_PER_SESSION", 50, min_value=10)
 TURN_CAP_WARNING_TURNS            = _get_env_int("TURN_CAP_WARNING_TURNS", 5, min_value=1)
 TURN_CAP_GRACE_TURNS              = _get_env_int("TURN_CAP_GRACE_TURNS", 3, min_value=0)
-PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 12, min_value=2)
-TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 36, min_value=8)
+PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 2, min_value=2)
+TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 10, min_value=8)
 MAX_TOOL_STEPS               = _get_env_int("MAX_TOOL_STEPS", 10, min_value=6)
 MIN_INTERRUPTION_DURATION_SECONDS = _get_env_float("MIN_INTERRUPTION_DURATION_SECONDS", 0.35, min_value=0.0)
 MIN_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MIN_ENDPOINTING_DELAY_SECONDS", 0.2, min_value=0.05)
@@ -135,9 +135,11 @@ SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.5-flash"
 
 if "/" in SESSION_LLM_MODEL:
     SESSION_LLM_MODEL = SESSION_LLM_MODEL.split("/", 1)[1]
-SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 260, min_value=32)
-SESSION_LLM_TEMPERATURE      = _get_env_float("SESSION_LLM_TEMPERATURE", 0.25, min_value=0.0)
-SESSION_LLM_TOP_P            = _get_env_float("SESSION_LLM_TOP_P", 0.85, min_value=0.0)
+SESSION_LLM_REASONING_EFFORT = os.getenv("SESSION_LLM_REASONING_EFFORT", "low").strip().lower() or "low"
+SESSION_LLM_VERBOSITY        = os.getenv("SESSION_LLM_VERBOSITY", "low").strip().lower() or "low"
+SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 160, min_value=32)
+SESSION_LLM_TEMPERATURE      = _get_env_float("SESSION_LLM_TEMPERATURE", 0.85, min_value=0.0)
+SESSION_LLM_TOP_P            = _get_env_float("SESSION_LLM_TOP_P", 0.95, min_value=0.0)
 SESSION_LLM_THINKING_BUDGET  = _get_env_int("SESSION_LLM_THINKING_BUDGET", 0, min_value=0)
 SESSION_PREEMPTIVE_GENERATION = _get_env_bool("SESSION_PREEMPTIVE_GENERATION", False)
 CONFIG_SHARED_CACHE_ENABLED  = _get_env_bool("CONFIG_SHARED_CACHE_ENABLED", True)
@@ -202,6 +204,8 @@ __all__ = [
     "SESSION_STT_KEYTERM_LIMIT",
     "SESSION_STT_EXTRA_KEYTERMS",
     "SESSION_LLM_MODEL",
+    "SESSION_LLM_REASONING_EFFORT",
+    "SESSION_LLM_VERBOSITY",
     "SESSION_LLM_MAX_COMPLETION_TOKENS",
     "SESSION_LLM_TEMPERATURE",
     "SESSION_LLM_TOP_P",

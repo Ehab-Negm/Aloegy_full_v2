@@ -28,6 +28,19 @@ class CustomerInfo:
 
 
 @dataclass
+class ConfirmedFacts:
+    """Tracks what was already explicitly confirmed by the customer.
+    Used to prevent the LLM from re-asking confirmed information."""
+    name_confirmed: bool = False
+    phone_confirmed: bool = False
+    order_confirmed_at_turn: int = 0
+    address_confirmed: bool = False
+    landmark_confirmed: bool = False
+    reservation_time_confirmed: bool = False
+    guests_count_confirmed: bool = False
+
+
+@dataclass
 class OrderState:
     items: list[str] | None = None
     validated: bool = False
@@ -77,6 +90,7 @@ class UserData:
     delivery_state: DeliveryState = field(default_factory=DeliveryState)
     reservation_state: ReservationState = field(default_factory=ReservationState)
     complaint_state: ComplaintState = field(default_factory=ComplaintState)
+    confirmed_facts: ConfirmedFacts = field(default_factory=ConfirmedFacts)
 
     agents: dict[str, Any] = field(default_factory=dict)
     prev_agent: Any | None = None
@@ -89,25 +103,24 @@ class UserData:
     last_guard_signature: str | None = None
     last_user_message: str = ""
     last_agent_message: str = ""
-    last_question_category: str = ""
-    question_category_history: list[str] = field(default_factory=list)
-    turn_trace_started_monotonic: float = 0.0
-    turn_trace_slot_before: dict[str, Any] = field(default_factory=dict)
-    turn_trace_current_turn: int = 0
-    turn_trace_decision_mode: str = ""
-    turn_trace_decision_reason: str = ""
-    turn_trace_engine_decision_ms: int | None = None
-    turn_trace_tts_enqueue_ms: int | None = None
-    turn_trace_finished: bool = False
     active_flow: str = ""
     handoff_target: str = ""
-    confirmation_pending: bool = False
-    confirmation_received: bool = False
-    # Per-turn cache for the LLM-driven structured understanding so the
-    # several call-sites in a single turn (signals emit, order intercept,
-    # contact intercept, address intercept) reuse one extraction.
-    turn_understanding: Any = None
-    turn_understanding_text: str = ""
+    # Set by the repetition detector when the agent re-asks a captured slot.
+    # The per-turn state prompt reads this and escalates its directive so the
+    # next reply doesn't re-ask. Cleared by _build_per_turn_state_prompt once
+    # consumed.
+    repetition_alert: str = ""
+    # Set by _handle_flow_switch_intercept just before _transfer_live, to
+    # tell the new flow's on_enter to use this exact opening line (a brief
+    # acknowledgement of the switch) instead of the agent's static _opening.
+    # One-shot — cleared by on_enter after use.
+    pending_switch_ack: str = ""
+    # Set by the conversation_item_added listener when the LLM re-asks a slot
+    # that's already captured in this UserData (the "soft" alert in the
+    # per-turn prompt was ignored). On the next user turn, the agent skips the
+    # LLM entirely and says this exact line — a deterministic recovery instead
+    # of a third re-ask. One-shot; cleared by on_user_turn_completed.
+    pending_corrective_response: str = ""
 
     customer_name: InitVar[str | None] = None
     customer_phone: InitVar[str | None] = None
@@ -228,82 +241,30 @@ class UserData:
         )
 
     def summarize(self) -> str:
-        """YAML snapshot of the call state.
-
-        YAML parses better than JSON in LLM contexts (LiveKit's own
-        canonical multi-agent example notes this), and the dense
-        block here is the single source of truth the LLM sees on
-        agent enter.
-        """
-        try:
-            import yaml as _yaml
-        except ImportError:
-            _yaml = None
-
-        data: dict[str, Any] = {
-            "customer_name": self.customer_name or "unknown",
-            "customer_phone": self.customer_phone or "unknown",
-            "order": list(self.order) if self.order else "unknown",
-            "order_total": (
-                float(self.order_total)
-                if self.order_validated and self.order_total
-                else "unknown"
-            ),
-            "special_requests": self.special_requests or "unknown",
-            "delivery_address": self.delivery_address or "unknown",
-            "delivery_zone": self.delivery_zone or "unknown",
-            "delivery_landmark": self.delivery_landmark or "unknown",
-            "reservation_time": self.reservation_time or "unknown",
-            "guests_count": self.guests_count if self.guests_count is not None else "unknown",
-            "branch": self.selected_branch or "unknown",
-            "pending_upsell": self.pending_upsell_item or "unknown",
-            "upsell_accepted": bool(self.upsell_accepted),
-            "confirmation_pending": bool(self.confirmation_pending),
-            "complaint_text": self.complaint_text or "unknown",
-            "complaint_type": self.complaint_type or "unknown",
-            "order_confirmed": bool(self.order_confirmed),
-            "reservation_confirmed": bool(self.reservation_confirmed),
-            "complaint_logged": bool(self.complaint_logged),
-        }
-        if _yaml is not None:
-            return _yaml.safe_dump(data, allow_unicode=True, sort_keys=False).strip()
-        return _json.dumps(data, ensure_ascii=False)
-
-    def conversational_summary(self) -> str:
-        """Human-readable call state for LLM handoff prompts."""
-        facts: list[str] = []
-        if self.customer_name:
-            facts.append(f"الاسم متسجل: {self.customer_name}.")
-        if self.customer_phone:
-            facts.append(f"رقم الموبايل متسجل: {self.customer_phone}.")
-        if self.order:
-            order_text = "، ".join(item for item in self.order if item)
-            if order_text:
-                facts.append(f"الطلب الحالي: {order_text}.")
-        if self.order_total:
-            facts.append(f"إجمالي الطلب الحالي: {self.order_total:g} جنيه.")
-        if self.special_requests:
-            facts.append(f"طلب خاص: {self.special_requests}.")
-        if self.pending_upsell_item:
-            facts.append(f"في إضافة مقترحة معلقة: {self.pending_upsell_item}.")
-        if self.delivery_address:
-            address = self.delivery_address
-            if self.delivery_zone:
-                address = f"{address} ({self.delivery_zone})"
-            facts.append(f"عنوان التوصيل متسجل: {address}.")
-        if self.delivery_landmark:
-            facts.append(f"علامة مميزة: {self.delivery_landmark}.")
-        if self.reservation_time:
-            facts.append(f"ميعاد الحجز: {self.reservation_time}.")
-        if self.guests_count is not None:
-            facts.append(f"عدد الضيوف: {self.guests_count}.")
-        if self.selected_branch:
-            facts.append(f"الفرع: {self.selected_branch}.")
-        if self.complaint_text:
-            facts.append(f"الشكوى: {self.complaint_text}.")
-        if not facts:
-            return "لسه مفيش بيانات مؤكدة من العميل."
-        return " ".join(facts)
+        return _json.dumps(
+            {
+                "name": self.customer_name or "—",
+                "phone": self.customer_phone or "—",
+                "order": self.order or "—",
+                "special_requests": self.special_requests or "—",
+                "pending_upsell": self.pending_upsell_item or "—",
+                "upsell_accepted": self.upsell_accepted,
+                "delivery_address": self.delivery_address or "—",
+                "delivery_zone": self.delivery_zone or "—",
+                "reservation_time": self.reservation_time or "—",
+                "guests_count": self.guests_count or "—",
+                "branch": self.selected_branch or "—",
+                "confirmed_facts": {
+                    "name": self.confirmed_facts.name_confirmed,
+                    "phone": self.confirmed_facts.phone_confirmed,
+                    "address": self.confirmed_facts.address_confirmed,
+                    "landmark": self.confirmed_facts.landmark_confirmed,
+                    "reservation_time": self.confirmed_facts.reservation_time_confirmed,
+                    "guests_count": self.confirmed_facts.guests_count_confirmed,
+                },
+            },
+            ensure_ascii=False,
+        )
 
 
 _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
@@ -360,6 +321,7 @@ for _public_name, (_container_name, _attr_name) in _FLAT_FIELD_MAP.items():
 __all__ = [
     "CallWriteHealth",
     "ComplaintState",
+    "ConfirmedFacts",
     "CustomerInfo",
     "DeliveryState",
     "OrderState",

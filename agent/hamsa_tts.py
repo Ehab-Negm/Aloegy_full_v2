@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -52,6 +53,23 @@ def _parse_wav_header(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+def _ws_open(ws) -> bool:
+    """Best-effort liveness check across websockets versions."""
+    if ws is None:
+        return False
+    state = getattr(ws, "state", None)
+    if state is not None:
+        # websockets >=11 exposes State enum (OPEN=1)
+        name = getattr(state, "name", None)
+        if name is not None:
+            return name == "OPEN"
+        return int(state) == 1
+    closed = getattr(ws, "closed", None)
+    if closed is not None:
+        return not closed
+    return True
+
+
 class TTS(tts.TTS):
     def __init__(
         self,
@@ -75,84 +93,52 @@ class TTS(tts.TTS):
         self._mulaw = mulaw
         self._sample_rate = sample_rate
 
-        # ── Pre-warmed WebSocket pool ────────────────────────────────
-        # Each TTS request used to pay TCP+TLS+WS handshake cost
-        # (200-300ms) on top of Hamsa's synthesis time. With this pool
-        # we keep ONE connection ready in the background so the next
-        # synthesize call can send the TTS request immediately and
-        # only pays the model latency.
-        #
-        # Lifecycle:
-        #   - Each call to ``_run`` takes the warm WS (or opens cold
-        #     if pool is empty), uses it for ONE synthesis (Hamsa
-        #     closes after ``end``), then schedules a fresh warm
-        #     connection for the next caller in the background.
-        self._next_ws: "websockets.WebSocketClientProtocol | None" = None
-        self._next_ws_lock = asyncio.Lock()
-        self._prewarm_in_flight = False
+        # Persistent WS pool (size=1). Holding one warm connection eliminates
+        # the TLS+WS handshake (200–600ms) on every utterance.
+        self._ws_lock = asyncio.Lock()
+        self._ws: websockets.WebSocketClientProtocol | None = None
 
     @property
     def _ws_url(self) -> str:
         return f"{WS_URL}?api_key={quote(self._api_key)}"
 
-    async def _open_ws(self, timeout: float):
+    async def _connect_ws(self, *, open_timeout: float):
         return await websockets.connect(
             self._ws_url,
             additional_headers={"X-Api-Key": self._api_key},
-            open_timeout=timeout,
+            open_timeout=open_timeout,
             close_timeout=5,
             max_size=None,
+            ping_interval=20,
+            ping_timeout=10,
         )
 
-    async def _take_warm_ws(self, timeout: float):
-        """Return a ready-to-use WebSocket. Use the pre-warmed one
-        if available; otherwise open cold. Caller owns lifecycle."""
-        async with self._next_ws_lock:
-            ws = self._next_ws
-            self._next_ws = None
+    async def _acquire_ws(self, *, open_timeout: float):
+        """Caller must hold self._ws_lock. Returns a live WS, reconnecting if stale."""
+        if _ws_open(self._ws):
+            return self._ws
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+            self._ws = None
+        self._ws = await self._connect_ws(open_timeout=open_timeout)
+        logger.info("hamsa tts | ws (re)connected")
+        return self._ws
+
+    async def _drop_ws(self) -> None:
+        ws = self._ws
+        self._ws = None
         if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.close()
+
+    async def prewarm(self) -> None:
+        """Open and hold a WS so the first synthesis avoids handshake."""
+        async with self._ws_lock:
             try:
-                if not ws.closed:
-                    return ws
-            except Exception:
-                pass
-        # Pool was empty or closed — open a fresh connection
-        return await self._open_ws(timeout)
-
-    async def _prewarm_async(self) -> None:
-        """Open a fresh WebSocket and stash it for the next caller.
-        Errors are swallowed: on failure ``_take_warm_ws`` falls back
-        to opening cold, which is exactly the pre-pre-warm behaviour."""
-        async with self._next_ws_lock:
-            if self._prewarm_in_flight:
-                return
-            if self._next_ws is not None and not self._next_ws.closed:
-                return
-            self._prewarm_in_flight = True
-        try:
-            ws = await self._open_ws(timeout=10.0)
-        except Exception as exc:
-            logger.debug("hamsa tts | prewarm failed | err=%s", exc)
-            ws = None
-        async with self._next_ws_lock:
-            if ws is not None and (self._next_ws is None or self._next_ws.closed):
-                self._next_ws = ws
-            elif ws is not None:
-                # Lost a race — close the redundant one
-                try:
-                    await ws.close()
-                except Exception:
-                    pass
-            self._prewarm_in_flight = False
-
-    def schedule_prewarm(self) -> None:
-        """Fire-and-forget pre-warm. Safe to call from any async ctx;
-        if no loop is running we silently skip."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self._prewarm_async())
+                await self._acquire_ws(open_timeout=5.0)
+            except Exception as exc:
+                logger.debug("hamsa prewarm failed | %s", exc)
 
     def synthesize(
         self, text: str, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS
@@ -160,14 +146,8 @@ class TTS(tts.TTS):
         return ChunkedStream(tts=self, input_text=text, conn_options=conn_options)
 
     async def aclose(self) -> None:
-        async with self._next_ws_lock:
-            ws = self._next_ws
-            self._next_ws = None
-        if ws is not None:
-            try:
-                await ws.close()
-            except Exception:
-                pass
+        async with self._ws_lock:
+            await self._drop_ws()
 
 
 class ChunkedStream(tts.ChunkedStream):
@@ -178,44 +158,18 @@ class ChunkedStream(tts.ChunkedStream):
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         text = (self.input_text or "").strip()
         if not text:
+            # LiveKit requires the emitter to be initialized before _run returns,
+            # otherwise end_input() raises "AudioEmitter isn't started".
+            output_emitter.initialize(
+                request_id="",
+                sample_rate=self._tts._sample_rate,
+                num_channels=NUM_CHANNELS,
+                mime_type="audio/mulaw" if self._tts._mulaw else "audio/pcm",
+            )
+            output_emitter.flush()
             return
         if len(text) > MAX_TEXT_LEN:
             text = text[:MAX_TEXT_LEN]
-
-        # ──── TTS cache fast-path ────
-        # Common replies (menu, post-completion, opening, …) hit the
-        # exact same text on every call. Replaying cached audio
-        # eliminates the 900-1100 ms ttfb the websocket synthesis pays.
-        try:
-            from core.tts_cache import GLOBAL_CACHE as _TTS_CACHE
-        except ImportError:  # pragma: no cover - cache module is part of the repo
-            _TTS_CACHE = None
-        cache_model = f"hamsa:{self._tts._voice}:{self._tts._dialect}:{int(self._tts._mulaw)}"
-        cached_entry = (
-            _TTS_CACHE.get(model=cache_model, text=text) if _TTS_CACHE else None
-        )
-        if cached_entry is not None:
-            mime = "audio/mulaw" if self._tts._mulaw else "audio/pcm"
-            output_emitter.initialize(
-                request_id="cache",
-                sample_rate=cached_entry.sample_rate,
-                num_channels=NUM_CHANNELS,
-                mime_type=mime,
-            )
-            output_emitter.push(cached_entry.audio)
-            output_emitter.flush()
-            logger.info(
-                "hamsa tts | cache hit | chars=%d | bytes=%d",
-                len(text),
-                len(cached_entry.audio),
-            )
-            return
-
-        # Buffer audio bytes as they arrive so we can store them after a
-        # successful synthesis. The cache only saves the rendered PCM
-        # payload — the same format we replay above.
-        cache_buffer = bytearray()
-        cache_sample_rate = self._tts._sample_rate
 
         request = {
             "type": "tts",
@@ -230,110 +184,115 @@ class ChunkedStream(tts.ChunkedStream):
 
         timeout = self._conn_options.timeout if self._conn_options else 30.0
 
-        # Take a pre-warmed WebSocket if available, else open cold.
-        # Eagerly schedule the NEXT pre-warm before this synthesis even
-        # starts so the connection is ready by the time this turn ends.
-        ws = await self._tts._take_warm_ws(timeout)
-        self._tts.schedule_prewarm()
-        try:
-            await ws.send(json.dumps(request))
+        # One synthesis at a time per TTS instance. Voice agent only ever
+        # renders one utterance at a time, so contention is naturally zero.
+        async with self._tts._ws_lock:
+            await self._render_with_retry(request, timeout, output_emitter)
 
-            initialized = False
-            header_stripped = self._tts._mulaw  # mulaw stream has no WAV header
-            pending_audio = bytearray()
-            request_id = ""
+    async def _render_with_retry(
+        self,
+        request: dict,
+        timeout: float,
+        output_emitter: tts.AudioEmitter,
+    ) -> None:
+        # First attempt may use a stale persistent WS. If send/recv fails
+        # because the server closed it, drop and try once more with a fresh WS.
+        for attempt in (1, 2):
+            try:
+                ws = await self._tts._acquire_ws(open_timeout=timeout)
+                await self._render_once(ws, request, timeout, output_emitter)
+                return
+            except (
+                websockets.ConnectionClosedError,
+                websockets.ConnectionClosedOK,
+            ) as exc:
+                await self._tts._drop_ws()
+                if attempt == 2:
+                    raise APIConnectionError() from exc
+                logger.info("hamsa tts | ws closed mid-stream, reconnecting")
+                continue
+            except APIStatusError:
+                raise
+            except APITimeoutError:
+                await self._tts._drop_ws()
+                raise
+            except (websockets.InvalidStatus, websockets.InvalidHandshake) as e:
+                await self._tts._drop_ws()
+                status = getattr(getattr(e, "response", None), "status_code", 0) or 0
+                raise APIStatusError(
+                    message=f"Hamsa TTS handshake failed: {e}",
+                    status_code=status,
+                    request_id=None,
+                    body=str(e),
+                ) from e
+            except Exception as e:
+                await self._tts._drop_ws()
+                raise APIConnectionError() from e
 
-            while True:
-                try:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    raise APITimeoutError() from None
+    async def _render_once(
+        self,
+        ws,
+        request: dict,
+        timeout: float,
+        output_emitter: tts.AudioEmitter,
+    ) -> None:
+        await ws.send(json.dumps(request))
 
-                if isinstance(msg, (bytes, bytearray)):
-                    if not header_stripped:
-                        pending_audio.extend(msg)
-                        parsed = _parse_wav_header(bytes(pending_audio))
-                        if parsed is not None:
-                            sample_rate, header_size = parsed
-                            cache_sample_rate = sample_rate
-                            logger.info(
-                                "hamsa tts | detected WAV header | sample_rate=%dHz | header_size=%d",
-                                sample_rate, header_size,
-                            )
-                            if not initialized:
-                                output_emitter.initialize(
-                                    request_id=request_id,
-                                    sample_rate=sample_rate,
-                                    num_channels=NUM_CHANNELS,
-                                    mime_type="audio/pcm",
-                                )
-                                initialized = True
-                            payload = bytes(pending_audio[header_size:])
-                            pending_audio.clear()
-                            header_stripped = True
-                            if payload:
-                                output_emitter.push(payload)
-                                cache_buffer.extend(payload)
-                        elif len(pending_audio) >= 4 and pending_audio[:4] != b"RIFF":
-                            # No WAV header — treat as raw PCM at the configured
-                            # default rate. Log the first bytes so we can adjust
-                            # HAMSA_DEFAULT_SAMPLE_RATE if the voice sounds off.
-                            logger.warning(
-                                "hamsa tts | no WAV header detected | first_bytes=%r | using_sample_rate=%dHz",
-                                bytes(pending_audio[:16]), self._tts._sample_rate,
-                            )
-                            if not initialized:
-                                output_emitter.initialize(
-                                    request_id=request_id,
-                                    sample_rate=self._tts._sample_rate,
-                                    num_channels=NUM_CHANNELS,
-                                    mime_type="audio/pcm",
-                                )
-                                initialized = True
-                            output_emitter.push(bytes(pending_audio))
-                            cache_buffer.extend(pending_audio)
-                            pending_audio.clear()
-                            header_stripped = True
-                        continue
+        initialized = False
+        header_stripped = self._tts._mulaw  # mulaw stream has no WAV header
+        pending_audio = bytearray()
+        request_id = ""
 
-                    if not initialized:
-                        output_emitter.initialize(
-                            request_id=request_id,
-                            sample_rate=self._tts._sample_rate,
-                            num_channels=NUM_CHANNELS,
-                            mime_type="audio/mulaw" if self._tts._mulaw else "audio/pcm",
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise APITimeoutError() from None
+
+            if isinstance(msg, (bytes, bytearray)):
+                if not header_stripped:
+                    pending_audio.extend(msg)
+                    parsed = _parse_wav_header(bytes(pending_audio))
+                    if parsed is not None:
+                        sample_rate, header_size = parsed
+                        logger.info(
+                            "hamsa tts | detected WAV header | sample_rate=%dHz | header_size=%d",
+                            sample_rate, header_size,
                         )
-                        initialized = True
-                    output_emitter.push(bytes(msg))
-                    cache_buffer.extend(msg)
+                        if not initialized:
+                            output_emitter.initialize(
+                                request_id=request_id,
+                                sample_rate=sample_rate,
+                                num_channels=NUM_CHANNELS,
+                                mime_type="audio/pcm",
+                            )
+                            initialized = True
+                        payload = bytes(pending_audio[header_size:])
+                        pending_audio.clear()
+                        header_stripped = True
+                        if payload:
+                            output_emitter.push(payload)
+                    elif len(pending_audio) >= 4 and pending_audio[:4] != b"RIFF":
+                        # No WAV header — treat as raw PCM at the configured
+                        # default rate. Log the first bytes so we can adjust
+                        # HAMSA_DEFAULT_SAMPLE_RATE if the voice sounds off.
+                        logger.warning(
+                            "hamsa tts | no WAV header detected | first_bytes=%r | using_sample_rate=%dHz",
+                            bytes(pending_audio[:16]), self._tts._sample_rate,
+                        )
+                        if not initialized:
+                            output_emitter.initialize(
+                                request_id=request_id,
+                                sample_rate=self._tts._sample_rate,
+                                num_channels=NUM_CHANNELS,
+                                mime_type="audio/pcm",
+                            )
+                            initialized = True
+                        output_emitter.push(bytes(pending_audio))
+                        pending_audio.clear()
+                        header_stripped = True
                     continue
 
-                try:
-                    parsed_msg = json.loads(msg)
-                except (TypeError, ValueError):
-                    continue
-
-                msg_type = parsed_msg.get("type")
-                payload = parsed_msg.get("payload") or {}
-
-                if msg_type == "ack":
-                    request_id = payload.get("requestId") or payload.get("id") or ""
-                elif msg_type == "end":
-                    break
-                elif msg_type == "error":
-                    err_msg = str(payload.get("message", "unknown")).lower()
-                    # Hamsa sends "aborted" when client closed the stream mid-way
-                    # (e.g. user interrupted). Treat it as a graceful end, not an error.
-                    if "abort" in err_msg:
-                        break
-                    raise APIStatusError(
-                        message=f"Hamsa TTS error: {payload.get('message', 'unknown')}",
-                        status_code=400,
-                        request_id=request_id or None,
-                        body=json.dumps(parsed_msg),
-                    )
-
-            if pending_audio:
                 if not initialized:
                     output_emitter.initialize(
                         request_id=request_id,
@@ -342,43 +301,49 @@ class ChunkedStream(tts.ChunkedStream):
                         mime_type="audio/mulaw" if self._tts._mulaw else "audio/pcm",
                     )
                     initialized = True
-                output_emitter.push(bytes(pending_audio))
-                cache_buffer.extend(pending_audio)
+                output_emitter.push(bytes(msg))
+                continue
 
-            output_emitter.flush()
-
-            # Save the rendered audio for next time. ``put`` decides
-            # whether the model+text combination is in the cacheable
-            # set; here we just hand it the bytes.
-            if _TTS_CACHE is not None and cache_buffer and initialized:
-                try:
-                    _TTS_CACHE.put(
-                        model=cache_model,
-                        text=text,
-                        audio=bytes(cache_buffer),
-                        sample_rate=cache_sample_rate,
-                    )
-                except Exception:  # pragma: no cover - cache writes must not crash TTS
-                    pass
-
-        except APIStatusError:
-            raise
-        except APITimeoutError:
-            raise
-        except (websockets.InvalidStatus, websockets.InvalidHandshake) as e:
-            status = getattr(getattr(e, "response", None), "status_code", 0) or 0
-            raise APIStatusError(
-                message=f"Hamsa TTS handshake failed: {e}",
-                status_code=status,
-                request_id=None,
-                body=str(e),
-            ) from e
-        except (websockets.ConnectionClosedError, websockets.ConnectionClosedOK) as e:
-            raise APIConnectionError() from e
-        except Exception as e:
-            raise APIConnectionError() from e
-        finally:
             try:
-                await ws.close()
-            except Exception:
-                pass
+                parsed_msg = json.loads(msg)
+            except (TypeError, ValueError):
+                continue
+
+            msg_type = parsed_msg.get("type")
+            payload = parsed_msg.get("payload") or {}
+
+            if msg_type == "ack":
+                request_id = payload.get("requestId") or payload.get("id") or ""
+            elif msg_type == "end":
+                break
+            elif msg_type == "error":
+                err_msg = str(payload.get("message", "unknown")).lower()
+                logger.warning("hamsa tts | error message received: %s", payload)
+                # Hamsa sends "aborted" when client closed the stream mid-way
+                # (e.g. user interrupted). Treat it as a graceful end, not an error.
+                if "abort" in err_msg:
+                    break
+                raise APIStatusError(
+                    message=f"Hamsa TTS error: {payload.get('message', 'unknown')}",
+                    status_code=400,
+                    request_id=request_id or None,
+                    body=json.dumps(parsed_msg),
+                )
+
+        if pending_audio:
+            if not initialized:
+                output_emitter.initialize(
+                    request_id=request_id,
+                    sample_rate=self._tts._sample_rate,
+                    num_channels=NUM_CHANNELS,
+                    mime_type="audio/mulaw" if self._tts._mulaw else "audio/pcm",
+                )
+        if not initialized:
+            logger.warning("hamsa tts | stream ended without initialization | request=%r", request)
+            output_emitter.initialize(
+                request_id=request_id,
+                sample_rate=self._tts._sample_rate,
+                num_channels=NUM_CHANNELS,
+                mime_type="audio/mulaw" if self._tts._mulaw else "audio/pcm",
+            )
+        output_emitter.flush()
