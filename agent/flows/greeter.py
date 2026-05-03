@@ -91,7 +91,7 @@ class Greeter(BaseAgent):
             "احجز", "أحجز", "حجز", "شكوى", "مشكلة", "محتاج", "عايزين", "لو", "بس",
             "رقمي", "ورقمي", "رقم", "الموبايل", "موبايلي", "موبايل", "التليفون",
         }
-        ignored_tokens = {"يا", "فندم", "باشا", "استاذ", "أستاذ"}
+        ignored_tokens = {"يا", "فندم", "باشا", "استاذ", "أستاذ", "اسمي", "اسمى", "الاسم", "اسم"}
         candidate_tokens: list[str] = []
 
         for raw_token in match.group(1).split():
@@ -119,68 +119,286 @@ class Greeter(BaseAgent):
         return " ".join(candidate_tokens).strip() or None
 
     def _capture_prefill_contact(self, user_text: str) -> None:
+        """Capture name + phone the customer volunteered before stating intent.
+
+        Order of precedence:
+        1. LLM ``TurnUnderstanding`` — most reliable when configured.
+        2. Inline ``اسمي ...`` regex — handles markered self-introductions.
+        3. Legacy ``_extract_name_candidate`` — fallback when no LLM.
+
+        The LLM correctly returns ``customer_name: null`` for greeting
+        turns like "ألو" or "إزيك"; using it as the primary signal stops
+        those phrases from being mis-captured as names.
+        """
         from agent import _extract_name_candidate
-        from nlp.phone_extract import phone_digits_only as _phone_digits_only, validate_phone
+        from core.understanding import get_or_extract_for_turn
+        from core.understanding_bridge import (
+            name_from_understanding,
+            phone_digits_from_understanding,
+        )
+        from nlp.phone_extract import (
+            phone_digits_only as _phone_digits_only,
+            validate_phone,
+        )
 
         ud = self.session.userdata
+
+        understanding = None
+        try:
+            understanding = get_or_extract_for_turn(ud, user_text, "greeter")
+        except Exception:
+            understanding = None
+
         if not ud.customer_name:
-            candidate = _extract_name_candidate(user_text) or self._extract_inline_intro_name(user_text)
-            if candidate:
-                ud.customer_name = candidate
-                logger.info("call=%s | greeter prefill name=%s", ud.call_id, candidate)
+            llm_name = name_from_understanding(understanding)
+            if llm_name:
+                ud.customer_name = llm_name
+                logger.info(
+                    "call=%s | greeter prefill name | source=llm | name=%s",
+                    ud.call_id,
+                    llm_name,
+                )
+            else:
+                # Only fall back to the inline / legacy extractors when the
+                # LLM didn't see a name. ``self._extract_inline_intro_name``
+                # still requires an explicit "اسمي / أنا" marker so it's
+                # safe; the bare ``_extract_name_candidate`` is the looser
+                # one that used to capture "ألو" — only run it when the
+                # LLM is unavailable.
+                inline = self._extract_inline_intro_name(user_text)
+                if inline:
+                    ud.customer_name = inline
+                    logger.info(
+                        "call=%s | greeter prefill name | source=inline | name=%s",
+                        ud.call_id,
+                        inline,
+                    )
+                elif understanding is None or understanding.source not in {"llm", "parsed", "cache", "mock"}:
+                    candidate = _extract_name_candidate(user_text)
+                    if candidate:
+                        ud.customer_name = candidate
+                        logger.info(
+                            "call=%s | greeter prefill name | source=legacy | name=%s",
+                            ud.call_id,
+                            candidate,
+                        )
 
         if not ud.customer_phone:
-            digits = _phone_digits_only(user_text)
-            cleaned_phone = validate_phone(digits) if digits else None
+            llm_digits = phone_digits_from_understanding(understanding)
+            cleaned_phone = validate_phone(llm_digits) if llm_digits else None
+            if cleaned_phone is None:
+                # Fallback path matches the legacy behaviour.
+                digits = _phone_digits_only(user_text)
+                cleaned_phone = validate_phone(digits) if digits else None
             if cleaned_phone:
                 ud.customer_phone = cleaned_phone
                 ud.pending_phone_digits = ""
                 logger.info("call=%s | greeter prefill phone", ud.call_id)
 
+    def _available_menu_names_text(self, limit: int = 5) -> str:
+        names = [
+            str(item.get("name", "")).strip()
+            for item in (self.cfg.menu_items or [])
+            if isinstance(item, dict) and item.get("available", True) and str(item.get("name", "")).strip()
+        ]
+        if not names:
+            return "المنيو المتاح"
+        return "، ".join(names[:limit])
+
+    @staticmethod
+    def _clean_order_phrase(user_text: str) -> str:
+        cleaned = re.sub(r"[.!؟،,]+", " ", user_text or "")
+        cleaned = re.sub(
+            r"\b(?:ماشي|تمام|حاضر|طيب|طب|ممكن|لو سمحت|يا فندم|باشا|"
+            r"عايز|عاوز|عاوزه|عاوزة|محتاج|محتاجة|هطلب|اطلب|أطلب|طلب|اوردر|أوردر|هات|هاتلي)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    @staticmethod
+    def _looks_like_order_attempt(user_text: str) -> bool:
+        from nlp.arabic import normalize_ar as _normalize_ar
+
+        normalized = _normalize_ar(user_text or "")
+        if not normalized:
+            return False
+        order_cues = {
+            "عايز", "عاوز", "عاوزه", "عاوزة", "محتاج", "محتاجة",
+            "هطلب", "اطلب", "أطلب", "طلب", "اوردر", "أوردر", "هات", "هاتلي",
+        }
+        return any(_normalize_ar(cue) in normalized for cue in order_cues)
+
+    @staticmethod
+    def _quantity_only(user_text: str) -> int | None:
+        from agent import _quantity_token_to_int
+        from nlp.arabic import normalize_ar as _normalize_ar
+
+        normalized = _normalize_ar(user_text or "")
+        if not normalized:
+            return None
+        ignored = {
+            "ماشي", "تمام", "حاضر", "طيب", "طب", "هطلب", "اطلب", "أطلب",
+            "عايز", "عاوز", "محتاج", "اوردر", "طلب",
+        }
+        quantities: list[int] = []
+        other_tokens: list[str] = []
+        for token in normalized.split():
+            qty = _quantity_token_to_int(token)
+            if qty is not None:
+                quantities.append(qty)
+            elif token not in ignored:
+                other_tokens.append(token)
+        if len(quantities) == 1 and not other_tokens:
+            return quantities[0]
+        return None
+
+    def _capture_order_from_greeter(self, user_text: str) -> tuple[bool, str]:
+        """Capture an order mentioned before the caller chose delivery/takeaway.
+
+        This closes the real-call path where the customer asks for the menu,
+        then says an item, but hasn't said the fulfilment mode yet. We store
+        the order and only ask for the mode; no LLM needed and no repeated
+        "تحب تطلب إيه؟".
+        """
+        from agent import (
+            _format_order_item,
+            _is_menu_question,
+            _normalize_order_items,
+            _parse_order_item,
+            _phase2_extract_items,
+        )
+
+        ud = self.session.userdata
+        if _is_menu_question(user_text):
+            return False, ""
+        qty = self._quantity_only(user_text)
+        if qty is not None and not ud.order:
+            from utils.money import num2ar
+
+            return True, f"{num2ar(qty)} من إيه من المنيو؟ وتحبها دليفري ولا تيكاواي؟"
+        if qty is not None and ud.order:
+            from utils.money import num2ar
+
+            last_name, _old_qty = _parse_order_item(ud.order[-1])
+            updated = list(ud.order[:-1]) + [_format_order_item(last_name, qty)]
+            normalized, unknown, total = _normalize_order_items(updated, self.cfg.menu_items or [])
+            ud.order = normalized if not unknown else updated
+            ud.order_total = total if not unknown else ud.order_total
+            ud.order_validated = not unknown
+            return True, f"تمام، خليتها {num2ar(qty)} {last_name}. تحبها دليفري ولا تيكاواي؟"
+
+        if not self._looks_like_order_attempt(user_text):
+            return False, ""
+
+        items = _phase2_extract_items(user_text, self.cfg)
+        if not items:
+            phrase = self._clean_order_phrase(user_text)
+            if phrase:
+                available = self._available_menu_names_text()
+                return True, f"معلش، {phrase} مش ظاهر عندي في المنيو. المتاح {available}. تحب دليفري ولا تيكاواي؟"
+            return True, "تطلب إيه من المنيو؟ وتحبها دليفري ولا تيكاواي؟"
+
+        current = list(ud.order or [])
+        normalized, unknown, total = _normalize_order_items(current + items, self.cfg.menu_items or [])
+        ud.order = normalized if not unknown else current + items
+        ud.order_total = total if not unknown else ud.order_total
+        ud.order_validated = not unknown
+        order_text = "، ".join(items[:3])
+        logger.info("call=%s | greeter prefilled order | items=%s", ud.call_id, items)
+        return True, f"تمام، سجلت {order_text}. تحبها دليفري ولا تيكاواي؟"
+
     async def _maybe_handle_turn_deterministically(self, user_text: str) -> bool:
-        from agent import _greeter_turn_decision
+        """Deterministic contact prefill + intent routing.
+
+        When the user clearly says "توصيل" / "تيكأواي" / "حجز" / "شكوى",
+        we transfer immediately and skip the LLM₁ → tool-call → handoff
+        round-trip. Saves ~1.5 s per routing turn (the dominant first
+        bottleneck after STT in production logs).
+
+        Ambiguous cases ("أوردر" alone, no channel specified) still fall
+        through to the LLM so it can ask for clarification.
+        """
+        from agent import (
+            _DELIVERY_HINTS,
+            _TAKEAWAY_HINTS,
+            _RESERVATION_HINTS,
+            _COMPLAINT_HINTS,
+            _contains_any_hint,
+            _emit_event,
+        )
+        from nlp.arabic import normalize_ar as _normalize_ar
+
+        normalized = _normalize_ar(user_text or "")
+        if not normalized:
+            return False
+
+        ud = self.session.userdata
         self._capture_prefill_contact(user_text)
-        decision = _greeter_turn_decision(
-            user_text,
-            self.cfg,
-            has_delivery_agent="delivery" in self.session.userdata.agents,
-        )
+        captured_order, order_message = self._capture_order_from_greeter(user_text)
+        target: str | None = None
+        if _contains_any_hint(normalized, _DELIVERY_HINTS) and self._delivery_enabled:
+            target = "delivery"
+        elif _contains_any_hint(normalized, _TAKEAWAY_HINTS):
+            target = "takeaway"
+        elif _contains_any_hint(normalized, _RESERVATION_HINTS):
+            target = "reservation"
+        elif _contains_any_hint(normalized, _COMPLAINT_HINTS):
+            target = "complaint"
+
+        if (target is None or target not in ud.agents) and captured_order:
+            await self._say_and_stop(order_message)
+            return True
+
+        if target is None or target not in ud.agents:
+            return False
+
         logger.info(
-            "call=%s | greeter turn decision | reason=%s | action=%s | target=%s | text=%r",
-            self.session.userdata.call_id,
-            decision.reason,
-            decision.action,
-            decision.target_agent or "-",
-            user_text,
+            "call=%s | greeter deterministic route | Greeter → %s | text=%r",
+            ud.call_id, target, (user_text or "")[:60],
         )
-        if decision.action == "route" and decision.target_agent:
-            if self._transfer_live(decision.target_agent):
-                return True
-            await self._say_and_stop("الخدمة دي مش متاحة دلوقتي يا فندم.")
-        if decision.message:
-            await self._say_and_stop(decision.message)
-        return False
+        _emit_event(
+            "flow.transfer",
+            call_id=ud.call_id,
+            flow="greeter",
+            mode="deterministic",
+            source="greeter",
+            target=target,
+            result="success",
+        )
+        _emit_event(
+            "fast_path.matched",
+            call_id=ud.call_id,
+            flow="greeter",
+            kind="route",
+            target=target,
+        )
+        ud.prev_agent = self
+        ud.handoff_target = target
+        self.session.update_agent(ud.agents[target])
+        return True
 
     @function_tool()
-    async def to_reservation(self, context: RunContext_T) -> str | tuple[Agent, str]:
+    async def to_reservation(self, context: RunContext_T) -> str | Agent:
         """يُستدعى لما العميل يريد حجز ترابيزة."""
-        async def _impl() -> tuple[Agent, str]:
+        async def _impl() -> Agent:
             return await self._transfer("reservation", context)
 
         return await _run_tool_safely("to_reservation", context, _impl)
 
     @function_tool()
-    async def to_takeaway(self, context: RunContext_T) -> str | tuple[Agent, str]:
+    async def to_takeaway(self, context: RunContext_T) -> str | Agent:
         """يُستدعى لما العميل يريد ييجي ياخد طلبه من المطعم."""
-        async def _impl() -> tuple[Agent, str]:
+        async def _impl() -> Agent:
             return await self._transfer("takeaway", context)
 
         return await _run_tool_safely("to_takeaway", context, _impl)
 
     @function_tool()
-    async def to_delivery(self, context: RunContext_T) -> str | tuple[Agent, str]:
+    async def to_delivery(self, context: RunContext_T) -> str | Agent:
         """يُستدعى لما العميل يريد توصيل الطلب لعنوانه."""
-        async def _impl() -> str | tuple[Agent, str]:
+        async def _impl() -> str | Agent:
             from agent import _delivery_unavailable_user_message
             if not self._delivery_enabled and not self.cfg.degraded_mode:
                 return _delivery_unavailable_user_message(self.cfg)
@@ -189,9 +407,9 @@ class Greeter(BaseAgent):
         return await _run_tool_safely("to_delivery", context, _impl)
 
     @function_tool()
-    async def to_complaint(self, context: RunContext_T) -> str | tuple[Agent, str]:
+    async def to_complaint(self, context: RunContext_T) -> str | Agent:
         """يُستدعى لما العميل عنده شكوى أو مشكلة."""
-        async def _impl() -> tuple[Agent, str]:
+        async def _impl() -> Agent:
             return await self._transfer("complaint", context)
 
         return await _run_tool_safely("to_complaint", context, _impl)
@@ -201,8 +419,8 @@ class Greeter(BaseAgent):
         self,
         user_text: Annotated[str, Field(description="آخر كلام واضح قاله العميل")],
         context: RunContext_T,
-    ) -> str | tuple[Agent, str]:
-        async def _impl() -> str | tuple[Agent, str]:
+    ) -> str | Agent:
+        async def _impl() -> str | Agent:
             from agent import _delivery_unavailable_user_message, _guess_request_intent
             intent = _guess_request_intent(user_text, context.userdata.restaurant)
             if intent in {"delivery", "delivery_degraded"}:

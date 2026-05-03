@@ -89,8 +89,25 @@ class UserData:
     last_guard_signature: str | None = None
     last_user_message: str = ""
     last_agent_message: str = ""
+    last_question_category: str = ""
+    question_category_history: list[str] = field(default_factory=list)
+    turn_trace_started_monotonic: float = 0.0
+    turn_trace_slot_before: dict[str, Any] = field(default_factory=dict)
+    turn_trace_current_turn: int = 0
+    turn_trace_decision_mode: str = ""
+    turn_trace_decision_reason: str = ""
+    turn_trace_engine_decision_ms: int | None = None
+    turn_trace_tts_enqueue_ms: int | None = None
+    turn_trace_finished: bool = False
     active_flow: str = ""
     handoff_target: str = ""
+    confirmation_pending: bool = False
+    confirmation_received: bool = False
+    # Per-turn cache for the LLM-driven structured understanding so the
+    # several call-sites in a single turn (signals emit, order intercept,
+    # contact intercept, address intercept) reuse one extraction.
+    turn_understanding: Any = None
+    turn_understanding_text: str = ""
 
     customer_name: InitVar[str | None] = None
     customer_phone: InitVar[str | None] = None
@@ -211,22 +228,82 @@ class UserData:
         )
 
     def summarize(self) -> str:
-        return _json.dumps(
-            {
-                "name": self.customer_name or "—",
-                "phone": self.customer_phone or "—",
-                "order": self.order or "—",
-                "special_requests": self.special_requests or "—",
-                "pending_upsell": self.pending_upsell_item or "—",
-                "upsell_accepted": self.upsell_accepted,
-                "delivery_address": self.delivery_address or "—",
-                "delivery_zone": self.delivery_zone or "—",
-                "reservation_time": self.reservation_time or "—",
-                "guests_count": self.guests_count or "—",
-                "branch": self.selected_branch or "—",
-            },
-            ensure_ascii=False,
-        )
+        """YAML snapshot of the call state.
+
+        YAML parses better than JSON in LLM contexts (LiveKit's own
+        canonical multi-agent example notes this), and the dense
+        block here is the single source of truth the LLM sees on
+        agent enter.
+        """
+        try:
+            import yaml as _yaml
+        except ImportError:
+            _yaml = None
+
+        data: dict[str, Any] = {
+            "customer_name": self.customer_name or "unknown",
+            "customer_phone": self.customer_phone or "unknown",
+            "order": list(self.order) if self.order else "unknown",
+            "order_total": (
+                float(self.order_total)
+                if self.order_validated and self.order_total
+                else "unknown"
+            ),
+            "special_requests": self.special_requests or "unknown",
+            "delivery_address": self.delivery_address or "unknown",
+            "delivery_zone": self.delivery_zone or "unknown",
+            "delivery_landmark": self.delivery_landmark or "unknown",
+            "reservation_time": self.reservation_time or "unknown",
+            "guests_count": self.guests_count if self.guests_count is not None else "unknown",
+            "branch": self.selected_branch or "unknown",
+            "pending_upsell": self.pending_upsell_item or "unknown",
+            "upsell_accepted": bool(self.upsell_accepted),
+            "confirmation_pending": bool(self.confirmation_pending),
+            "complaint_text": self.complaint_text or "unknown",
+            "complaint_type": self.complaint_type or "unknown",
+            "order_confirmed": bool(self.order_confirmed),
+            "reservation_confirmed": bool(self.reservation_confirmed),
+            "complaint_logged": bool(self.complaint_logged),
+        }
+        if _yaml is not None:
+            return _yaml.safe_dump(data, allow_unicode=True, sort_keys=False).strip()
+        return _json.dumps(data, ensure_ascii=False)
+
+    def conversational_summary(self) -> str:
+        """Human-readable call state for LLM handoff prompts."""
+        facts: list[str] = []
+        if self.customer_name:
+            facts.append(f"الاسم متسجل: {self.customer_name}.")
+        if self.customer_phone:
+            facts.append(f"رقم الموبايل متسجل: {self.customer_phone}.")
+        if self.order:
+            order_text = "، ".join(item for item in self.order if item)
+            if order_text:
+                facts.append(f"الطلب الحالي: {order_text}.")
+        if self.order_total:
+            facts.append(f"إجمالي الطلب الحالي: {self.order_total:g} جنيه.")
+        if self.special_requests:
+            facts.append(f"طلب خاص: {self.special_requests}.")
+        if self.pending_upsell_item:
+            facts.append(f"في إضافة مقترحة معلقة: {self.pending_upsell_item}.")
+        if self.delivery_address:
+            address = self.delivery_address
+            if self.delivery_zone:
+                address = f"{address} ({self.delivery_zone})"
+            facts.append(f"عنوان التوصيل متسجل: {address}.")
+        if self.delivery_landmark:
+            facts.append(f"علامة مميزة: {self.delivery_landmark}.")
+        if self.reservation_time:
+            facts.append(f"ميعاد الحجز: {self.reservation_time}.")
+        if self.guests_count is not None:
+            facts.append(f"عدد الضيوف: {self.guests_count}.")
+        if self.selected_branch:
+            facts.append(f"الفرع: {self.selected_branch}.")
+        if self.complaint_text:
+            facts.append(f"الشكوى: {self.complaint_text}.")
+        if not facts:
+            return "لسه مفيش بيانات مؤكدة من العميل."
+        return " ".join(facts)
 
 
 _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {

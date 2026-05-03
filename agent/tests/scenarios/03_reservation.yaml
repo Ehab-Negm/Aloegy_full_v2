@@ -1,0 +1,31 @@
+# Reservation flows: time + guest count + name + phone.
+scenarios:
+  - name: reservation_basic
+    menu: []
+    turns:
+      - user: "عايز احجز ترابيزة"
+        expect: {intent: reservation}
+      - user: "بكره الساعة 8 مساء"
+        expect: {reservation_time_set: true}
+      - user: "هنبقى 4 ضيوف"
+        expect: {guests: 4}
+      - user: "اسمي ياسمين"
+        expect: {name: "ياسمين"}
+      - user: "01112345678"
+        expect: {phone: "01112345678"}
+
+  - name: reservation_spoken_guests
+    menu: []
+    turns:
+      - user: "احجزلي يوم الجمعة الساعة 9"
+        expect: {intent: reservation, reservation_time_set: true}
+      - user: "خمسه ضيوف"
+        expect: {guests: 5}
+
+  - name: reservation_today
+    menu: []
+    turns:
+      - user: "حجز النهارده 7 مساء"
+        expect: {intent: reservation, reservation_time_set: true}
+      - user: "اربعه شخص"
+        expect: {guests: 4}

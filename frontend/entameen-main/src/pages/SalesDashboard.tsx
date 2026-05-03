@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Loader2, Phone, Play, Plus, Send, Store } from "lucide-react";
+import { ClipboardList, Loader2, Phone, Play, Plus, Send, Store } from "lucide-react";
 
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import MyZonesTab from "@/components/sales/MyZonesTab";
 import logo from "@/assets/logo.png";
 import {
   clearAuthSession,
@@ -166,8 +167,11 @@ const SalesDashboard = () => {
       </div>
 
       <div className="container mx-auto px-4 py-6">
-        <Tabs defaultValue="register" className="space-y-4">
+        <Tabs defaultValue="zones" className="space-y-4">
           <TabsList className="rounded-xl bg-muted/50 p-1">
+            <TabsTrigger value="zones" className="gap-2 rounded-lg data-[state=active]:shadow-sm">
+              <ClipboardList size={16} /> زوناتي
+            </TabsTrigger>
             <TabsTrigger value="register" className="gap-2 rounded-lg data-[state=active]:shadow-sm">
               <Store size={16} /> طلب تسجيل مطعم
             </TabsTrigger>
@@ -175,6 +179,10 @@ const SalesDashboard = () => {
               <Play size={16} /> Demo Sessions
             </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="zones" className="space-y-6">
+            <MyZonesTab />
+          </TabsContent>
 
           <TabsContent value="register" className="space-y-6">
             <Card className="border-border/50">

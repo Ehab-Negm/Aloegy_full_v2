@@ -1,0 +1,36 @@
+# Confirmation / submit-safety scenarios run as YAML stories.
+# These mostly assert no_capture (extractor sees nothing useful) so the
+# fallback_rate metric covers explicit "outside-extractor" turns too.
+scenarios:
+  - name: duplicate_confirm_thanks_chain
+    menu: []
+    turns:
+      - {user: "متشكر", expect: {intent: post_completion_thanks}}
+      - {user: "تمام كده", expect: {intent: post_completion_thanks}}
+      - {user: "بس كده", expect: {intent: post_completion_thanks}}
+      - {user: "خلاص", expect: {intent: post_completion_thanks}}
+
+  - name: duplicate_yes_after_submit
+    menu: [{name: "كولا", price: 15.0, available: true}]
+    turns:
+      - {user: "كولا", expect: {order_items: {"كولا": 1}}}
+      - {user: "اسمي محمد", expect: {name: "محمد"}}
+      - {user: "01012345678", expect: {phone: "01012345678"}}
+      # The deterministic extractors do not own confirmation. They only
+      # need to *not* crash or invent items on bare yes/no replies.
+      - {user: "أكد", expect: {}}
+      - {user: "أيوه", expect: {}}
+
+  - name: backend_failure_recoverable
+    menu: [{name: "كولا", price: 15.0, available: true}]
+    turns:
+      - {user: "كولا اتنين", expect: {order_items: {"كولا": 2}}}
+      - {user: "اسمي أحمد", expect: {name: "أحمد"}}
+      - {user: "01112345678", expect: {phone: "01112345678"}}
+      - {user: "حاول تاني", expect: {}}
+
+  - name: empty_turns_treated_as_unknown
+    menu: []
+    turns:
+      - {user: "", expect: {fallback: true}}
+      - {user: "...", expect: {fallback: true}}

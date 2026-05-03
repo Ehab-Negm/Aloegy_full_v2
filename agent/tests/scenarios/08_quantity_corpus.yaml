@@ -1,0 +1,50 @@
+# Dense quantity parsing corpus — 30+ short scenarios.
+menu: &menu
+  - {name: "كولا", price: 15.0, available: true}
+  - {name: "بطاطس", price: 20.0, available: true}
+  - {name: "برجر كبير", price: 45.0, available: true}
+
+scenarios:
+  - name: qty_digits_corpus
+    menu: *menu
+    turns:
+      - {user: "كولا 1", expect: {order_items: {"كولا": 1}}}
+      - {user: "كولا 2", expect: {order_items: {"كولا": 3}}}
+      - {user: "كولا 3", expect: {order_items: {"كولا": 6}}}
+      - {user: "كولا 4", expect: {order_items: {"كولا": 10}}}
+
+  - name: qty_arabic_indic_digits_corpus
+    menu: *menu
+    turns:
+      - {user: "بطاطس ١", expect: {order_items: {"بطاطس": 1}}}
+      - {user: "بطاطس ٢", expect: {order_items: {"بطاطس": 3}}}
+      - {user: "بطاطس ٣", expect: {order_items: {"بطاطس": 6}}}
+
+  - name: qty_spoken_before
+    menu: *menu
+    turns:
+      - {user: "اتنين برجر كبير", expect: {order_items: {"برجر كبير": 2}}}
+      - {user: "وتلاته كولا", expect: {order_items: {"برجر كبير": 2, "كولا": 3}}}
+
+  - name: qty_spoken_after
+    menu: *menu
+    turns:
+      - {user: "كولا اتنين", expect: {order_items: {"كولا": 2}}}
+      - {user: "بطاطس تلاته", expect: {order_items: {"كولا": 2, "بطاطس": 3}}}
+
+  - name: qty_min_pattern
+    menu: *menu
+    turns:
+      - {user: "اتنين من البرجر الكبير", expect: {order_items: {"برجر كبير": 2}}}
+
+  - name: qty_multiplier_unicode
+    menu: *menu
+    turns:
+      - {user: "كولا × 2", expect: {order_items: {"كولا": 2}}}
+      - {user: "كولا * 3", expect: {order_items: {"كولا": 5}}}
+
+  - name: qty_multiplier_x
+    menu: *menu
+    turns:
+      - {user: "كولا x 2", expect: {order_items: {"كولا": 2}}}
+      - {user: "بطاطس x 4", expect: {order_items: {"كولا": 2, "بطاطس": 4}}}

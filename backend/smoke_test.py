@@ -154,7 +154,11 @@ def receive_next_order_stream_event(
 
     def reader() -> None:
         event_name = "message"
-        stream_url = f"{base_url}/orders/stream?{urllib.parse.urlencode({'token': token, 'restaurantId': restaurant_id})}"
+        ticket_payload = ApiClient(base_url, token).post("/auth/stream-ticket")
+        ticket = ticket_payload.get("ticket")
+        if not isinstance(ticket, str) or not ticket:
+            raise SmokeTestError("Stream ticket endpoint did not return a ticket")
+        stream_url = f"{base_url}/orders/stream?{urllib.parse.urlencode({'ticket': ticket, 'restaurantId': restaurant_id})}"
         request = urllib.request.Request(stream_url, headers={"Accept": "text/event-stream"})
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds + 5) as response:

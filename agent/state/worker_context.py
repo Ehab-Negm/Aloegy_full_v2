@@ -38,6 +38,11 @@ class WorkerContext:
     max_concurrent_sessions: int = 100
     max_turns_per_session: int = 50
     turn_counts: dict[str, int] = field(default_factory=dict)
+    # Per-call submission trackers (Phase 4 idempotency second line).
+    # Keyed by ``UserData.call_id`` so each call has an isolated record
+    # and a worker handling concurrent calls cannot leak state between
+    # them.
+    submission_trackers: dict[str, Any] = field(default_factory=dict)
 
 
 def build_worker_context(queue_max_items: int) -> WorkerContext:

@@ -1,6 +1,13 @@
 # Environment variables
 .env
 
+# Google Cloud service account keys — never commit these
+*-gcp-key.json
+*.gcp-key.json
+.gcp-key.json
+agent/nimble-radio-*.json
+agent/*-service-account*.json
+
 # Python
 __pycache__/
 *.pyc

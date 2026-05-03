@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8" />
+<title>AloEgy Dev Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0e1015;
+    --panel: #161a23;
+    --panel-2: #1d212c;
+    --border: #262b38;
+    --text: #d8dee9;
+    --muted: #7a8190;
+    --accent: #4f9cf9;
+    --green: #6dc28a;
+    --orange: #f0a04b;
+    --red: #ec6e6e;
+    --purple: #b88af0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; font-size: 13px; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.3px; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  header .meta strong { color: var(--text); font-weight: 500; }
+  header .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 6px; }
+  header .status.bad { background: var(--red); }
+  nav.tabs {
+    display: flex; gap: 4px; padding: 0 16px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  nav.tabs button {
+    background: transparent; border: 0; color: var(--muted);
+    padding: 10px 14px; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent;
+  }
+  nav.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+  nav.tabs button:hover { color: var(--text); }
+  main { padding: 14px; height: calc(100% - 92px); overflow: auto; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin-bottom: 14px; }
+  .panel h2 { margin: 0 0 10px 0; font-size: 13px; font-weight: 600; color: var(--text); display: flex; justify-content: space-between; align-items: center; }
+  .panel h2 .badge { background: var(--panel-2); color: var(--muted); padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 400; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td.mono { font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; font-size: 11px; }
+  td .pill { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+  td .pill.green { background: rgba(109, 194, 138, 0.15); color: var(--green); }
+  td .pill.red { background: rgba(236, 110, 110, 0.15); color: var(--red); }
+  td .pill.orange { background: rgba(240, 160, 75, 0.15); color: var(--orange); }
+  td .pill.purple { background: rgba(184, 138, 240, 0.15); color: var(--purple); }
+  td .pill.gray { background: rgba(122, 129, 144, 0.15); color: var(--muted); }
+  /* Toast notifications */
+  #toasts {
+    position: fixed; top: 50px; right: 16px; z-index: 200;
+    display: flex; flex-direction: column; gap: 8px; max-width: 380px;
+    pointer-events: none;
+  }
+  .toast {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-left: 3px solid var(--red); border-radius: 4px;
+    padding: 10px 12px; font-size: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    pointer-events: auto;
+    animation: slideIn 0.2s ease-out;
+  }
+  .toast.warn { border-left-color: var(--orange); }
+  .toast.info { border-left-color: var(--accent); }
+  .toast .head { font-weight: 600; margin-bottom: 4px; color: var(--red); }
+  .toast.warn .head { color: var(--orange); }
+  .toast.info .head { color: var(--accent); }
+  .toast .body { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; word-break: break-word; }
+  @keyframes slideIn { from { transform: translateX(100%); opacity: 0 } to { transform: translateX(0); opacity: 1 } }
+  /* Charts */
+  .chart {
+    width: 100%; height: 220px; background: var(--panel-2); border-radius: 4px;
+    padding: 10px; box-sizing: border-box;
+  }
+  .chart svg { display: block; width: 100%; height: 100%; }
+  .chart .axis { stroke: var(--border); stroke-width: 1; }
+  .chart .grid { stroke: var(--border); stroke-width: 0.5; stroke-dasharray: 2,3; opacity: 0.6; }
+  .chart .line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+  .chart .pt   { fill: var(--accent); }
+  .chart .pt.fast { fill: var(--green); }
+  .chart .label { fill: var(--muted); font-size: 10px; font-family: ui-monospace, monospace; }
+  /* Buttons */
+  .btn {
+    background: var(--accent); color: #fff; border: 0; padding: 5px 12px;
+    border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn.ghost { background: var(--panel-2); color: var(--text); }
+  .btn.ghost:hover { background: var(--border); }
+  .btn.green { background: var(--green); }
+  .small { font-size: 11px; color: var(--muted); }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .stat { display: flex; flex-direction: column; gap: 3px; padding: 12px; background: var(--panel-2); border-radius: 6px; }
+  .stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat .value { font-size: 22px; font-weight: 600; color: var(--text); }
+  .stat .sub { color: var(--muted); font-size: 11px; }
+  .log {
+    font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace;
+    font-size: 11px; line-height: 1.6;
+    max-height: 70vh; overflow: auto;
+    background: var(--panel-2); border-radius: 6px; padding: 10px;
+  }
+  .log .row { display: grid; grid-template-columns: 75px 110px 90px 1fr; gap: 10px; padding: 2px 0; border-bottom: 1px dashed transparent; }
+  .log .row:hover { background: rgba(255,255,255,0.025); }
+  .log .ts { color: var(--muted); }
+  .log .ev { color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log .ev.error { color: var(--red); }
+  .log .ev.warn { color: var(--orange); }
+  .log .ev.fast { color: var(--green); }
+  .log .cid { color: var(--purple); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log .body { color: var(--text); white-space: pre-wrap; word-break: break-word; }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
+  .toolbar input, .toolbar select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 5px 8px; font-size: 12px; outline: none;
+  }
+  .toolbar input:focus, .toolbar select:focus { border-color: var(--accent); }
+  .toolbar label { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); font-style: italic; text-align: center; padding: 20px; }
+  .clickable { cursor: pointer; }
+  .clickable:hover { background: rgba(79, 156, 249, 0.06); }
+  .kv { display: grid; grid-template-columns: 200px 1fr; gap: 6px 14px; font-size: 12px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-family: ui-monospace, SF Mono, Menlo, Consolas, monospace; font-size: 11px; word-break: break-word; }
+  .modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none;
+    align-items: center; justify-content: center; padding: 20px; z-index: 100;
+  }
+  .modal.open { display: flex; }
+  .modal .body { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; max-width: 900px; width: 100%; max-height: 90vh; overflow: auto; padding: 16px; }
+  .modal .body h3 { margin: 0 0 14px 0; display: flex; justify-content: space-between; align-items: center; }
+  .modal .close { background: var(--panel-2); color: var(--text); border: 0; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+  .modal .close:hover { background: var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🍽️ AloEgy &middot; Dev Dashboard</h1>
+  <div class="meta" id="header-meta">
+    <span class="status" id="status-dot"></span>
+    <span id="status-text">connecting…</span>
+    &middot; <span>active calls: <strong id="active-calls">0</strong></span>
+    &middot; <span>events: <strong id="event-count">0</strong></span>
+    &middot; <button class="btn green" onclick="triggerTestCall()" title="Generate a LiveKit Meet URL + open it">▶ test call</button>
+  </div>
+</header>
+
+<div id="toasts"></div>
+
+<nav class="tabs">
+  <button data-tab="live"    class="active">Live</button>
+  <button data-tab="calls">Calls</button>
+  <button data-tab="metrics">Metrics</button>
+  <button data-tab="config">Config</button>
+</nav>
+
+<main>
+  <!-- LIVE TAB -->
+  <section data-pane="live">
+    <div class="panel">
+      <h2>Live event stream <span class="badge" id="live-stream-status">disconnected</span></h2>
+      <div class="toolbar">
+        <label>filter:</label>
+        <input id="live-filter" placeholder="event= / call_id= / freeform" />
+        <label><input type="checkbox" id="live-autoscroll" checked /> auto-scroll</label>
+        <button class="close" onclick="document.getElementById('live-log').innerHTML=''">clear</button>
+      </div>
+      <div class="log" id="live-log"></div>
+    </div>
+  </section>
+
+  <!-- CALLS TAB -->
+  <section data-pane="calls" hidden>
+    <div class="panel">
+      <h2>Search across all events <span class="badge">regex</span></h2>
+      <div class="toolbar">
+        <label>regex:</label>
+        <input id="search-regex" placeholder="e.g.  llm_fallback|fast_path  →  matches both" style="flex:1; min-width:300px" />
+        <label>event:</label>
+        <input id="search-event" placeholder="(optional, exact)" style="width:160px" />
+        <label>limit:</label>
+        <input id="search-limit" type="number" value="100" min="1" max="2000" style="width:80px" />
+        <button class="btn" onclick="runSearch()">search</button>
+        <span class="small" id="search-status"></span>
+      </div>
+      <div class="log" id="search-log" style="max-height:40vh; display:none"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Recent calls <span class="badge" id="calls-count">0</span></h2>
+      <div class="toolbar">
+        <button class="btn ghost" onclick="loadCalls()">refresh</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>started</th>
+            <th>call_id</th>
+            <th>flow</th>
+            <th>turns</th>
+            <th>fast_path</th>
+            <th>llm_fallback</th>
+            <th>errors</th>
+            <th>duration</th>
+            <th>close</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="calls-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- METRICS TAB -->
+  <section data-pane="metrics" hidden>
+    <div class="grid" id="metrics-totals"></div>
+    <div class="panel">
+      <h2>
+        Turn latency over time
+        <span style="font-weight:400;font-size:11px;color:var(--muted)">
+          last
+          <select id="chart-minutes" onchange="loadChart()">
+            <option value="15">15 min</option>
+            <option value="60" selected>1 hour</option>
+            <option value="180">3 hours</option>
+            <option value="720">12 hours</option>
+          </select>
+          —
+          bucket
+          <select id="chart-bucket" onchange="loadChart()">
+            <option value="turn_handler_total" selected>turn_handler_total</option>
+            <option value="llm_fallback">llm_fallback</option>
+            <option value="engine_decision">engine_decision</option>
+            <option value="eou_delay_ms">eou_delay_ms</option>
+            <option value="tts_enqueue">tts_enqueue</option>
+          </select>
+        </span>
+      </h2>
+      <div class="chart" id="chart-container">
+        <svg id="latency-chart" viewBox="0 0 800 200" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="small" id="chart-meta" style="margin-top:6px"></div>
+    </div>
+    <div class="panel">
+      <h2>Pipeline decisions</h2>
+      <table id="pipeline-actions"><thead><tr><th>action</th><th>count</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel">
+      <h2>Turn latency aggregates (ms)</h2>
+      <table id="latency-table"><thead><tr><th>bucket</th><th>count</th><th>p50</th><th>p95</th><th>max</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <!-- CONFIG TAB -->
+  <section data-pane="config" hidden>
+    <div class="panel">
+      <h2>Current configuration</h2>
+      <div class="grid" id="config-grid"></div>
+    </div>
+  </section>
+</main>
+
+<!-- Call detail modal -->
+<div class="modal" id="call-modal">
+  <div class="body">
+    <h3><span id="modal-call-id">call</span><button class="close" onclick="closeCallModal()">close</button></h3>
+    <div class="log" id="modal-log"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const tabs = document.querySelectorAll('nav.tabs button');
+const panes = document.querySelectorAll('main section[data-pane]');
+
+function showTab(name) {
+  tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  panes.forEach(p => p.hidden = p.dataset.pane !== name);
+  if (name === 'calls')   loadCalls();
+  if (name === 'metrics') { loadMetrics(); loadChart(); }
+  if (name === 'config')  loadConfig();
+}
+
+// ── Toast notifications ───────────────────────────────────────────
+function toast(level, head, body) {
+  const t = document.createElement('div');
+  t.className = 'toast ' + level;
+  t.innerHTML = `<div class="head">${escapeHtml(head)}</div><div class="body">${escapeHtml(body || '')}</div>`;
+  $('toasts').appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.4s'; }, 6000);
+  setTimeout(() => t.remove(), 6500);
+}
+
+// ── Test call ─────────────────────────────────────────────────────
+async function triggerTestCall() {
+  toast('info', 'Test call', 'Generating LiveKit Meet URL…');
+  try {
+    const r = await fetch('/api/test_call');
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      toast('warn', 'Test call failed', err.detail || ('HTTP ' + r.status));
+      return;
+    }
+    const data = await r.json();
+    toast('info', 'Joining room ' + data.room, 'Opening LiveKit Meet…');
+    window.open(data.meet_url, '_blank');
+  } catch (e) {
+    toast('warn', 'Test call error', String(e));
+  }
+}
+tabs.forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)));
+
+// ── Live stream (SSE) ──────────────────────────────────────────────
+let evtCount = 0;
+let evtSource = null;
+function connectLive() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/api/events/stream');
+  $('live-stream-status').textContent = 'connecting…';
+  evtSource.onopen = () => {
+    $('live-stream-status').textContent = 'live';
+    $('status-dot').classList.remove('bad');
+    $('status-text').textContent = 'connected';
+  };
+  evtSource.onerror = () => {
+    $('live-stream-status').textContent = 'reconnecting…';
+    $('status-dot').classList.add('bad');
+    $('status-text').textContent = 'disconnected';
+  };
+  evtSource.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      appendLive(ev);
+      maybeToast(ev);
+      evtCount++;
+      $('event-count').textContent = evtCount;
+    } catch (err) { /* ignore */ }
+  };
+}
+
+// Surface errors / fallbacks as toasts so the developer notices them
+// without hunting through the live log.
+const _seenToastSeq = new Set();
+function maybeToast(ev) {
+  if (!ev || !ev._seq || _seenToastSeq.has(ev._seq)) return;
+  _seenToastSeq.add(ev._seq);
+  if (_seenToastSeq.size > 200) {
+    // Trim
+    for (const v of Array.from(_seenToastSeq).slice(0, 100)) _seenToastSeq.delete(v);
+  }
+  const kind = ev.event || '';
+  if (kind === 'session.error' || ev.error) {
+    toast('error', 'Session error', JSON.stringify(ev).slice(0, 220));
+  } else if (kind === 'fallback.triggered') {
+    toast('warn', 'LLM fallback', `call=${ev.call_id || '?'} flow=${ev.flow || '?'} reason=${ev.reason || '?'}`);
+  } else if (kind === 'config.cache' && String(ev.state || '').includes('stale')) {
+    toast('warn', 'Stale config', `restaurant=${ev.restaurant || '?'} age=${ev.age_s || '?'}s`);
+  } else if (kind === 'call.start') {
+    toast('info', 'Call started', `${ev.call_id} — ${ev.room || ''}`);
+  } else if (kind === 'flow.transfer') {
+    toast('info', 'Handoff', `${ev.source || '?'} → ${ev.target || '?'}`);
+  }
+}
+function classifyEvent(ev) {
+  const kind = ev.event || '';
+  if (kind.includes('error') || ev.error || kind === 'fallback.triggered') return 'error';
+  if (kind.includes('warn') || kind === 'config.cache' && ev.state && String(ev.state).includes('stale')) return 'warn';
+  if (kind === 'pipeline.decision' && ev.action !== 'fallback_llm') return 'fast';
+  if (kind === 'fast_path.matched' || (kind === 'turn.trace' && ev.fast_path)) return 'fast';
+  return '';
+}
+function appendLive(ev) {
+  const filter = $('live-filter').value.trim().toLowerCase();
+  const matches =
+    !filter ||
+    JSON.stringify(ev).toLowerCase().includes(filter);
+  if (!matches) return;
+  const log = $('live-log');
+  const row = document.createElement('div');
+  row.className = 'row';
+  const ts = (ev.ts || '').slice(11, 19);
+  const tag = classifyEvent(ev);
+  row.innerHTML = `
+    <span class="ts">${ts}</span>
+    <span class="ev ${tag}">${escapeHtml(ev.event || '?')}</span>
+    <span class="cid">${escapeHtml(ev.call_id || '')}</span>
+    <span class="body">${formatBody(ev)}</span>`;
+  log.appendChild(row);
+  // Drop old rows beyond a cap.
+  while (log.childElementCount > 800) log.removeChild(log.firstChild);
+  if ($('live-autoscroll').checked) {
+    log.scrollTop = log.scrollHeight;
+  }
+}
+function formatBody(ev) {
+  const skip = new Set(['event', 'ts', 'call_id', '_seq']);
+  const parts = [];
+  for (const [k, v] of Object.entries(ev)) {
+    if (skip.has(k)) continue;
+    let s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    if (s.length > 120) s = s.slice(0, 117) + '…';
+    parts.push(`<span style="color:var(--muted)">${escapeHtml(k)}=</span>${escapeHtml(s)}`);
+  }
+  return parts.join(' ');
+}
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
+}
+$('live-filter').addEventListener('input', () => { /* filter applied on next event */ });
+
+// ── Calls tab ──────────────────────────────────────────────────────
+async function loadCalls() {
+  const r = await fetch('/api/calls?limit=100');
+  const data = await r.json();
+  $('calls-count').textContent = data.count || 0;
+  const tb = $('calls-tbody');
+  tb.innerHTML = '';
+  if (!data.calls || data.calls.length === 0) {
+    tb.innerHTML = '<tr><td colspan="9" class="empty">no calls yet</td></tr>';
+    return;
+  }
+  for (const c of data.calls) {
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    tr.onclick = () => openCallModal(c.call_id);
+    const flowPill = c.flow ? `<span class="pill purple">${escapeHtml(c.flow)}</span>` : '';
+    const errPill = c.errors > 0 ? `<span class="pill red">${c.errors}</span>` : '<span class="pill gray">0</span>';
+    tr.innerHTML = `
+      <td class="mono">${(c.started_at || '').slice(11, 19)}</td>
+      <td class="mono">${escapeHtml(c.call_id || '')}</td>
+      <td>${flowPill}</td>
+      <td>${c.turns}</td>
+      <td><span class="pill green">${c.fast_path_count}</span></td>
+      <td><span class="pill orange">${c.llm_fallback_count}</span></td>
+      <td>${errPill}</td>
+      <td>${c.duration_s != null ? c.duration_s + 's' : '<span style="color:var(--muted)">—</span>'}</td>
+      <td><span class="pill gray">${escapeHtml(c.close_reason || '—')}</span></td>
+      <td><a class="btn ghost" href="/api/calls/${encodeURIComponent(c.call_id)}/export" onclick="event.stopPropagation()" title="Download JSON" style="padding:2px 8px;text-decoration:none">⤓</a></td>`;
+    tb.appendChild(tr);
+  }
+  $('active-calls').textContent =
+    data.calls.filter(c => !c.ended_at).length;
+}
+
+// ── Call detail modal ──────────────────────────────────────────────
+async function openCallModal(callId) {
+  const r = await fetch('/api/calls/' + encodeURIComponent(callId));
+  const data = await r.json();
+  $('modal-call-id').textContent = 'call ' + callId;
+  const log = $('modal-log');
+  log.innerHTML = '';
+  for (const ev of (data.events || [])) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const ts = (ev.ts || '').slice(11, 19);
+    const tag = classifyEvent(ev);
+    row.innerHTML = `
+      <span class="ts">${ts}</span>
+      <span class="ev ${tag}">${escapeHtml(ev.event || '?')}</span>
+      <span class="cid">${escapeHtml(ev.flow || '')}</span>
+      <span class="body">${formatBody(ev)}</span>`;
+    log.appendChild(row);
+  }
+  $('call-modal').classList.add('open');
+}
+function closeCallModal() { $('call-modal').classList.remove('open'); }
+
+// ── Metrics tab ────────────────────────────────────────────────────
+async function loadMetrics() {
+  const r = await fetch('/api/metrics');
+  const data = await r.json();
+  // Totals
+  const t = data.totals || {};
+  $('metrics-totals').innerHTML = `
+    <div class="stat"><div class="label">events buffered</div><div class="value">${t.events||0}</div></div>
+    <div class="stat"><div class="label">fast-path turns</div><div class="value" style="color:var(--green)">${t.fast_path_turns||0}</div></div>
+    <div class="stat"><div class="label">llm fallback turns</div><div class="value" style="color:var(--orange)">${t.llm_fallback_turns||0}</div></div>
+    <div class="stat"><div class="label">errors</div><div class="value" style="color:var(--red)">${t.errors||0}</div></div>`;
+  // Pipeline actions
+  const pa = data.pipeline_actions || {};
+  const tb1 = $('pipeline-actions').querySelector('tbody');
+  tb1.innerHTML = '';
+  for (const [k, v] of Object.entries(pa).sort((a,b) => b[1]-a[1])) {
+    tb1.innerHTML += `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`;
+  }
+  if (!Object.keys(pa).length) tb1.innerHTML = '<tr><td colspan="2" class="empty">no decisions yet</td></tr>';
+  // Latency
+  const lat = data.latency || {};
+  const tb2 = $('latency-table').querySelector('tbody');
+  tb2.innerHTML = '';
+  for (const [bucket, stats] of Object.entries(lat)) {
+    tb2.innerHTML += `<tr>
+      <td>${escapeHtml(bucket)}</td>
+      <td>${stats.count}</td>
+      <td>${stats.p50 != null ? Math.round(stats.p50) : '—'}</td>
+      <td>${stats.p95 != null ? Math.round(stats.p95) : '—'}</td>
+      <td>${stats.max != null ? Math.round(stats.max) : '—'}</td>
+    </tr>`;
+  }
+  if (!Object.keys(lat).length) tb2.innerHTML = '<tr><td colspan="5" class="empty">no latency data yet</td></tr>';
+}
+
+// ── Config tab ─────────────────────────────────────────────────────
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  const data = await r.json();
+  const g = $('config-grid');
+  g.innerHTML = '';
+  for (const [section, kv] of Object.entries(data)) {
+    const card = document.createElement('div');
+    card.className = 'stat';
+    card.style.background = 'var(--panel-2)';
+    let inner = `<div class="label">${escapeHtml(section)}</div>`;
+    inner += `<div class="kv" style="margin-top:8px">`;
+    for (const [k, v] of Object.entries(kv || {})) {
+      inner += `<span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(String(v))}</span>`;
+    }
+    inner += `</div>`;
+    card.innerHTML = inner;
+    g.appendChild(card);
+  }
+}
+
+// ── Health poll (header) ──────────────────────────────────────────
+async function pollHealth() {
+  try {
+    const r = await fetch('/api/health');
+    const data = await r.json();
+    if (data.ok) {
+      $('status-dot').classList.remove('bad');
+      $('status-text').textContent = 'healthy';
+    } else {
+      $('status-dot').classList.add('bad');
+      $('status-text').textContent = 'unhealthy';
+    }
+    if (data.active_calls != null) $('active-calls').textContent = data.active_calls;
+  } catch { /* ignore */ }
+}
+
+// ── Regex search across all events (SQLite-backed) ────────────────
+async function runSearch() {
+  const regex = $('search-regex').value.trim();
+  const event = $('search-event').value.trim();
+  const limit = parseInt($('search-limit').value || '100', 10);
+  if (!regex && !event) {
+    toast('warn', 'Search', 'Type a regex or event name');
+    return;
+  }
+  $('search-status').textContent = 'searching…';
+  const params = new URLSearchParams();
+  if (regex) params.set('regex', regex);
+  if (event) params.set('event', event);
+  params.set('limit', String(limit));
+  try {
+    const r = await fetch('/api/events?' + params.toString());
+    const data = await r.json();
+    const log = $('search-log');
+    log.style.display = 'block';
+    log.innerHTML = '';
+    if (!data.events || data.events.length === 0) {
+      log.innerHTML = '<div class="empty">no matches</div>';
+      $('search-status').textContent = '0 results';
+      return;
+    }
+    for (const ev of data.events) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const ts = (ev.ts || '').slice(11, 19);
+      const tag = classifyEvent(ev);
+      row.innerHTML = `
+        <span class="ts">${ts}</span>
+        <span class="ev ${tag}">${escapeHtml(ev.event || '?')}</span>
+        <span class="cid clickable" onclick="openCallModal('${escapeHtml(ev.call_id || '')}')">${escapeHtml(ev.call_id || '')}</span>
+        <span class="body">${formatBody(ev)}</span>`;
+      log.appendChild(row);
+    }
+    $('search-status').textContent = `${data.count} result${data.count === 1 ? '' : 's'} (${data.source || 'sqlite'})`;
+  } catch (e) {
+    $('search-status').textContent = 'error: ' + e.message;
+  }
+}
+$('search-regex').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
+$('search-event').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
+
+// ── Latency chart (SVG) ───────────────────────────────────────────
+async function loadChart() {
+  const minutes = parseInt($('chart-minutes').value, 10);
+  const bucket = $('chart-bucket').value;
+  try {
+    const r = await fetch(`/api/metrics/timeseries?bucket=${encodeURIComponent(bucket)}&minutes=${minutes}`);
+    const data = await r.json();
+    renderChart(data);
+  } catch (e) {
+    $('chart-meta').textContent = 'error: ' + e.message;
+  }
+}
+function renderChart(data) {
+  const svg = $('latency-chart');
+  const points = data.points || [];
+  $('chart-meta').textContent = `${data.count} points · bucket=${data.bucket} · last ${data.minutes} min`;
+  const W = 800, H = 200, PAD_L = 36, PAD_R = 8, PAD_T = 8, PAD_B = 22;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  if (points.length === 0) {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', '50%'); t.setAttribute('y', '50%');
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('class', 'label');
+    t.textContent = 'no data';
+    svg.appendChild(t);
+    return;
+  }
+  const tsMin = Math.min(...points.map(p => p.ts));
+  const tsMax = Math.max(...points.map(p => p.ts));
+  const valMax = Math.max(...points.map(p => p.value), 1);
+  const valMin = 0;
+  const xScale = (ts) => PAD_L + (W - PAD_L - PAD_R) * (tsMax === tsMin ? 0.5 : (ts - tsMin) / (tsMax - tsMin));
+  const yScale = (v)  => H - PAD_B - (H - PAD_T - PAD_B) * (v - valMin) / Math.max(1, (valMax - valMin));
+  // Gridlines: 4 horizontal
+  for (let i = 0; i <= 4; i++) {
+    const y = PAD_T + (H - PAD_T - PAD_B) * (i / 4);
+    const v = Math.round(valMax - (valMax - valMin) * (i / 4));
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', PAD_L); line.setAttribute('x2', W - PAD_R);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('class', 'grid');
+    svg.appendChild(line);
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    t.setAttribute('x', 4); t.setAttribute('y', y + 3);
+    t.setAttribute('class', 'label'); t.textContent = v + 'ms';
+    svg.appendChild(t);
+  }
+  // Axes
+  const ax = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  ax.setAttribute('x1', PAD_L); ax.setAttribute('x2', W - PAD_R);
+  ax.setAttribute('y1', H - PAD_B); ax.setAttribute('y2', H - PAD_B);
+  ax.setAttribute('class', 'axis'); svg.appendChild(ax);
+  // Line
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  let d = '';
+  points.forEach((p, i) => { d += (i === 0 ? 'M' : 'L') + xScale(p.ts) + ',' + yScale(p.value); });
+  path.setAttribute('d', d);
+  path.setAttribute('class', 'line');
+  svg.appendChild(path);
+  // Points (color-coded: green = fast_path, blue = llm_fallback)
+  for (const p of points) {
+    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('cx', xScale(p.ts));
+    c.setAttribute('cy', yScale(p.value));
+    c.setAttribute('r', 2.5);
+    c.setAttribute('class', 'pt' + (p.fast_path ? ' fast' : ''));
+    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    title.textContent = `${Math.round(p.value)}ms · ${p.call_id || ''} · ${p.fast_path ? 'fast' : 'llm'}`;
+    c.appendChild(title);
+    svg.appendChild(c);
+  }
+  // X-axis time labels (start, mid, end)
+  for (const f of [0, 0.5, 1]) {
+    const ts = tsMin + (tsMax - tsMin) * f;
+    const x = PAD_L + (W - PAD_L - PAD_R) * f;
+    const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    lbl.setAttribute('x', x); lbl.setAttribute('y', H - 6);
+    lbl.setAttribute('text-anchor', f === 0 ? 'start' : (f === 1 ? 'end' : 'middle'));
+    lbl.setAttribute('class', 'label');
+    lbl.textContent = new Date(ts * 1000).toISOString().slice(11, 19);
+    svg.appendChild(lbl);
+  }
+}
+
+// Boot
+connectLive();
+pollHealth();
+setInterval(pollHealth, 5000);
+</script>
+
+</body>
+</html>

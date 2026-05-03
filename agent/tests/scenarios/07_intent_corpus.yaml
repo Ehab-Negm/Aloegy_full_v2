@@ -1,0 +1,68 @@
+# Pure intent classification — many short turns.
+scenarios:
+  - name: intent_takeaway_variants
+    menu: []
+    turns:
+      - {user: "تيكاواي", expect: {intent: takeaway}}
+      - {user: "هاجي استلمه", expect: {intent: takeaway}}
+      - {user: "اخده من المطعم", expect: {intent: takeaway}}
+      - {user: "هاخده من المحل", expect: {intent: takeaway}}
+
+  - name: intent_delivery_variants
+    menu: []
+    turns:
+      - {user: "توصيل", expect: {intent: delivery}}
+      - {user: "دليفري", expect: {intent: delivery}}
+      - {user: "وصلوهالي", expect: {intent: delivery}}
+      - {user: "ابعتوهالي", expect: {intent: delivery}}
+
+  - name: intent_zone_variants
+    menu: []
+    turns:
+      - {user: "بتوصلوا فين", expect: {intent: delivery_zone_question}}
+      - {user: "ايه المناطق المتاحة", expect: {intent: delivery_zone_question}}
+      - {user: "التوصيل متاح فين", expect: {intent: delivery_zone_question}}
+
+  - name: intent_menu_variants
+    menu: []
+    turns:
+      - {user: "ايه المتاح", expect: {intent: menu_question}}
+      - {user: "عندك ايه", expect: {intent: menu_question}}
+      - {user: "المنيو", expect: {intent: menu_question}}
+
+  - name: intent_total_variants
+    menu: []
+    turns:
+      - {user: "بكام كله", expect: {intent: total_question}}
+      - {user: "الإجمالي", expect: {intent: total_question}}
+      - {user: "كام الحساب", expect: {intent: total_question}}
+
+  - name: intent_post_completion_variants
+    menu: []
+    turns:
+      - {user: "متشكر", expect: {intent: post_completion_thanks}}
+      - {user: "تمام كده", expect: {intent: post_completion_thanks}}
+      - {user: "بس كده", expect: {intent: post_completion_thanks}}
+
+  - name: intent_complaint_variants
+    menu: []
+    turns:
+      - {user: "شكوى", expect: {intent: complaint}}
+      - {user: "اشتكي", expect: {intent: complaint}}
+      - {user: "اتأخر", expect: {intent: complaint}}
+      - {user: "بارد", expect: {intent: complaint}}
+
+  - name: intent_reservation_variants
+    menu: []
+    turns:
+      - {user: "حجز", expect: {intent: reservation}}
+      - {user: "احجزلي ترابيزة", expect: {intent: reservation}}
+      - {user: "رزيرفيشن", expect: {intent: reservation}}
+
+  - name: intent_greeting_variants
+    menu: []
+    turns:
+      - {user: "السلام عليكم", expect: {intent: greeting}}
+      - {user: "اهلا يا فندم", expect: {intent: greeting}}
+      - {user: "صباح الخير", expect: {intent: greeting}}
+      - {user: "ازيك", expect: {intent: greeting}}

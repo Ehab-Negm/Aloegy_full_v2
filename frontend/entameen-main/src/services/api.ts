@@ -66,6 +66,11 @@ export interface OrderStreamEvent {
 
 export type OrderStreamState = "connecting" | "live" | "reconnecting";
 
+interface StreamTicketResponse {
+  ticket: string;
+  expires_in: number;
+}
+
 export interface FileItem {
   id: number;
   name: string;
@@ -245,6 +250,131 @@ export interface DemoSessionRecord {
   phoneNumber: string;
   status: "scheduled" | "completed" | "in_progress";
   date: string;
+}
+
+export type RestaurantStatus =
+  | "pending"
+  | "in_progress"
+  | "won"
+  | "lost"
+  | "follow_up";
+
+export type VisitOutcome =
+  | "visited"
+  | "interested"
+  | "won"
+  | "lost"
+  | "follow_up"
+  | "not_open";
+
+export interface SalesZone {
+  id: number;
+  name: string;
+  description: string;
+  color: string;
+  createdById: number | null;
+  createdAt: string;
+  updatedAt: string;
+  repCount: number;
+  restaurantCount: number;
+  reportsCount: number;
+  wonCount: number;
+}
+
+export interface ZoneRestaurant {
+  id: number;
+  zoneId: number;
+  zoneName: string;
+  name: string;
+  location: string;
+  mapUrl: string;
+  status: RestaurantStatus;
+  lastReportPreview: string;
+  lastReportAt: string;
+  reportsCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ZoneAssignmentRecord {
+  id: number;
+  zoneId: number;
+  repId: number;
+  repName: string;
+  repPhone: string;
+  createdAt: string;
+}
+
+export interface VisitPhoto {
+  id: number;
+  url: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
+export interface VisitReport {
+  id: number;
+  restaurantId: number;
+  restaurantName: string;
+  zoneName: string;
+  repId: number;
+  repName: string;
+  contactName: string;
+  contactRole: string;
+  contactPhone: string;
+  whatHappened: string;
+  outcome: VisitOutcome;
+  nextStep: string;
+  lat: number | null;
+  lng: number | null;
+  createdAt: string;
+  photos: VisitPhoto[];
+}
+
+export interface MyZoneWithRestaurants extends SalesZone {
+  restaurants: ZoneRestaurant[];
+}
+
+export interface SalesAnalyticsTotals {
+  zones: number;
+  restaurants: number;
+  reports: number;
+  won: number;
+  lost: number;
+  pending: number;
+  inProgress: number;
+  followUp: number;
+  conversionRate: number;
+}
+
+export interface SalesAnalyticsPerZone {
+  zoneId: number;
+  zoneName: string;
+  color: string;
+  restaurants: number;
+  won: number;
+  lost: number;
+  inProgress: number;
+  followUp: number;
+  pending: number;
+  reports: number;
+  conversionRate: number;
+}
+
+export interface SalesAnalyticsPerRep {
+  repId: number;
+  repName: string;
+  repPhone: string;
+  reports: number;
+  zones: number;
+  lastReportAt: string;
+}
+
+export interface SalesAnalytics {
+  totals: SalesAnalyticsTotals;
+  perZone: SalesAnalyticsPerZone[];
+  perRep: SalesAnalyticsPerRep[];
+  recentReports: VisitReport[];
 }
 
 export interface AdminOverview {
@@ -444,39 +574,61 @@ export function subscribeToOrderEvents(options: {
     return () => {};
   }
 
-  const source = new EventSource(
-    buildUrl(API_BASE_URL, "/orders/stream", {
-      restaurantId: options.restaurantId,
-      token,
-    }),
-  );
-
   options.onStateChange?.("connecting");
 
-  source.onopen = () => {
-    options.onStateChange?.("live");
-  };
+  let source: EventSource | null = null;
+  let disposed = false;
 
-  source.addEventListener("order_update", (event) => {
-    options.onStateChange?.("live");
-    if (!(event instanceof MessageEvent)) {
-      return;
-    }
-
+  const start = async () => {
     try {
-      options.onEvent(JSON.parse(event.data) as OrderStreamEvent);
-    } catch (error) {
-      console.error("Failed to parse order stream event:", error);
-    }
-  });
+      const { ticket } = await apiRequest<StreamTicketResponse>("/auth/stream-ticket", {
+        method: "POST",
+      });
+      if (disposed) {
+        return;
+      }
 
-  source.onerror = (event) => {
-    options.onStateChange?.("reconnecting");
-    options.onError?.(event);
+      source = new EventSource(
+        buildUrl(API_BASE_URL, "/orders/stream", {
+          restaurantId: options.restaurantId,
+          ticket,
+        }),
+      );
+
+      source.onopen = () => {
+        options.onStateChange?.("live");
+      };
+
+      source.addEventListener("order_update", (event) => {
+        options.onStateChange?.("live");
+        if (!(event instanceof MessageEvent)) {
+          return;
+        }
+
+        try {
+          options.onEvent(JSON.parse(event.data) as OrderStreamEvent);
+        } catch (error) {
+          console.error("Failed to parse order stream event:", error);
+        }
+      });
+
+      source.onerror = (event) => {
+        options.onStateChange?.("reconnecting");
+        options.onError?.(event);
+      };
+    } catch (error) {
+      if (!disposed) {
+        options.onStateChange?.("reconnecting");
+        console.error("Failed to start order stream:", error);
+      }
+    }
   };
+
+  void start();
 
   return () => {
-    source.close();
+    disposed = true;
+    source?.close();
   };
 }
 
@@ -743,6 +895,166 @@ export async function createDemoSession(payload: {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+// ── Sales zones (admin) ─────────────────────────────────────────────────
+
+export async function fetchAdminSalesZones(): Promise<SalesZone[]> {
+  return apiRequest<SalesZone[]>("/admin/sales-zones");
+}
+
+export async function createAdminSalesZone(payload: {
+  name: string;
+  description?: string;
+  color?: string;
+}): Promise<SalesZone> {
+  return apiRequest<SalesZone>("/admin/sales-zones", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAdminSalesZone(
+  zoneId: number,
+  payload: Partial<{ name: string; description: string; color: string }>,
+): Promise<SalesZone> {
+  return apiRequest<SalesZone>(`/admin/sales-zones/${zoneId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAdminSalesZone(zoneId: number): Promise<void> {
+  await apiRequest<void>(`/admin/sales-zones/${zoneId}`, { method: "DELETE" });
+}
+
+export async function fetchAdminZoneRestaurants(zoneId: number): Promise<ZoneRestaurant[]> {
+  return apiRequest<ZoneRestaurant[]>(`/admin/sales-zones/${zoneId}/restaurants`);
+}
+
+export async function addAdminZoneRestaurant(
+  zoneId: number,
+  payload: { name: string; location?: string; mapUrl?: string },
+): Promise<ZoneRestaurant> {
+  return apiRequest<ZoneRestaurant>(`/admin/sales-zones/${zoneId}/restaurants`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function bulkAddAdminZoneRestaurants(
+  zoneId: number,
+  rawText: string,
+): Promise<{ added: number; skippedDuplicates: number; restaurants: ZoneRestaurant[] }> {
+  return apiRequest(`/admin/sales-zones/${zoneId}/restaurants/bulk`, {
+    method: "POST",
+    body: JSON.stringify({ rawText }),
+  });
+}
+
+export async function updateAdminZoneRestaurant(
+  restaurantId: number,
+  payload: Partial<{ name: string; location: string; mapUrl: string; status: RestaurantStatus }>,
+): Promise<ZoneRestaurant> {
+  return apiRequest<ZoneRestaurant>(`/admin/zone-restaurants/${restaurantId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAdminZoneRestaurant(restaurantId: number): Promise<void> {
+  await apiRequest<void>(`/admin/zone-restaurants/${restaurantId}`, { method: "DELETE" });
+}
+
+export async function fetchAdminZoneAssignments(zoneId: number): Promise<ZoneAssignmentRecord[]> {
+  return apiRequest<ZoneAssignmentRecord[]>(`/admin/sales-zones/${zoneId}/assignments`);
+}
+
+export async function setAdminZoneAssignments(
+  zoneId: number,
+  repIds: number[],
+): Promise<ZoneAssignmentRecord[]> {
+  return apiRequest<ZoneAssignmentRecord[]>(`/admin/sales-zones/${zoneId}/assignments`, {
+    method: "POST",
+    body: JSON.stringify({ repIds }),
+  });
+}
+
+export async function fetchAdminSalesAnalytics(): Promise<SalesAnalytics> {
+  return apiRequest<SalesAnalytics>("/admin/sales-analytics");
+}
+
+// ── Sales zones (rep) ───────────────────────────────────────────────────
+
+export async function fetchMyZones(): Promise<MyZoneWithRestaurants[]> {
+  return apiRequest<MyZoneWithRestaurants[]>("/sales/my-zones");
+}
+
+export async function fetchMyRestaurantReports(restaurantId: number): Promise<VisitReport[]> {
+  return apiRequest<VisitReport[]>(`/sales/zone-restaurants/${restaurantId}/reports`);
+}
+
+export interface SubmitVisitReportInput {
+  contactName?: string;
+  contactRole?: string;
+  contactPhone?: string;
+  whatHappened?: string;
+  outcome?: VisitOutcome;
+  nextStep?: string;
+  lat?: number | null;
+  lng?: number | null;
+  photos?: File[];
+}
+
+export async function submitMyRestaurantReport(
+  restaurantId: number,
+  input: SubmitVisitReportInput,
+): Promise<VisitReport> {
+  const token = getToken();
+  const body = new FormData();
+  body.append("contactName", input.contactName || "");
+  body.append("contactRole", input.contactRole || "");
+  body.append("contactPhone", input.contactPhone || "");
+  body.append("whatHappened", input.whatHappened || "");
+  body.append("outcome", input.outcome || "visited");
+  body.append("nextStep", input.nextStep || "");
+  if (input.lat != null) body.append("lat", String(input.lat));
+  if (input.lng != null) body.append("lng", String(input.lng));
+  for (const photo of input.photos || []) {
+    body.append("photos", photo);
+  }
+  const res = await fetch(`${API_BASE_URL}/sales/zone-restaurants/${restaurantId}/reports`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body,
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const data = (await res.json()) as { detail?: string };
+      detail = data?.detail || "";
+    } catch {
+      detail = await res.text();
+    }
+    throw new Error(detail || `failed to submit report (${res.status})`);
+  }
+  return (await res.json()) as VisitReport;
+}
+
+/**
+ * Build the URL for a visit photo. The browser sends the auth token via
+ * cookie or via a fetch + blob URL — for an `<img src>` we need a
+ * signed/static URL. Since the photo route requires auth, we fetch and
+ * convert to a blob URL on demand.
+ */
+export async function fetchVisitPhotoBlobUrl(photoUrl: string): Promise<string> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE_URL}${photoUrl}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!res.ok) throw new Error(`failed to load photo (${res.status})`);
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }
 
 export async function uploadFile(file: File): Promise<FileItem> {

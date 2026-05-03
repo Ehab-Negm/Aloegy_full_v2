@@ -3,10 +3,13 @@ import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
   ArrowRight,
+  BarChart3,
   CheckCircle,
   ChevronLeft,
+  ClipboardList,
   Loader2,
   LogOut,
+  Map as MapIcon,
   PhoneCall,
   Plus,
   ShoppingCart,
@@ -27,6 +30,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import logo from "@/assets/logo.png";
 import OwnerDashboardView from "@/components/admin/OwnerDashboardView";
+import ZoneManagementSection from "@/components/admin/ZoneManagementSection";
+import SalesAnalyticsSection from "@/components/admin/SalesAnalyticsSection";
 import {
   clearAuthSession,
   createAdminRestaurant,
@@ -315,6 +320,12 @@ const Admin = () => {
               <TabsTrigger value="salesteam" className="gap-2 rounded-lg data-[state=active]:shadow-sm">
                 <Users size={16} /> فريق المبيعات
               </TabsTrigger>
+              <TabsTrigger value="zones" className="gap-2 rounded-lg data-[state=active]:shadow-sm">
+                <MapIcon size={16} /> الزونز
+              </TabsTrigger>
+              <TabsTrigger value="analytics" className="gap-2 rounded-lg data-[state=active]:shadow-sm">
+                <BarChart3 size={16} /> تحاليل المبيعات
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="restaurants">
@@ -585,6 +596,14 @@ const Admin = () => {
                   </div>
                 </CardContent>
               </Card>
+            </TabsContent>
+
+            <TabsContent value="zones">
+              <ZoneManagementSection />
+            </TabsContent>
+
+            <TabsContent value="analytics">
+              <SalesAnalyticsSection />
             </TabsContent>
           </Tabs>
         )}

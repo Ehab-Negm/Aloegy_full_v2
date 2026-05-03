@@ -8,7 +8,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import Agent, RunContext
 from pydantic import Field
 
-from base_agent import BaseAgent, RunContext_T, _run_tool_safely, build_instructions, to_greeter, update_name, update_phone
+from base_agent import BaseAgent, RunContext_T, _run_tool_safe_speak, build_instructions, to_greeter, update_name, update_phone
 from backend.config import RestaurantConfig
 
 logger = logging.getLogger("restaurant.agent")
@@ -22,20 +22,27 @@ class Reservation(BaseAgent):
 
         branch_note = f" | فروع: {cfg.branch_names()}" if len(cfg.branches) > 1 else ""
 
-        branch_instruction = f"3.5. اسأل عن الفرع: {cfg.branch_names()} → update_branch\n" if len(cfg.branches) > 1 else ""
+        branch_tool_line = (
+            "- update_branch: لما يحدد الفرع.\n" if len(cfg.branches) > 1 else ""
+        )
         core = (
-            f"بتاخد حجوزات ترابيزات.\n"
+            "إنت موظف مطعم بياخد حجوزات ترابيزات. اتكلم زي موظف بشري، "
+            "ودود وطبيعي، باللهجة المصرية.\n\n"
             f"المواعيد: {cfg.hours_text()}\n"
-            f"الحجز يقبل من {num2ar(cfg.min_guests)} لـ{num2ar(cfg.max_guests)} ضيف{branch_note}.\n\n"
-            "الخطوات بالترتيب:\n"
-            "1. اسمع الوقت → update_reservation_time (لو خارج المواعيد، قوله واقترح بديل قريب).\n"
-            "2. اسمع عدد الضيوف → update_guests_count.\n"
-            "3. اسأل لو في مناسبة خاصة → update_reservation_notes.\n"
-            f"{branch_instruction}"
-            "4. خُد الاسم → update_name.\n"
-            "5. خُد الموبايل → update_phone.\n"
-            "6. لخّص الحجز بإيجاز، ولو أكّد → confirm_reservation.\n\n"
-            "لو طلب حاجة خارج نطاق الحجز → to_greeter."
+            f"الحجز يقبل من {num2ar(cfg.min_guests)} لـ{num2ar(cfg.max_guests)} "
+            f"ضيف{branch_note}.\n\n"
+            "كيف تشتغل:\n"
+            "- في كل turn هيوصلك STATE فيه اللي اتسجل دلوقتي. اعتمد عليه.\n"
+            "- لما يقول وقت → update_reservation_time (لو خارج المواعيد قوله واقترح بديل).\n"
+            "- لما يقول عدد الضيوف → update_guests_count.\n"
+            "- اسمه → update_name. رقمه → update_phone. مناسبة خاصة → update_reservation_notes.\n"
+            f"{('- الفرع → update_branch.' + chr(10)) if len(cfg.branches) > 1 else ''}"
+            "- لما كل حاجة جاهزة وأكد → confirm_reservation.\n"
+            "- لو طلب حاجة خارج نطاق الحجز → to_greeter.\n\n"
+            "قواعد:\n"
+            "- ما تسألش عن slot موجود في الـ STATE.\n"
+            "- ما تستدعي tool لمعلومة ما قالهاش العميل.\n"
+            "- سؤال واحد بس في المرة."
         )
         super().__init__(
             instructions=build_instructions(cfg.name, core),
@@ -88,7 +95,7 @@ class Reservation(BaseAgent):
             context.userdata.reservation_time_iso = parsed.normalized_text
             return _voice_safe_text(f"{_ack()}، {parsed.raw_text}. كام شخص هتكونوا؟", max_chars=180)
 
-        return await _run_tool_safely("update_reservation_time", context, _impl)
+        return await _run_tool_safe_speak("update_reservation_time", context, _impl)
 
     @function_tool()
     async def update_guests_count(
@@ -98,7 +105,7 @@ class Reservation(BaseAgent):
     ) -> str:
         """يُستدعى لما العميل يقول عدد الضيوف."""
         async def _impl() -> str:
-            from agent import _ack, spoken_phone
+            from agent import _ack, _join_user_phrases, _next_slot_question_for_flow, spoken_phone
             from utils.money import num2ar
             from utils.voice import _voice_safe_text
             if count < self.cfg.min_guests:
@@ -106,9 +113,12 @@ class Reservation(BaseAgent):
             if count > self.cfg.max_guests:
                 return _voice_safe_text(f"أكتر عدد في حجز واحد {num2ar(self.cfg.max_guests)}، اتصل على {spoken_phone(self.cfg.phone)} مباشرة لو أكتر.")
             context.userdata.guests_count = count
-            return _voice_safe_text(f"{_ack()}، {num2ar(count)} أشخاص. في مناسبة معينة ولا عادي؟")
+            return _voice_safe_text(
+                _join_user_phrases(f"{_ack()}، {num2ar(count)} أشخاص", _next_slot_question_for_flow("reservation", context.userdata)),
+                max_chars=180,
+            )
 
-        return await _run_tool_safely("update_guests_count", context, _impl)
+        return await _run_tool_safe_speak("update_guests_count", context, _impl)
 
     @function_tool()
     async def update_branch(
@@ -126,7 +136,7 @@ class Reservation(BaseAgent):
             context.userdata.selected_branch = resolved
             return _voice_safe_text(f"{_ack()}، فرع {resolved}. {_ask_name()}")
 
-        return await _run_tool_safely("update_branch", context, _impl)
+        return await _run_tool_safe_speak("update_branch", context, _impl)
 
     @function_tool()
     async def update_reservation_notes(
@@ -136,7 +146,7 @@ class Reservation(BaseAgent):
     ) -> str:
         """يُستدعى لما العميل يذكر طلبات خاصة للحجز."""
         async def _impl() -> str:
-            from agent import _ask_name, _join_user_phrases, _looks_empty_answer
+            from agent import _join_user_phrases, _looks_empty_answer, _next_slot_question_for_flow
             from utils.voice import _voice_safe_text
             if _looks_empty_answer(notes):
                 context.userdata.reservation_notes = None
@@ -146,7 +156,7 @@ class Reservation(BaseAgent):
                         max_chars=180,
                     )
                 return _voice_safe_text(
-                    _join_user_phrases("تمام يا فندم، مفيش ملاحظات", _ask_name()),
+                    _join_user_phrases("تمام يا فندم، مفيش ملاحظات", _next_slot_question_for_flow("reservation", context.userdata)),
                     max_chars=180,
                 )
             context.userdata.reservation_notes = notes.strip()
@@ -156,11 +166,11 @@ class Reservation(BaseAgent):
                     max_chars=180,
                 )
             return _voice_safe_text(
-                _join_user_phrases("تمام يا فندم، سجلت الملاحظة", _ask_name()),
+                _join_user_phrases("تمام يا فندم، سجلت الملاحظة", _next_slot_question_for_flow("reservation", context.userdata)),
                 max_chars=180,
             )
 
-        return await _run_tool_safely("update_reservation_notes", context, _impl)
+        return await _run_tool_safe_speak("update_reservation_notes", context, _impl)
 
     @function_tool()
     async def confirm_reservation(self, context: RunContext_T) -> str:
@@ -174,9 +184,23 @@ class Reservation(BaseAgent):
                 _reservation_next_missing_slot,
                 submit_reservation,
             )
+            from core.confirmation_helpers import (
+                begin_submit,
+                finish_submit,
+                gate_submit,
+            )
             from utils.voice import _voice_safe_text
             ud = context.userdata
-            if ud.reservation_confirmed:
+            payload = {
+                "name": ud.customer_name or "",
+                "phone": ud.customer_phone or "",
+                "time": ud.reservation_time or "",
+                "guests": ud.guests_count or 0,
+                "branch": ud.selected_branch or "",
+            }
+            gate = gate_submit("reservation", ud, payload)
+
+            if gate.view.is_terminal:
                 logger.info("call=%s | reservation submit skipped | reason=already_confirmed", ud.call_id)
                 return _voice_safe_text(f"الحجز مسجل خلاص يا {ud.customer_name}. في حاجة تانية؟")
             if ud.reservation_submit_in_flight:
@@ -188,22 +212,37 @@ class Reservation(BaseAgent):
             if not _can_attempt_backend_write(ud):
                 logger.warning("call=%s | reservation submit skipped | reason=write_unavailable", ud.call_id)
                 return _backend_failure_user_message(ud)
+            if not gate.allow:
+                logger.warning(
+                    "call=%s | reservation submit blocked by tracker | reason=%s",
+                    ud.call_id,
+                    gate.reason,
+                )
+                return _voice_safe_text(f"الحجز مسجل خلاص يا {ud.customer_name}. في حاجة تانية؟")
 
+            begin_submit("reservation", ud, gate.idempotency_key)
             ud.reservation_submit_in_flight = True
             try:
                 result = await submit_reservation(ud)
+            except Exception as exc:  # pragma: no cover - defensive
+                finish_submit("reservation", ud, gate.idempotency_key, succeeded=False, error=type(exc).__name__)
+                raise
             finally:
                 ud.reservation_submit_in_flight = False
             if not result:
+                finish_submit("reservation", ud, gate.idempotency_key, succeeded=False, error="empty_result")
                 return _backend_failure_user_message(ud)
             if result.get("queued"):
+                finish_submit("reservation", ud, gate.idempotency_key, succeeded=False, error="queued")
                 return _backend_queued_user_message("reservation")
 
             ud.reservation_id = result.get("reservation_id", "")
             ud.reservation_confirmed = True
+            finish_submit("reservation", ud, gate.idempotency_key, succeeded=True, backend_id=ud.reservation_id or "")
+            _emit_event("reservation.submitted", call_id=ud.call_id, flow="reservation", reservation_id=ud.reservation_id)
             _emit_event("reservation.confirmed", call_id=ud.call_id, flow="reservation", reservation_id=ud.reservation_id)
             msg = f"تمام يا {ud.customer_name}، الحجز اتأكد."
             msg += " هنبعتلك رسالة تأكيد."
             return msg
 
-        return await _run_tool_safely("confirm_reservation", context, _impl)
+        return await _run_tool_safe_speak("confirm_reservation", context, _impl)

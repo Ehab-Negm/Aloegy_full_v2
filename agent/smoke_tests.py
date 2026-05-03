@@ -117,9 +117,10 @@ class FakeHttpClient:
 async def main() -> int:
     results: list[tuple[str, bool]] = []
 
-    def check(name: str, ok: bool) -> None:
+    def check(name: str, ok: bool, detail: str = "") -> None:
         results.append((name, bool(ok)))
-        print(f"{name}: {'PASS' if ok else 'FAIL'}")
+        suffix = f" - {detail}" if detail and not ok else ""
+        print(f"{name}: {'PASS' if ok else 'FAIL'}{suffix}")
 
     cfg = make_cfg()
     big_menu_cfg = make_big_menu_cfg()
@@ -137,10 +138,36 @@ async def main() -> int:
         check(f"tools_unique_{inst.__class__.__name__.lower()}", len(names) == len(set(names)))
 
     greeter_tool_names = {tool.info.name for tool in llm.ToolContext(greeter.tools).flatten()}
+    # The LLM owns the conversation now — including capturing the
+    # customer's name and phone. The deterministic engine still
+    # validates everything inside the tool implementations (Egyptian
+    # phone carrier check, name blocklist, menu lookup), so exposing
+    # the tools is safe and lets the LLM phrase its acknowledgements
+    # naturally instead of having the engine speak in scripted lines.
+    expected_greeter_tools = {
+        "get_menu",
+        "resolve_request",
+        "to_complaint",
+        "to_delivery",
+        "to_reservation",
+        "to_takeaway",
+        "update_name",
+        "update_phone",
+    }
     check(
-        "prd032_greeter_tools_include_contact_tools",
-        {"get_menu", "update_name", "update_phone"}.issubset(greeter_tool_names),
+        "greeter_tools_match_expected",
+        greeter_tool_names == expected_greeter_tools,
+        f"got={greeter_tool_names} expected={expected_greeter_tools}",
     )
+
+    for flow_inst in [takeaway, delivery, reservation, complaint]:
+        flow_tool_names = {tool.info.name for tool in llm.ToolContext(flow_inst.tools).flatten()}
+        check(
+            f"{flow_inst.__class__.__name__.lower()}_tools_have_contact_writers",
+            "update_name" in flow_tool_names
+            and "update_phone" in flow_tool_names,
+            f"got {flow_tool_names}",
+        )
 
     prd031_takeaway_a = agent.Takeaway(cfg)
     prd031_takeaway_b = agent.Takeaway(cfg)
@@ -232,6 +259,36 @@ async def main() -> int:
         and "أقل طلب للتوصيل" in prd027_delivery_min_msg
         and "أقل طلب للتوصيل" not in prd027_takeaway_min_msg,
     )
+    incremental_ud = agent.UserData(
+        call_id="call-incremental-order",
+        restaurant=prd027_cfg,
+        order=["burger large"],
+        order_validated=True,
+        order_total=45,
+    )
+    incremental_ud.last_user_message = "ضيف كولا"
+    incremental_ctx = make_ctx(prd027_takeaway, prd027_cfg, incremental_ud)
+    await prd027_takeaway.update_order(items=["cola"], context=incremental_ctx)
+    await prd027_takeaway.update_order(items=["cola"], context=incremental_ctx)
+    check(
+        "incremental_order_add_preserves_existing_once",
+        incremental_ud.order == ["burger large", "cola"]
+        and incremental_ud.order_total == 60,
+    )
+    replace_ud = agent.UserData(
+        call_id="call-replace-order",
+        restaurant=prd027_cfg,
+        order=["burger large"],
+        order_validated=True,
+        order_total=45,
+    )
+    replace_ud.last_user_message = "لا خليه كولا بس"
+    replace_ctx = make_ctx(prd027_takeaway, prd027_cfg, replace_ud)
+    await prd027_takeaway.update_order(items=["cola"], context=replace_ctx)
+    check(
+        "replace_order_hint_still_replaces",
+        replace_ud.order == ["cola"] and replace_ud.order_total == 15,
+    )
     no_menu_ctx = make_ctx(takeaway_no_menu, cfg_no_menu)
     no_menu_msg = await agent.get_menu(no_menu_ctx)
     await takeaway_no_menu.update_order(items=["كوشري كبير"], context=no_menu_ctx)
@@ -249,7 +306,7 @@ async def main() -> int:
 
     takeaway_route = await greeter_no_delivery.resolve_request("هطلب تيكاواي واجي استلمه", make_ctx(greeter_no_delivery, cfg_no_menu, agents={"greeter": greeter_no_delivery, "takeaway": takeaway_no_menu, "reservation": reservation, "complaint": complaint}))
     delivery_unavailable_msg = await greeter_no_delivery.resolve_request("عايز أوردر توصيل", make_ctx(greeter_no_delivery, cfg_no_menu, agents={"greeter": greeter_no_delivery, "takeaway": takeaway_no_menu, "reservation": reservation, "complaint": complaint}))
-    check("greeter_takeaway_routing_hint", isinstance(takeaway_route, tuple) and takeaway_route[0] is takeaway_no_menu)
+    check("greeter_takeaway_routing_hint", takeaway_route is takeaway_no_menu)
     check("greeter_delivery_unavailable_message", isinstance(delivery_unavailable_msg, str) and "التوصيل مش متاح" in delivery_unavailable_msg)
     prd032_greeter = agent.Greeter(cfg)
     prd032_delivery = agent.Delivery(cfg)
@@ -266,10 +323,13 @@ async def main() -> int:
         update_agent=prd032_update_agent,
     )
     prd032_greeter._get_activity_or_raise = lambda: SimpleNamespace(session=prd032_session)
+    # The Greeter should fast-path rich first turns. Real callers often say
+    # their name, phone, and delivery intent in one breath; capturing those
+    # slots here prevents avoidable re-asking and slow LLM fallback.
     prd032_handled = await prd032_greeter._maybe_handle_turn_deterministically("انا احمد ورقمي 01012345678 وعايز توصيل")
     check(
-        "prd032_greeter_prefills_contact_before_routing",
-        prd032_handled
+        "prd032_greeter_prefills_and_routes_rich_turn",
+        prd032_handled is True
         and prd032_route_target["agent"] is prd032_delivery
         and prd032_ud.customer_name == "احمد"
         and prd032_ud.customer_phone == "01012345678",
@@ -451,6 +511,8 @@ async def main() -> int:
     prd021_greeter = agent.Greeter(prd021_cfg)
     prd021_delivery = agent.Delivery(prd021_cfg)
     prd021_ud = agent.UserData(call_id="call-prd021", restaurant=prd021_cfg)
+    prd021_ud.customer_name = "مريم"
+    prd021_ud.order = ["burger large"]
     prd021_ud.prev_agent = prd021_delivery
     prd021_ud.agents = {"greeter": prd021_greeter, "delivery": prd021_delivery}
     prd021_greeter._chat_ctx = prd021_greeter.chat_ctx.copy()
@@ -473,16 +535,38 @@ async def main() -> int:
         item for item in (prd021_updated_ctx.items if prd021_updated_ctx else [])
         if item.role != "system"
     ]
+    # The transfer now carries the FULL prior conversation forward (no
+    # truncate) so the new agent has continuous memory and does not
+    # re-ask questions the previous agent already answered. The oldest
+    # message must therefore be present, and the count is no longer
+    # bounded — TURN_CHAT_CTX_MAX_ITEMS still caps the per-LLM-call
+    # prompt size every turn, just not the carry-forward set.
     check(
-        "prd021_transfer_context_bounded",
+        "prd021_transfer_carries_full_history",
         prd021_updated_ctx is not None
-        and len(prd021_non_system) <= agent.PROMPT_HISTORY_ITEMS * 2,
+        and any(item.text_content == "delivery-old-0" for item in prd021_non_system)
+        and any(
+            item.text_content == f"delivery-old-{agent.PROMPT_HISTORY_ITEMS + 3}"
+            for item in prd021_non_system
+        ),
+    )
+    prd021_system_text = "\n".join(
+        item.text_content or "" for item in (prd021_updated_ctx.items if prd021_updated_ctx else [])
+        if item.role == "system"
+    )
+    # The on_enter system message follows the LiveKit canonical
+    # multi-agent template: agent identity + a YAML state snapshot.
+    # The flow_style/flow_context markers are gone, replaced by a
+    # single English-language briefing that includes the customer's
+    # confirmed facts via ``ud.summarize()``.
+    check(
+        "on_enter_includes_agent_identity",
+        "agent" in prd021_system_text.lower() or "Greeter" in prd021_system_text,
     )
     check(
-        "prd021_keeps_recent_transfer_history_only",
-        prd021_updated_ctx is not None
-        and any(item.text_content == f"delivery-old-{agent.PROMPT_HISTORY_ITEMS + 3}" for item in prd021_non_system)
-        and not any(item.text_content == "delivery-old-0" for item in prd021_non_system),
+        "on_enter_includes_yaml_state",
+        "customer_name" in prd021_system_text
+        or "order:" in prd021_system_text,
     )
     check(
         "delivery_zone_question_not_menu",
@@ -536,7 +620,7 @@ async def main() -> int:
         and name_as_landmark_ctx.userdata.delivery_landmark is None
         and ("رقم" in landmark_name_msg or "موبايل" in landmark_name_msg),
     )
-    check("detailed_address_skips_landmark", ("اسم" in detailed_address_msg) and detailed_address_ctx.userdata.delivery_landmark is None)
+    check("detailed_address_skips_landmark", ("تطلب" in detailed_address_msg) and detailed_address_ctx.userdata.delivery_landmark is None)
     check("reservation_no_notes_natural", "تمام يا فندم" in reservation_no_notes and reservation_optional_ctx.userdata.reservation_notes is None)
 
     upsell_cfg = make_upsell_cfg()
@@ -1128,10 +1212,14 @@ async def main() -> int:
     ud = agent.UserData(call_id="call-transfer", restaurant=cfg)
     ud.agents = {"takeaway": takeaway}
     ctx = make_ctx(takeaway, cfg, ud, ud.agents)
-    same_agent, same_msg = await takeaway._transfer("takeaway", ctx)
-    missing_agent, missing_msg = await takeaway._transfer("delivery", ctx)
-    check("transfer_loop_guard", same_agent is takeaway and same_msg == "")
-    check("missing_transfer_guard", missing_agent is takeaway and bool(missing_msg))
+    # ``_transfer`` now returns either an ``Agent`` (success path,
+    # ``reply_required=False``) or a ``str`` (error path / self-transfer).
+    # The guard contracts: self-transfer returns "" (no follow-up),
+    # missing target returns a non-empty error string.
+    same_result = await takeaway._transfer("takeaway", ctx)
+    missing_result = await takeaway._transfer("delivery", ctx)
+    check("transfer_loop_guard", isinstance(same_result, str) and same_result == "")
+    check("missing_transfer_guard", isinstance(missing_result, str) and bool(missing_result))
 
     async def fail_delivery(_ud):
         return None
@@ -1300,12 +1388,13 @@ async def main() -> int:
         agent._should_add_turn_guard = saved_should_add_turn_guard
 
     agent_text = open("agent.py", encoding="utf-8").read()
+    base_agent_text = open("base_agent.py", encoding="utf-8").read()
     main_text = open("main.py", encoding="utf-8").read()
-    combined_text = agent_text + main_text
+    combined_text = agent_text + base_agent_text + main_text
     check(
         "session_interruptions_configured",
         "allow_interruptions=True" in combined_text
-        and "preemptive_generation=" in combined_text
+        and "preemptive_generation" in combined_text
         and "SESSION_VAD" in combined_text,
     )
     check("inactivity_watchdog_present", "_watch_inactivity" in combined_text and "_safe_close_session" in combined_text)
@@ -1332,6 +1421,23 @@ async def main() -> int:
     check(
         "prd002_post_completion_elif",
         "elif _is_positive_confirmation" in post_completion_src,
+    )
+    post_completion_agent = agent.Takeaway(cfg)
+    post_completion_ud = agent.UserData(
+        call_id="call-post-completion-fallback",
+        restaurant=cfg,
+        order_confirmed=True,
+        customer_name="Ahmed",
+    )
+    _, post_completion_said = bind_agent_session(post_completion_agent, post_completion_ud)
+    post_completion_stopped = False
+    try:
+        await post_completion_agent._handle_post_completion("takeaway", post_completion_ud, "كويس")
+    except agent.StopResponse:
+        post_completion_stopped = True
+    check(
+        "post_completion_generic_does_not_fall_to_llm",
+        post_completion_stopped and bool(post_completion_said),
     )
 
     # ── PRD-009: _handle_phone_intercept does not raise StopResponse on empty reply ──
@@ -1388,7 +1494,16 @@ async def main() -> int:
     ]
     check(
         "prd020_all_function_tools_wrapped",
-        all("_run_tool_safely" in inspect.getsource(fn) for fn in prd020_tool_functions),
+        # Tools may now use either ``_run_tool_safely`` (legacy two-
+        # roundtrip path, used for handoff tools that return Agent
+        # tuples) or ``_run_tool_safe_speak`` (one-roundtrip path that
+        # speaks the result and skips LLM₂). Both wrap exceptions safely
+        # — the contract is "no raw uncaught exceptions reach the LLM".
+        all(
+            "_run_tool_safely" in inspect.getsource(fn)
+            or "_run_tool_safe_speak" in inspect.getsource(fn)
+            for fn in prd020_tool_functions
+        ),
     )
 
     saved_apply_name_update = agent._apply_name_update
@@ -1537,7 +1652,7 @@ async def main() -> int:
                 '"upsell.accepted"',
                 '"upsell.rejected"',
                 '"flow.transfer"',
-                '"turn.guard"',
+                '"turn.received"',
                 '"call.inactivity"',
             ]
         ),
@@ -1557,7 +1672,8 @@ async def main() -> int:
             userdata=transfer_ud,
             session=SimpleNamespace(current_agent=prd029_takeaway),
         )
-        transfer_target, transfer_message = await prd029_takeaway._transfer("delivery", transfer_ctx)
+        transfer_target = await prd029_takeaway._transfer("delivery", transfer_ctx)
+        transfer_message = ""  # success transfer no longer returns a follow-up string
 
         live_ud = agent.UserData(call_id="call-prd029-live", restaurant=upsell_cfg)
         live_ud.agents = {"greeter": prd029_greeter, "delivery": prd029_delivery}

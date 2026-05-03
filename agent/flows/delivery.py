@@ -9,7 +9,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import Agent, RunContext
 from pydantic import Field
 
-from base_agent import BaseAgent, RunContext_T, _run_tool_safely, build_instructions, get_menu, to_greeter, update_name, update_phone
+from base_agent import BaseAgent, RunContext_T, _run_tool_safe_speak, _run_tool_safely, build_instructions, get_menu, to_greeter, update_name, update_phone
 from backend.config import RestaurantConfig
 
 logger = logging.getLogger("restaurant.agent")
@@ -24,32 +24,31 @@ class Delivery(BaseAgent):
         zones_info = f" | مناطق: {cfg.delivery_zones_text()}" if cfg.delivery_zones else ""
 
         core = (
-            f"بتاخد طلبات توصيل. {cfg.delivery_info_text()}{zones_info}\n\n"
-            "إنت موظف مطعم بتاخد طلب على التليفون — اتكلم طبيعي، مش سكريبت، مش خطوات.\n\n"
-            "الداتا اللي محتاجها قبل التأكيد:\n"
-            "- الطلب → update_order\n"
-            "- العنوان (منطقة + شارع + مبنى) → update_delivery_address\n"
-            "- الاسم → update_name\n"
-            "- الموبايل → update_phone\n"
-            "- ملاحظات خاصة على التحضير (لو في) → update_special_requests\n\n"
-            "لما تجمع اللي محتاجه والعميل يأكد → confirm_delivery.\n\n"
-            "قواعد التعامل مع الـ Tools (مهمة جداً):\n"
-            "- **متستدعيش tool إلا لما العميل فعلاً يقول المعلومة.** لو ماقالش الاسم، متنادش update_name. لو ماقالش الرقم، متنادش update_phone. لو ماقالش الاسم، متحطش \"—\" ولا أي placeholder.\n"
-            "- بعد ما update_order ترجع نجاح، **متسألش عن الطلب تاني ولا تلخصه** — العميل قاله بالفعل. كمّل للخطوة اللي بعدها.\n"
-            "- **اسأل سؤال واحد في المرة** — مش تسأل الاسم والرقم والعنوان مع بعض. اختار أهم حاجة ناقصة واسأل عنها، وخلّي اللي بعدها للـ turn الجاي.\n"
-            "- الأولوية في السؤال (لو كلهم ناقصين): العنوان أولاً، بعدها الاسم، بعدها الموبايل.\n\n"
-            "قواعد التعامل مع العميل:\n"
-            "- لو قال معلومة قبل ما تسأل (اسم/عنوان/رقم في جملة واحدة)، سجّلهم كلهم بالـ tools المناسبة وكمّل بشكل طبيعي.\n"
-            "- لو سأل سؤال جنب (المنيو، المواعيد، رسوم التوصيل)، جاوبه الأول وبعدها ارجع للموضوع.\n"
-            "- لو غيّر رأيه أو عدّل حاجة، عدّل عادي.\n"
-            "- لو قرر استلام بدل توصيل → to_takeaway (الداتا متحفوظة).\n"
-            "- لو العنوان ناقص تفاصيل، اسأل بلطف عن اللي ناقص.\n"
-            "- اقترح إضافة مرة واحدة بس لو السياق مناسب. رفض = كمّل من غير إلحاح.\n"
-            "- متحسبش أسعار من عندك ومتقولش صنف موجود ولا لأ — ده شغل update_order.\n"
-            "- سؤال عن المنيو → get_menu | شكوى → to_complaint."
+            "إنت موظف مطعم بياخد طلب توصيل على التليفون. اتكلم زي موظف "
+            "بشري ودود — لهجة مصرية طبيعية، مش جمل محفوظة.\n\n"
+            f"معلومات التوصيل: {cfg.delivery_info_text()}{zones_info}\n\n"
+            "اسمع العميل واستخدم الـ tools دايماً علشان تسجل اللي بيقوله:\n"
+            "- update_order للأكل (ابعت القائمة كاملة كل مرة)\n"
+            "- update_delivery_address للعنوان\n"
+            "- update_name للاسم، update_phone للموبايل\n"
+            "- update_special_requests لطلب خاص\n"
+            "- confirm_delivery لما كل البيانات جاهزة والعميل أكد\n"
+            "- get_menu / to_takeaway / to_complaint لما تحتاج\n\n"
+            "قاعدة مقدسة: حالة المكالمة بتيجيلك في system message في "
+            "الأول. ما تسألش عن حاجة موجودة فيها. ما تخترعش أصناف ولا "
+            "أسعار — الـ tool هو اللي بيتحقق."
         )
         super().__init__(
             instructions=build_instructions(cfg.name, core),
+            # ``update_name`` / ``update_phone`` are LLM tools again. The
+            # earlier removal made the agent feel forgetful: the engine
+            # captured these slots silently and the LLM, never having
+            # spoken about them, would ask the same question on the next
+            # turn. With the tools back, the LLM asks → calls the tool
+            # → acknowledges in its own voice. The tool itself still
+            # runs the same deterministic validation (Egyptian phone
+            # carrier check, name blocklist) so the LLM cannot store
+            # garbage.
             tools=[
                 update_name,
                 update_phone,
@@ -59,34 +58,24 @@ class Delivery(BaseAgent):
         )
 
     async def _maybe_handle_turn_deterministically(self, user_text: str) -> bool:
-        from agent import (
-            _ask_address,
-            _is_delivery_ready_for_confirmation,
-            _is_positive_confirmation,
-            _looks_empty_answer,
-        )
-        ud = self.session.userdata
-        context = self._tool_context()
+        """No deterministic intercepts — the LLM owns the conversation.
 
+        Order, address, name, phone, and confirmation all flow through
+        the LLM's tool calls. The deterministic engine still validates
+        every write inside the tool implementations (menu lookup,
+        Egyptian phone format, idempotency on submit), so the LLM
+        cannot store hallucinated values even though it drives the
+        dialogue. The pending-upsell handler stays — that's an
+        explicit prompt-state branch, not an extraction shortcut.
+        """
+        ud = self.session.userdata
         if ud.pending_upsell_item:
+            from agent import _ask_address
             await self._handle_pending_upsell(
                 user_text,
                 flow_name="delivery",
                 post_upsell_prompt=_ask_address,
             )
-
-        if ud.order and not ud.delivery_address and _looks_empty_answer(user_text):
-            logger.info("call=%s | delivery optional_empty_intercepted | step=special_requests | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.update_special_requests(requests=user_text, context=context))
-
-        if ud.delivery_address and not ud.landmark_asked and _looks_empty_answer(user_text):
-            logger.info("call=%s | delivery optional_empty_intercepted | step=landmark | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.update_delivery_landmark(landmark=user_text, context=context))
-
-        if _is_delivery_ready_for_confirmation(ud) and _is_positive_confirmation(user_text):
-            logger.info("call=%s | delivery confirm_intercepted | text=%r", ud.call_id, user_text)
-            await self._say_and_stop(await self.confirm_delivery(context=context), critical=True)
-
         return False
 
     @function_tool()
@@ -94,11 +83,22 @@ class Delivery(BaseAgent):
         self,
         items: Annotated[
             list[str],
-            Field(description="القائمة الكاملة للطلب مع الكميات مثلاً ['كوشري كبير × 2', 'عصير ليمون']"),
+            Field(description=(
+                "القائمة الكاملة للطلب مع الكميات. لما العميل يعدل، ابعت "
+                "القائمة الجديدة كاملة (مش بس اللي اتغيّر). أمثلة: "
+                "['كوشري كبير × 2', 'عصير ليمون'] أو ['برجر كبير × 1'] "
+                "لو العميل قرر يخلي برجر واحد بس بدل اتنين."
+            )),
         ],
         context: RunContext_T,
     ) -> str:
-        """يُستدعى لما العميل يطلب أو يعدّل. ابعت القائمة كاملة دايماً."""
+        """يُستدعى لما العميل يطلب أو يعدّل أو يشيل أصناف.
+
+        Pass the FULL new list. The engine validates against the menu,
+        rejects unknown items, and returns a confirmation that includes
+        the current stored order so you (the LLM) can phrase a natural
+        acknowledgement without hallucinating quantities or items.
+        """
         async def _impl() -> str:
             return self._process_order_update(
                 items,
@@ -107,7 +107,7 @@ class Delivery(BaseAgent):
                 min_order_total=self.cfg.min_order,
             )
 
-        return await _run_tool_safely("update_order", context, _impl)
+        return await _run_tool_safe_speak("update_order", context, _impl)
 
     @function_tool()
     async def update_special_requests(
@@ -117,22 +117,22 @@ class Delivery(BaseAgent):
     ) -> str:
         """يُستدعى لما العميل يذكر طلبات خاصة."""
         async def _impl() -> str:
-            from agent import _ask_address, _clear_pending_upsell, _join_user_phrases, _looks_empty_answer
+            from agent import _clear_pending_upsell, _followup_after_special_request, _join_user_phrases, _looks_empty_answer
             from utils.voice import _voice_safe_text
             _clear_pending_upsell(context.userdata)
             if _looks_empty_answer(requests):
                 context.userdata.special_requests = None
                 return _voice_safe_text(
-                    _join_user_phrases("تمام يا فندم، مفيش طلب خاص", _ask_address()),
+                    _join_user_phrases("تمام يا فندم، مفيش طلب خاص", _followup_after_special_request("delivery", context.userdata)),
                     max_chars=180,
                 )
             context.userdata.special_requests = requests.strip()
             return _voice_safe_text(
-                _join_user_phrases("تمام يا فندم، سجلت الملاحظة على الطلب", _ask_address()),
+                _join_user_phrases("تمام يا فندم، سجلت الملاحظة على الطلب", _followup_after_special_request("delivery", context.userdata)),
                 max_chars=180,
             )
 
-        return await _run_tool_safely("update_special_requests", context, _impl)
+        return await _run_tool_safe_speak("update_special_requests", context, _impl)
 
     @function_tool()
     async def update_delivery_address(
@@ -143,7 +143,7 @@ class Delivery(BaseAgent):
     ) -> str:
         """يُستدعى لما العميل يقول عنوانه — استدعيه فوراً حتى لو المنطقة مش واضحة."""
         async def _impl() -> str:
-            from agent import _address_seems_specific, _ask_name, _extract_zone_from_address, _join_user_phrases
+            from agent import _address_seems_specific, _extract_zone_from_address, _join_user_phrases, _next_slot_question_for_flow
             from nlp.arabic import normalize_ar as _normalize_ar
             from utils.voice import _voice_safe_text
             resolved_zone = zone
@@ -176,7 +176,7 @@ class Delivery(BaseAgent):
                 return _voice_safe_text(
                     _join_user_phrases(
                         f"تمام يا فندم، سجلت العنوان: {context.userdata.delivery_address}",
-                        _ask_name(),
+                        _next_slot_question_for_flow("delivery", context.userdata),
                     ),
                     max_chars=220,
                     critical=True,
@@ -191,7 +191,7 @@ class Delivery(BaseAgent):
                 critical=True,
             )
 
-        return await _run_tool_safely("update_delivery_address", context, _impl)
+        return await _run_tool_safe_speak("update_delivery_address", context, _impl)
 
     @function_tool()
     async def update_delivery_landmark(
@@ -201,13 +201,13 @@ class Delivery(BaseAgent):
     ) -> str:
         """يُستدعى لما العميل يذكر علامة مميزة."""
         async def _impl() -> str:
-            from agent import _ack, _ask_name, _ask_phone, _extract_name_candidate, _join_user_phrases, _looks_empty_answer
+            from agent import _ack, _ask_phone, _extract_name_candidate, _join_user_phrases, _looks_empty_answer, _next_slot_question_for_flow
             from utils.voice import _voice_safe_text
             context.userdata.landmark_asked = True
             if _looks_empty_answer(landmark):
                 context.userdata.delivery_landmark = None
                 return _voice_safe_text(
-                    _join_user_phrases("تمام يا فندم، مفيش علامة مميزة", _ask_name()),
+                    _join_user_phrases("تمام يا فندم، مفيش علامة مميزة", _next_slot_question_for_flow("delivery", context.userdata)),
                     max_chars=180,
                 )
             explicit_name_reply = re.match(r"^\s*(?:انا|أنا|اسمي|اسمى|الاسم|اسم|معاك|معاكي)\b", landmark, flags=re.IGNORECASE)
@@ -219,24 +219,24 @@ class Delivery(BaseAgent):
                     return _voice_safe_text(f"{_ack()} يا {name_candidate}. {_ask_phone()}", max_chars=180)
             context.userdata.delivery_landmark = landmark.strip()
             return _voice_safe_text(
-                _join_user_phrases("تمام يا فندم، سجلت العلامة المميزة", _ask_name()),
+                _join_user_phrases("تمام يا فندم، سجلت العلامة المميزة", _next_slot_question_for_flow("delivery", context.userdata)),
                 max_chars=180,
             )
 
-        return await _run_tool_safely("update_delivery_landmark", context, _impl)
+        return await _run_tool_safe_speak("update_delivery_landmark", context, _impl)
 
     @function_tool()
-    async def to_complaint(self, context: RunContext_T) -> str | tuple[Agent, str]:
+    async def to_complaint(self, context: RunContext_T) -> str | Agent:
         """يُستدعى لو العميل عنده شكوى."""
-        async def _impl() -> tuple[Agent, str]:
+        async def _impl() -> Agent:
             return await self._transfer("complaint", context)
 
         return await _run_tool_safely("to_complaint", context, _impl)
 
     @function_tool()
-    async def to_takeaway(self, context: RunContext_T) -> str | tuple[Agent, str]:
+    async def to_takeaway(self, context: RunContext_T) -> str | Agent:
         """يُستدعى لو العميل غيّر رأيه وقرر ييجي يستلم الطلب بنفسه. الطلب والاسم والرقم متحفوظين."""
-        async def _impl() -> tuple[Agent, str]:
+        async def _impl() -> Agent:
             return await self._transfer("takeaway", context)
 
         return await _run_tool_safely("to_takeaway", context, _impl)
@@ -254,10 +254,24 @@ class Delivery(BaseAgent):
                 _order_validation_user_message,
                 submit_delivery,
             )
+            from core.confirmation_helpers import (
+                begin_submit,
+                finish_submit,
+                gate_submit,
+            )
             from utils.money import money2ar, num2ar
             from utils.voice import _voice_safe_text
             ud = context.userdata
-            if ud.order_confirmed:
+            payload = {
+                "items": list(ud.order or []),
+                "name": ud.customer_name or "",
+                "phone": ud.customer_phone or "",
+                "address": ud.delivery_address or "",
+                "zone": ud.delivery_zone or "",
+            }
+            gate = gate_submit("delivery", ud, payload)
+
+            if gate.view.is_terminal:
                 logger.info("call=%s | delivery submit skipped | reason=already_confirmed", ud.call_id)
                 return _voice_safe_text(f"الطلب مسجل خلاص يا {ud.customer_name}. في حاجة تانية؟")
             if ud.order_submit_in_flight:
@@ -272,19 +286,34 @@ class Delivery(BaseAgent):
             if not _can_attempt_backend_write(ud):
                 logger.warning("call=%s | delivery submit skipped | reason=write_unavailable", ud.call_id)
                 return _backend_failure_user_message(ud)
+            if not gate.allow:
+                logger.warning(
+                    "call=%s | delivery submit blocked by tracker | reason=%s",
+                    ud.call_id,
+                    gate.reason,
+                )
+                return _voice_safe_text(f"الطلب مسجل خلاص يا {ud.customer_name}. في حاجة تانية؟")
 
+            begin_submit("delivery", ud, gate.idempotency_key)
             ud.order_submit_in_flight = True
             try:
                 result = await submit_delivery(ud)
+            except Exception as exc:  # pragma: no cover - defensive
+                finish_submit("delivery", ud, gate.idempotency_key, succeeded=False, error=type(exc).__name__)
+                raise
             finally:
                 ud.order_submit_in_flight = False
             if not result:
+                finish_submit("delivery", ud, gate.idempotency_key, succeeded=False, error="empty_result")
                 return _backend_failure_user_message(ud)
             if result.get("queued"):
+                finish_submit("delivery", ud, gate.idempotency_key, succeeded=False, error="queued")
                 return _backend_queued_user_message("order")
 
             ud.order_id = result.get("order_id", "")
             ud.order_confirmed = True
+            finish_submit("delivery", ud, gate.idempotency_key, succeeded=True, backend_id=ud.order_id or "")
+            _emit_event("order.submitted", call_id=ud.call_id, flow="delivery", order_id=ud.order_id)
             _emit_event("order.confirmed", call_id=ud.call_id, flow="delivery", order_id=ud.order_id)
             wait = result.get("estimated_time", self.cfg.delivery_minutes)
 
@@ -294,4 +323,4 @@ class Delivery(BaseAgent):
             msg += f" هيوصلك خلال {num2ar(wait)} دقيقة."
             return msg
 
-        return await _run_tool_safely("confirm_delivery", context, _impl)
+        return await _run_tool_safe_speak("confirm_delivery", context, _impl)

@@ -1,0 +1,46 @@
+# STT noise + alias robustness scenarios.
+menu: &menu
+  - {name: "برجر كبير", price: 45.0, available: true}
+  - {name: "كولا", price: 15.0, available: true}
+  - {name: "بطاطس", price: 20.0, available: true}
+
+scenarios:
+  - name: stt_alias_burger_to_canonical
+    menu: *menu
+    turns:
+      - user: "هاتلي برغر كبير"
+        expect: {order_items: {"برجر كبير": 1}}
+
+  - name: stt_alias_kokakola_variants
+    menu: *menu
+    turns:
+      - user: "كوكاكولا"
+        expect: {order_items: {"كولا": 1}}
+      - user: "كوكا كولا اتنين"
+        expect: {order_items: {"كولا": 3}}
+
+  - name: stt_filler_words
+    menu: *menu
+    turns:
+      - user: "اممم آه يعني عايز برجر كبير وبطاطس وكولا، تمام؟"
+        expect: {order_items: {"برجر كبير": 1, "بطاطس": 1, "كولا": 1}}
+
+  - name: stt_thanks_then_order
+    menu: *menu
+    turns:
+      - user: "متشكر يا فندم، عايز كولا واحدة"
+        expect: {order_items: {"كولا": 1}}
+
+  - name: stt_question_then_order
+    menu: *menu
+    turns:
+      - user: "عندك ايه؟"
+        expect: {intent: menu_question}
+      - user: "تمام، اتنين برجر كبير"
+        expect: {order_items: {"برجر كبير": 2}}
+
+  - name: stt_arabic_punctuation
+    menu: *menu
+    turns:
+      - user: "برجر كبير، بطاطس، وكولا"
+        expect: {order_items: {"برجر كبير": 1, "بطاطس": 1, "كولا": 1}}

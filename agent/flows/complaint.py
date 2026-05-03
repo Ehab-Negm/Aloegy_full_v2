@@ -7,7 +7,7 @@ from typing import Annotated
 from livekit.agents.llm import function_tool
 from pydantic import Field
 
-from base_agent import BaseAgent, RunContext_T, _run_tool_safely, build_instructions, to_greeter, update_name, update_phone
+from base_agent import BaseAgent, RunContext_T, _run_tool_safe_speak, build_instructions, to_greeter, update_name, update_phone
 from backend.config import RestaurantConfig
 
 logger = logging.getLogger("restaurant.agent")
@@ -17,15 +17,19 @@ class Complaint(BaseAgent):
     def __init__(self, cfg: RestaurantConfig) -> None:
         self._opening = "قولي حصل إيه يا فندم؟"
         core = (
-            "بتسمع شكاوى الناس وبتحتوي الموقف.\n\n"
-            "الخطوات:\n"
-            "1. اسمع الشكوى لحد ما يخلّص كلامه. خلّيه يحس إنك فاهمه ومهتم.\n"
-            "2. اعتذر طبيعي من قلبك (مش جملة محفوظة) → log_complaint.\n"
-            "3. خُد الاسم والموبايل لو لسه مش متسجلين.\n\n"
-            "قواعد مهمة:\n"
-            "- متجادلش ومتبرّرش، مهما كان. الدور دلوقتي إنك تسمع وتعتذر.\n"
-            "- لو العميل قال نكتة أو كلام جانبي رد طبيعي قصير وارجع.\n"
-            "- لو طلع بقى عايز يطلب → to_greeter."
+            "إنت موظف مطعم بيسمع شكاوى العملاء وبيحتوي الموقف. اتكلم زي "
+            "موظف بشري — اعتذر من قلبك، اسمعه، ما تجادلش.\n\n"
+            "كيف تشتغل:\n"
+            "- في كل turn هيوصلك STATE فيه اللي اتسجل. اعتمد عليه.\n"
+            "- اسمع الشكوى لحد ما يخلص قبل ما تنادي log_complaint.\n"
+            "- لما تفهم الشكوى ونوعها (order_issue / quality / service / "
+            "delivery / other)، استدعي log_complaint.\n"
+            "- اسمه → update_name. رقمه → update_phone.\n"
+            "- لو طلع بقى عايز يطلب أكل بدل الشكوى → to_greeter.\n\n"
+            "قواعد:\n"
+            "- ما تسألش عن slot موجود في الـ STATE.\n"
+            "- ما تجادلش ومتبرّرش، مهما كان.\n"
+            "- اعتذر طبيعي، مش جملة محفوظة."
         )
         super().__init__(
             instructions=build_instructions(cfg.name, core),
@@ -71,4 +75,4 @@ class Complaint(BaseAgent):
                 return _voice_safe_text(_join_user_phrases(_clean_followup_note(note), _complaint_followup_question(ud)), max_chars=180)
             return _voice_safe_text(_join_user_phrases("تمام يا فندم، سجلت الشكوى", _complaint_followup_question(ud)), max_chars=180)
 
-        return await _run_tool_safely("log_complaint", context, _impl)
+        return await _run_tool_safe_speak("log_complaint", context, _impl)

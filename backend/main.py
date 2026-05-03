@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from livekit import api as livekit_api
@@ -106,6 +106,8 @@ JWT_ALGORITHM = "HS256"
 JWT_TTL_MINUTES = max(10, int(os.getenv("JWT_TTL_MINUTES", "720")))
 OTP_TTL_MINUTES = max(1, int(os.getenv("OTP_TTL_MINUTES", "10")))
 BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "mock_secret_key").strip()
+DEV_OTP_BYPASS = os.getenv("DEV_OTP_BYPASS", "").strip()
+DEV_OTP_BYPASS_ENABLED = APP_ENV == "dev" and bool(DEV_OTP_BYPASS)
 
 # ── Bird WhatsApp OTP delivery ──────────────────────────
 BIRD_API_BASE = os.getenv("BIRD_API_BASE", "https://api.bird.com").strip().rstrip("/")
@@ -374,6 +376,95 @@ class DemoSessionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
+class SalesZone(Base):
+    """A geographic / market zone the sales team works.
+
+    Admin creates zones, bulk-adds restaurants under each zone, then
+    assigns one or more reps to a zone via ``ZoneAssignment``. Reps see
+    only zones they are assigned to.
+    """
+    __tablename__ = "sales_zones"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    color: Mapped[str] = mapped_column(String(20), default="#3B82F6")
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class ZoneRestaurant(Base):
+    """One restaurant target inside a zone — minimal fields by design.
+
+    Status flow tracked here is the *current overall* status of the
+    target: pending → in_progress → (won | lost | follow_up). Per-visit
+    granular history lives in ``VisitReport`` rows.
+    """
+    __tablename__ = "zone_restaurants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    zone_id: Mapped[int] = mapped_column(ForeignKey("sales_zones.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    location: Mapped[str] = mapped_column(String(255), default="")
+    map_url: Mapped[str] = mapped_column(String(500), default="")
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    last_report_preview: Mapped[str] = mapped_column(String(255), default="")
+    last_report_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reports_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class ZoneAssignment(Base):
+    """Many-to-many: which reps are responsible for which zones."""
+    __tablename__ = "zone_assignments"
+    __table_args__ = (UniqueConstraint("zone_id", "rep_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    zone_id: Mapped[int] = mapped_column(ForeignKey("sales_zones.id"), index=True)
+    rep_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    assigned_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class VisitReport(Base):
+    """A field-visit log entry submitted by a rep at a restaurant.
+
+    Captures: who they met (contact_name / contact_role), what
+    happened (free-form), the outcome, optional GPS, and 0..n photos
+    via ``VisitPhoto`` rows.
+    """
+    __tablename__ = "visit_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    restaurant_id: Mapped[int] = mapped_column(ForeignKey("zone_restaurants.id"), index=True)
+    rep_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    contact_name: Mapped[str] = mapped_column(String(120), default="")
+    contact_role: Mapped[str] = mapped_column(String(80), default="")
+    contact_phone: Mapped[str] = mapped_column(String(32), default="")
+    what_happened: Mapped[str] = mapped_column(Text, default="")
+    outcome: Mapped[str] = mapped_column(String(24), default="visited")
+    next_step: Mapped[str] = mapped_column(Text, default="")
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lng: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+
+    photos: Mapped[list["VisitPhoto"]] = relationship(cascade="all, delete-orphan")
+
+
+class VisitPhoto(Base):
+    """Photo file uploaded by the rep with a visit report."""
+    __tablename__ = "visit_photos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey("visit_reports.id"), index=True)
+    file_path: Mapped[str] = mapped_column(String(500))
+    mime_type: Mapped[str] = mapped_column(String(80), default="image/jpeg")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
 class ContactLead(Base):
     __tablename__ = "contact_leads"
 
@@ -632,6 +723,54 @@ class DemoSessionPayload(BaseModel):
     phoneNumber: str
 
 
+class SalesZoneCreatePayload(BaseModel):
+    name: str
+    description: str = ""
+    color: str = "#3B82F6"
+
+
+class SalesZoneUpdatePayload(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    color: str | None = None
+
+
+class ZoneRestaurantCreatePayload(BaseModel):
+    name: str
+    location: str = ""
+    mapUrl: str = ""
+
+
+class ZoneRestaurantBulkPayload(BaseModel):
+    """Bulk-paste form: each line is `name — location` (em-dash, en-dash,
+    pipe, comma, or colon all accepted as the separator). Empty lines
+    are ignored. Existing restaurants in the zone are kept.
+    """
+    rawText: str
+
+
+class ZoneRestaurantUpdatePayload(BaseModel):
+    name: str | None = None
+    location: str | None = None
+    mapUrl: str | None = None
+    status: Literal["pending", "in_progress", "won", "lost", "follow_up"] | None = None
+
+
+class ZoneAssignmentPayload(BaseModel):
+    repIds: list[int]
+
+
+class VisitReportPayload(BaseModel):
+    contactName: str = ""
+    contactRole: str = ""
+    contactPhone: str = ""
+    whatHappened: str = ""
+    outcome: Literal["visited", "interested", "won", "lost", "follow_up", "not_open"] = "visited"
+    nextStep: str = ""
+    lat: float | None = None
+    lng: float | None = None
+
+
 class DemoLivekitSessionPayload(BaseModel):
     restaurantId: str | None = None
     participantName: str | None = None
@@ -726,6 +865,13 @@ for _model in (
     SalesRequestStatusPayload,
     DemoSessionPayload,
     DemoLivekitSessionPayload,
+    SalesZoneCreatePayload,
+    SalesZoneUpdatePayload,
+    ZoneRestaurantCreatePayload,
+    ZoneRestaurantBulkPayload,
+    ZoneRestaurantUpdatePayload,
+    ZoneAssignmentPayload,
+    VisitReportPayload,
     AgentOrderItemPayload,
     AgentOrderPayload,
     AgentReservationPayload,
@@ -2274,7 +2420,10 @@ def verify_otp(
         db.commit()
         raise HTTPException(status_code=429, detail="Too many attempts. Request a new OTP.")
 
-    if otp_row and ensure_utc_datetime(otp_row.expires_at) >= utc_now() and otp_row.code_hash == hash_otp(phone, otp):
+    if DEV_OTP_BYPASS_ENABLED and otp == DEV_OTP_BYPASS:
+        logger.warning("dev otp bypass used | phone=%s", phone)
+        otp_is_valid = True
+    elif otp_row and ensure_utc_datetime(otp_row.expires_at) >= utc_now() and otp_row.code_hash == hash_otp(phone, otp):
         otp_is_valid = True
         otp_row.consumed_at = utc_now()
 
@@ -3153,6 +3302,786 @@ def create_sales_demo_session(
         "status": item.status,
         "date": iso_date(item.created_at),
     }
+
+
+# ── Sales zones — admin pipeline mgmt + rep field tracking ────────────────
+# Data model:
+#   SalesZone   1—n   ZoneRestaurant
+#   SalesZone   m—n   User (rep)             via ZoneAssignment
+#   ZoneRestaurant 1—n VisitReport 1—n VisitPhoto
+# Admin builds zones, bulk-pastes restaurants, assigns reps. Reps see
+# only their assigned zones. When a rep visits a restaurant they submit
+# a VisitReport with photos + contact + outcome; the restaurant's rolled-
+# up status updates to reflect the latest outcome.
+
+VISIT_PHOTO_DIR = STORAGE_DIR / "visit_photos"
+VISIT_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_PHOTO_MIME = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+MAX_PHOTO_BYTES = 8 * 1024 * 1024
+MAX_PHOTOS_PER_REPORT = 6
+
+
+def _parse_zone_restaurants_paste(raw: str) -> list[tuple[str, str]]:
+    """Parse pasted restaurant lines into (name, location) tuples.
+
+    Accepted separators (in priority order): em-dash —, en-dash –,
+    pipe |, double dash --, colon :, comma ,. If no separator is
+    present, the whole line is treated as the restaurant name.
+    Empty / whitespace-only lines are skipped.
+    """
+    parsed: list[tuple[str, str]] = []
+    seen_names: set[str] = set()
+    for raw_line in (raw or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        for sep in ("—", "–", "|", "--", ":", ","):
+            if sep in line:
+                parts = line.split(sep, 1)
+                name = parts[0].strip()
+                location = parts[1].strip() if len(parts) > 1 else ""
+                break
+        else:
+            name = line
+            location = ""
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        parsed.append((name[:160], location[:255]))
+    return parsed
+
+
+def _serialize_zone(zone: SalesZone, *, rep_count: int = 0, restaurant_count: int = 0, reports_count: int = 0, won_count: int = 0) -> dict[str, Any]:
+    return {
+        "id": zone.id,
+        "name": zone.name,
+        "description": zone.description,
+        "color": zone.color,
+        "createdById": zone.created_by_id,
+        "createdAt": iso_date(zone.created_at),
+        "updatedAt": iso_date(zone.updated_at),
+        "repCount": rep_count,
+        "restaurantCount": restaurant_count,
+        "reportsCount": reports_count,
+        "wonCount": won_count,
+    }
+
+
+def _serialize_zone_restaurant(restaurant: ZoneRestaurant, *, zone_name: str = "") -> dict[str, Any]:
+    return {
+        "id": restaurant.id,
+        "zoneId": restaurant.zone_id,
+        "zoneName": zone_name,
+        "name": restaurant.name,
+        "location": restaurant.location,
+        "mapUrl": restaurant.map_url,
+        "status": restaurant.status,
+        "lastReportPreview": restaurant.last_report_preview,
+        "lastReportAt": ensure_utc_datetime(restaurant.last_report_at).isoformat() if restaurant.last_report_at else "",
+        "reportsCount": restaurant.reports_count,
+        "createdAt": iso_date(restaurant.created_at),
+        "updatedAt": iso_date(restaurant.updated_at),
+    }
+
+
+def _serialize_visit_report(
+    report: VisitReport,
+    photos: list[VisitPhoto],
+    *,
+    rep_name: str = "",
+    restaurant_name: str = "",
+    zone_name: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": report.id,
+        "restaurantId": report.restaurant_id,
+        "restaurantName": restaurant_name,
+        "zoneName": zone_name,
+        "repId": report.rep_id,
+        "repName": rep_name,
+        "contactName": report.contact_name,
+        "contactRole": report.contact_role,
+        "contactPhone": report.contact_phone,
+        "whatHappened": report.what_happened,
+        "outcome": report.outcome,
+        "nextStep": report.next_step,
+        "lat": report.lat,
+        "lng": report.lng,
+        "createdAt": ensure_utc_datetime(report.created_at).isoformat(),
+        "photos": [
+            {
+                "id": photo.id,
+                "url": f"/sales/visit-photos/{photo.id}",
+                "mimeType": photo.mime_type,
+                "sizeBytes": photo.size_bytes,
+            }
+            for photo in photos
+        ],
+    }
+
+
+def _outcome_to_restaurant_status(outcome: str) -> str:
+    if outcome == "won":
+        return "won"
+    if outcome == "lost":
+        return "lost"
+    if outcome == "follow_up":
+        return "follow_up"
+    if outcome in ("interested", "visited", "not_open"):
+        return "in_progress"
+    return "in_progress"
+
+
+def _save_visit_photo(report_id: int, upload: UploadFile) -> VisitPhoto:
+    mime = (upload.content_type or "").lower()
+    if mime not in ALLOWED_PHOTO_MIME:
+        raise HTTPException(status_code=415, detail=f"unsupported photo type: {mime or 'unknown'}")
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", upload.filename or "photo.jpg")
+    unique_name = f"{report_id}-{uuid.uuid4().hex[:8]}-{safe_name}"
+    target = VISIT_PHOTO_DIR / unique_name
+    data = upload.file.read(MAX_PHOTO_BYTES + 1)
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=413, detail="photo too large (max 8 MB)")
+    target.write_bytes(data)
+    return VisitPhoto(
+        report_id=report_id,
+        file_path=str(target),
+        mime_type=mime,
+        size_bytes=len(data),
+    )
+
+
+@app.get("/admin/sales-zones")
+def fetch_admin_sales_zones(
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    zones = db.scalars(select(SalesZone).order_by(desc(SalesZone.created_at))).all()
+    rep_count_rows = db.execute(
+        select(ZoneAssignment.zone_id, func.count(ZoneAssignment.id)).group_by(ZoneAssignment.zone_id)
+    ).all()
+    rep_count_map = {zone_id: int(cnt) for zone_id, cnt in rep_count_rows}
+    rest_count_rows = db.execute(
+        select(ZoneRestaurant.zone_id, func.count(ZoneRestaurant.id)).group_by(ZoneRestaurant.zone_id)
+    ).all()
+    rest_count_map = {zone_id: int(cnt) for zone_id, cnt in rest_count_rows}
+    rest_won_rows = db.execute(
+        select(ZoneRestaurant.zone_id, func.count(ZoneRestaurant.id))
+        .where(ZoneRestaurant.status == "won")
+        .group_by(ZoneRestaurant.zone_id)
+    ).all()
+    won_map = {zone_id: int(cnt) for zone_id, cnt in rest_won_rows}
+    reports_rows = db.execute(
+        select(ZoneRestaurant.zone_id, func.coalesce(func.sum(ZoneRestaurant.reports_count), 0))
+        .group_by(ZoneRestaurant.zone_id)
+    ).all()
+    reports_map = {zone_id: int(cnt) for zone_id, cnt in reports_rows}
+    return [
+        _serialize_zone(
+            zone,
+            rep_count=rep_count_map.get(zone.id, 0),
+            restaurant_count=rest_count_map.get(zone.id, 0),
+            reports_count=reports_map.get(zone.id, 0),
+            won_count=won_map.get(zone.id, 0),
+        )
+        for zone in zones
+    ]
+
+
+@app.post("/admin/sales-zones")
+def create_admin_sales_zone(
+    payload: SalesZoneCreatePayload,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="zone name is required")
+    if db.scalar(select(SalesZone.id).where(SalesZone.name == name)):
+        raise HTTPException(status_code=409, detail="zone name already exists")
+    zone = SalesZone(
+        name=name,
+        description=payload.description.strip(),
+        color=payload.color.strip() or "#3B82F6",
+        created_by_id=user.id,
+    )
+    db.add(zone)
+    db.commit()
+    db.refresh(zone)
+    return _serialize_zone(zone)
+
+
+@app.patch("/admin/sales-zones/{zone_id}")
+def update_admin_sales_zone(
+    zone_id: int,
+    payload: SalesZoneUpdatePayload,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    zone = db.get(SalesZone, zone_id)
+    if not zone:
+        raise HTTPException(status_code=404, detail="zone not found")
+    if payload.name is not None:
+        zone.name = payload.name.strip() or zone.name
+    if payload.description is not None:
+        zone.description = payload.description.strip()
+    if payload.color is not None:
+        zone.color = payload.color.strip() or zone.color
+    zone.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(zone)
+    return _serialize_zone(zone)
+
+
+@app.delete("/admin/sales-zones/{zone_id}")
+def delete_admin_sales_zone(
+    zone_id: int,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> Response:
+    zone = db.get(SalesZone, zone_id)
+    if not zone:
+        raise HTTPException(status_code=404, detail="zone not found")
+    restaurant_ids = [
+        row for row in db.scalars(select(ZoneRestaurant.id).where(ZoneRestaurant.zone_id == zone.id)).all()
+    ]
+    if restaurant_ids:
+        report_ids = [
+            row for row in db.scalars(select(VisitReport.id).where(VisitReport.restaurant_id.in_(restaurant_ids))).all()
+        ]
+        if report_ids:
+            db.execute(VisitPhoto.__table__.delete().where(VisitPhoto.report_id.in_(report_ids)))
+            db.execute(VisitReport.__table__.delete().where(VisitReport.id.in_(report_ids)))
+        db.execute(ZoneRestaurant.__table__.delete().where(ZoneRestaurant.id.in_(restaurant_ids)))
+    db.execute(ZoneAssignment.__table__.delete().where(ZoneAssignment.zone_id == zone.id))
+    db.delete(zone)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/admin/sales-zones/{zone_id}/restaurants")
+def fetch_admin_zone_restaurants(
+    zone_id: int,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    zone = db.get(SalesZone, zone_id)
+    if not zone:
+        raise HTTPException(status_code=404, detail="zone not found")
+    restaurants = db.scalars(
+        select(ZoneRestaurant).where(ZoneRestaurant.zone_id == zone.id).order_by(ZoneRestaurant.id)
+    ).all()
+    return [_serialize_zone_restaurant(restaurant, zone_name=zone.name) for restaurant in restaurants]
+
+
+@app.post("/admin/sales-zones/{zone_id}/restaurants")
+def add_admin_zone_restaurant(
+    zone_id: int,
+    payload: ZoneRestaurantCreatePayload,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    zone = db.get(SalesZone, zone_id)
+    if not zone:
+        raise HTTPException(status_code=404, detail="zone not found")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="restaurant name is required")
+    restaurant = ZoneRestaurant(
+        zone_id=zone.id,
+        name=name[:160],
+        location=payload.location.strip()[:255],
+        map_url=payload.mapUrl.strip()[:500],
+    )
+    db.add(restaurant)
+    db.commit()
+    db.refresh(restaurant)
+    return _serialize_zone_restaurant(restaurant, zone_name=zone.name)
+
+
+@app.post("/admin/sales-zones/{zone_id}/restaurants/bulk")
+def bulk_add_admin_zone_restaurants(
+    zone_id: int,
+    payload: ZoneRestaurantBulkPayload,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    zone = db.get(SalesZone, zone_id)
+    if not zone:
+        raise HTTPException(status_code=404, detail="zone not found")
+    parsed = _parse_zone_restaurants_paste(payload.rawText)
+    if not parsed:
+        raise HTTPException(status_code=400, detail="no restaurants parsed from paste")
+    existing = {
+        row.name.strip().lower()
+        for row in db.scalars(select(ZoneRestaurant).where(ZoneRestaurant.zone_id == zone.id)).all()
+    }
+    added: list[ZoneRestaurant] = []
+    skipped = 0
+    for name, location in parsed:
+        if name.lower() in existing:
+            skipped += 1
+            continue
+        restaurant = ZoneRestaurant(
+            zone_id=zone.id,
+            name=name,
+            location=location,
+        )
+        db.add(restaurant)
+        added.append(restaurant)
+        existing.add(name.lower())
+    db.commit()
+    for restaurant in added:
+        db.refresh(restaurant)
+    return {
+        "added": len(added),
+        "skippedDuplicates": skipped,
+        "restaurants": [
+            _serialize_zone_restaurant(restaurant, zone_name=zone.name) for restaurant in added
+        ],
+    }
+
+
+@app.patch("/admin/zone-restaurants/{restaurant_id}")
+def update_admin_zone_restaurant(
+    restaurant_id: int,
+    payload: ZoneRestaurantUpdatePayload,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    restaurant = db.get(ZoneRestaurant, restaurant_id)
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="restaurant not found")
+    if payload.name is not None:
+        restaurant.name = payload.name.strip()[:160] or restaurant.name
+    if payload.location is not None:
+        restaurant.location = payload.location.strip()[:255]
+    if payload.mapUrl is not None:
+        restaurant.map_url = payload.mapUrl.strip()[:500]
+    if payload.status is not None:
+        restaurant.status = payload.status
+    restaurant.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(restaurant)
+    zone = db.get(SalesZone, restaurant.zone_id)
+    return _serialize_zone_restaurant(restaurant, zone_name=zone.name if zone else "")
+
+
+@app.delete("/admin/zone-restaurants/{restaurant_id}")
+def delete_admin_zone_restaurant(
+    restaurant_id: int,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> Response:
+    restaurant = db.get(ZoneRestaurant, restaurant_id)
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="restaurant not found")
+    report_ids = [row for row in db.scalars(select(VisitReport.id).where(VisitReport.restaurant_id == restaurant.id)).all()]
+    if report_ids:
+        db.execute(VisitPhoto.__table__.delete().where(VisitPhoto.report_id.in_(report_ids)))
+        db.execute(VisitReport.__table__.delete().where(VisitReport.id.in_(report_ids)))
+    db.delete(restaurant)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/admin/sales-zones/{zone_id}/assignments")
+def fetch_admin_zone_assignments(
+    zone_id: int,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    zone = db.get(SalesZone, zone_id)
+    if not zone:
+        raise HTTPException(status_code=404, detail="zone not found")
+    rows = db.execute(
+        select(ZoneAssignment, User)
+        .join(User, User.id == ZoneAssignment.rep_id)
+        .where(ZoneAssignment.zone_id == zone.id)
+    ).all()
+    return [
+        {
+            "id": assignment.id,
+            "zoneId": assignment.zone_id,
+            "repId": rep.id,
+            "repName": rep.name,
+            "repPhone": rep.phone,
+            "createdAt": iso_date(assignment.created_at),
+        }
+        for assignment, rep in rows
+    ]
+
+
+@app.post("/admin/sales-zones/{zone_id}/assignments")
+def assign_admin_zone_reps(
+    zone_id: int,
+    payload: ZoneAssignmentPayload,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    zone = db.get(SalesZone, zone_id)
+    if not zone:
+        raise HTTPException(status_code=404, detail="zone not found")
+    requested_ids = sorted(set(payload.repIds))
+    if requested_ids:
+        valid_ids = {
+            row for row in db.scalars(
+                select(User.id).where(User.id.in_(requested_ids), User.role == "sales")
+            ).all()
+        }
+        if valid_ids != set(requested_ids):
+            raise HTTPException(status_code=400, detail="one or more rep ids are invalid")
+    existing = {
+        row.rep_id: row for row in db.scalars(
+            select(ZoneAssignment).where(ZoneAssignment.zone_id == zone.id)
+        ).all()
+    }
+    requested_set = set(requested_ids)
+    # Add missing assignments
+    for rep_id in requested_set - set(existing):
+        db.add(ZoneAssignment(zone_id=zone.id, rep_id=rep_id, assigned_by_id=user.id))
+    # Remove dropped assignments
+    for rep_id in set(existing) - requested_set:
+        db.delete(existing[rep_id])
+    db.commit()
+    rows = db.execute(
+        select(ZoneAssignment, User)
+        .join(User, User.id == ZoneAssignment.rep_id)
+        .where(ZoneAssignment.zone_id == zone.id)
+    ).all()
+    return [
+        {
+            "id": assignment.id,
+            "zoneId": assignment.zone_id,
+            "repId": rep.id,
+            "repName": rep.name,
+            "repPhone": rep.phone,
+            "createdAt": iso_date(assignment.created_at),
+        }
+        for assignment, rep in rows
+    ]
+
+
+# ── Sales analytics ───────────────────────────────────────────────────────
+
+@app.get("/admin/sales-analytics")
+def fetch_admin_sales_analytics(
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    zones_count = int(db.scalar(select(func.count(SalesZone.id))) or 0)
+    restaurants_count = int(db.scalar(select(func.count(ZoneRestaurant.id))) or 0)
+    reports_count = int(db.scalar(select(func.count(VisitReport.id))) or 0)
+    won_count = int(db.scalar(select(func.count(ZoneRestaurant.id)).where(ZoneRestaurant.status == "won")) or 0)
+    lost_count = int(db.scalar(select(func.count(ZoneRestaurant.id)).where(ZoneRestaurant.status == "lost")) or 0)
+    pending_count = int(db.scalar(select(func.count(ZoneRestaurant.id)).where(ZoneRestaurant.status == "pending")) or 0)
+    in_progress_count = int(db.scalar(select(func.count(ZoneRestaurant.id)).where(ZoneRestaurant.status == "in_progress")) or 0)
+    follow_up_count = int(db.scalar(select(func.count(ZoneRestaurant.id)).where(ZoneRestaurant.status == "follow_up")) or 0)
+    conversion_rate = (won_count / restaurants_count) if restaurants_count else 0.0
+
+    # Per-zone breakdown
+    zones = db.scalars(select(SalesZone).order_by(SalesZone.created_at)).all()
+    rest_rows = db.execute(
+        select(ZoneRestaurant.zone_id, ZoneRestaurant.status, func.count(ZoneRestaurant.id))
+        .group_by(ZoneRestaurant.zone_id, ZoneRestaurant.status)
+    ).all()
+    per_zone_status: dict[int, dict[str, int]] = {}
+    for zone_id, st, cnt in rest_rows:
+        per_zone_status.setdefault(zone_id, {})[st] = int(cnt)
+    per_zone_reports = {
+        zone_id: int(cnt)
+        for zone_id, cnt in db.execute(
+            select(ZoneRestaurant.zone_id, func.coalesce(func.sum(ZoneRestaurant.reports_count), 0))
+            .group_by(ZoneRestaurant.zone_id)
+        ).all()
+    }
+
+    per_zone = []
+    for zone in zones:
+        st_counts = per_zone_status.get(zone.id, {})
+        zone_total = sum(st_counts.values())
+        won = st_counts.get("won", 0)
+        per_zone.append({
+            "zoneId": zone.id,
+            "zoneName": zone.name,
+            "color": zone.color,
+            "restaurants": zone_total,
+            "won": won,
+            "lost": st_counts.get("lost", 0),
+            "inProgress": st_counts.get("in_progress", 0),
+            "followUp": st_counts.get("follow_up", 0),
+            "pending": st_counts.get("pending", 0),
+            "reports": per_zone_reports.get(zone.id, 0),
+            "conversionRate": (won / zone_total) if zone_total else 0.0,
+        })
+
+    # Per-rep breakdown
+    rep_rows = db.execute(
+        select(VisitReport.rep_id, func.count(VisitReport.id))
+        .group_by(VisitReport.rep_id)
+    ).all()
+    rep_count_map = {rep_id: int(cnt) for rep_id, cnt in rep_rows}
+    rep_users = db.scalars(select(User).where(User.role == "sales")).all()
+    rep_zone_rows = db.execute(
+        select(ZoneAssignment.rep_id, func.count(ZoneAssignment.id))
+        .group_by(ZoneAssignment.rep_id)
+    ).all()
+    rep_zone_map = {rep_id: int(cnt) for rep_id, cnt in rep_zone_rows}
+
+    # Latest report per rep (preview)
+    latest_rep_report: dict[int, datetime] = {}
+    for row in db.execute(
+        select(VisitReport.rep_id, func.max(VisitReport.created_at)).group_by(VisitReport.rep_id)
+    ).all():
+        rep_id, last = row
+        if isinstance(last, datetime):
+            latest_rep_report[rep_id] = last
+
+    per_rep = [
+        {
+            "repId": rep.id,
+            "repName": rep.name,
+            "repPhone": rep.phone,
+            "reports": rep_count_map.get(rep.id, 0),
+            "zones": rep_zone_map.get(rep.id, 0),
+            "lastReportAt": ensure_utc_datetime(latest_rep_report[rep.id]).isoformat() if rep.id in latest_rep_report else "",
+        }
+        for rep in rep_users
+    ]
+    per_rep.sort(key=lambda entry: entry["reports"], reverse=True)
+
+    # Recent reports for the activity feed
+    recent_reports = db.scalars(
+        select(VisitReport).order_by(desc(VisitReport.created_at)).limit(20)
+    ).all()
+    rep_lookup = {rep.id: rep.name for rep in rep_users}
+    rep_lookup[user.id] = user.name
+    rest_lookup = {
+        row.id: (row.name, row.zone_id)
+        for row in db.scalars(select(ZoneRestaurant)).all()
+    }
+    zone_lookup = {zone.id: zone.name for zone in zones}
+    photo_rows = db.execute(
+        select(VisitPhoto)
+        .where(VisitPhoto.report_id.in_([report.id for report in recent_reports] or [0]))
+    ).all()
+    photo_map: dict[int, list[VisitPhoto]] = {}
+    for (photo,) in photo_rows:
+        photo_map.setdefault(photo.report_id, []).append(photo)
+    recent_payload = []
+    for report in recent_reports:
+        rest_name, zone_id = rest_lookup.get(report.restaurant_id, ("—", 0))
+        recent_payload.append(
+            _serialize_visit_report(
+                report,
+                photo_map.get(report.id, []),
+                rep_name=rep_lookup.get(report.rep_id, "—"),
+                restaurant_name=rest_name,
+                zone_name=zone_lookup.get(zone_id, ""),
+            )
+        )
+
+    return {
+        "totals": {
+            "zones": zones_count,
+            "restaurants": restaurants_count,
+            "reports": reports_count,
+            "won": won_count,
+            "lost": lost_count,
+            "pending": pending_count,
+            "inProgress": in_progress_count,
+            "followUp": follow_up_count,
+            "conversionRate": round(conversion_rate, 4),
+        },
+        "perZone": per_zone,
+        "perRep": per_rep,
+        "recentReports": recent_payload,
+    }
+
+
+# ── Rep-side endpoints ────────────────────────────────────────────────────
+
+@app.get("/sales/my-zones")
+def fetch_my_sales_zones(
+    user: CurrentUser = Depends(require_roles("sales")),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Return zones assigned to the current rep, each with its
+    restaurants embedded. Single round-trip for the rep dashboard."""
+    zone_rows = db.execute(
+        select(SalesZone)
+        .join(ZoneAssignment, ZoneAssignment.zone_id == SalesZone.id)
+        .where(ZoneAssignment.rep_id == user.id)
+        .order_by(SalesZone.created_at)
+    ).all()
+    zones = [row[0] for row in zone_rows]
+    if not zones:
+        return []
+    zone_ids = [zone.id for zone in zones]
+    restaurants = db.scalars(
+        select(ZoneRestaurant).where(ZoneRestaurant.zone_id.in_(zone_ids)).order_by(ZoneRestaurant.id)
+    ).all()
+    by_zone: dict[int, list[ZoneRestaurant]] = {zone.id: [] for zone in zones}
+    for restaurant in restaurants:
+        by_zone.setdefault(restaurant.zone_id, []).append(restaurant)
+    return [
+        {
+            **_serialize_zone(
+                zone,
+                rep_count=0,
+                restaurant_count=len(by_zone.get(zone.id, [])),
+                reports_count=sum(restaurant.reports_count for restaurant in by_zone.get(zone.id, [])),
+                won_count=sum(1 for restaurant in by_zone.get(zone.id, []) if restaurant.status == "won"),
+            ),
+            "restaurants": [
+                _serialize_zone_restaurant(restaurant, zone_name=zone.name)
+                for restaurant in by_zone.get(zone.id, [])
+            ],
+        }
+        for zone in zones
+    ]
+
+
+def _ensure_rep_can_see_restaurant(restaurant: ZoneRestaurant, user: CurrentUser, db: Session) -> None:
+    is_assigned = db.scalar(
+        select(ZoneAssignment.id)
+        .where(ZoneAssignment.zone_id == restaurant.zone_id, ZoneAssignment.rep_id == user.id)
+    )
+    if not is_assigned:
+        raise HTTPException(status_code=404, detail="restaurant not found")
+
+
+@app.get("/sales/zone-restaurants/{restaurant_id}/reports")
+def fetch_my_zone_restaurant_reports(
+    restaurant_id: int,
+    user: CurrentUser = Depends(require_roles("sales", "admin")),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    restaurant = db.get(ZoneRestaurant, restaurant_id)
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="restaurant not found")
+    if user.role == "sales":
+        _ensure_rep_can_see_restaurant(restaurant, user, db)
+    reports = db.scalars(
+        select(VisitReport).where(VisitReport.restaurant_id == restaurant.id).order_by(desc(VisitReport.created_at))
+    ).all()
+    photo_rows = db.scalars(
+        select(VisitPhoto).where(VisitPhoto.report_id.in_([report.id for report in reports] or [0]))
+    ).all()
+    photo_map: dict[int, list[VisitPhoto]] = {}
+    for photo in photo_rows:
+        photo_map.setdefault(photo.report_id, []).append(photo)
+    rep_lookup = {row.id: row.name for row in db.scalars(select(User)).all()}
+    zone = db.get(SalesZone, restaurant.zone_id)
+    return [
+        _serialize_visit_report(
+            report,
+            photo_map.get(report.id, []),
+            rep_name=rep_lookup.get(report.rep_id, "—"),
+            restaurant_name=restaurant.name,
+            zone_name=zone.name if zone else "",
+        )
+        for report in reports
+    ]
+
+
+@app.post("/sales/zone-restaurants/{restaurant_id}/reports")
+async def submit_my_zone_restaurant_report(
+    restaurant_id: int,
+    contactName: str = Form(""),
+    contactRole: str = Form(""),
+    contactPhone: str = Form(""),
+    whatHappened: str = Form(""),
+    outcome: str = Form("visited"),
+    nextStep: str = Form(""),
+    lat: float | None = Form(None),
+    lng: float | None = Form(None),
+    photos: list[UploadFile] = File(default_factory=list),
+    user: CurrentUser = Depends(require_roles("sales")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    restaurant = db.get(ZoneRestaurant, restaurant_id)
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="restaurant not found")
+    _ensure_rep_can_see_restaurant(restaurant, user, db)
+    if outcome not in ("visited", "interested", "won", "lost", "follow_up", "not_open"):
+        raise HTTPException(status_code=400, detail=f"invalid outcome: {outcome}")
+    if photos and len(photos) > MAX_PHOTOS_PER_REPORT:
+        raise HTTPException(status_code=400, detail=f"max {MAX_PHOTOS_PER_REPORT} photos per report")
+    body = (whatHappened or "").strip()
+    if not body and not photos:
+        raise HTTPException(status_code=400, detail="report needs at least a description or a photo")
+    report = VisitReport(
+        restaurant_id=restaurant.id,
+        rep_id=user.id,
+        contact_name=contactName.strip()[:120],
+        contact_role=contactRole.strip()[:80],
+        contact_phone=contactPhone.strip()[:32],
+        what_happened=body,
+        outcome=outcome,
+        next_step=nextStep.strip(),
+        lat=lat,
+        lng=lng,
+    )
+    db.add(report)
+    db.flush()  # assign id for photo filename
+    saved_photos: list[VisitPhoto] = []
+    for upload in photos or []:
+        if not upload.filename:
+            continue
+        saved = _save_visit_photo(report.id, upload)
+        db.add(saved)
+        saved_photos.append(saved)
+
+    # Roll up restaurant-level state.
+    restaurant.reports_count += 1
+    preview_text = body[:240] if body else f"{len(saved_photos)} صورة"
+    restaurant.last_report_preview = preview_text
+    restaurant.last_report_at = datetime.now(UTC)
+    restaurant.updated_at = restaurant.last_report_at
+    restaurant.status = _outcome_to_restaurant_status(outcome)
+
+    db.commit()
+    db.refresh(report)
+    for photo in saved_photos:
+        db.refresh(photo)
+    zone = db.get(SalesZone, restaurant.zone_id)
+    return _serialize_visit_report(
+        report,
+        saved_photos,
+        rep_name=user.name,
+        restaurant_name=restaurant.name,
+        zone_name=zone.name if zone else "",
+    )
+
+
+@app.get("/sales/visit-photos/{photo_id}")
+def serve_visit_photo(
+    photo_id: int,
+    user: CurrentUser = Depends(require_roles("sales", "admin")),
+    db: Session = Depends(get_db),
+) -> Response:
+    photo = db.get(VisitPhoto, photo_id)
+    if not photo:
+        raise HTTPException(status_code=404, detail="photo not found")
+    report = db.get(VisitReport, photo.report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="photo not found")
+    if user.role == "sales" and report.rep_id != user.id:
+        # Allow rep access only to their own reports (admin sees all).
+        raise HTTPException(status_code=404, detail="photo not found")
+    path = Path(photo.file_path)
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="photo file missing") from exc
+    storage_root = VISIT_PHOTO_DIR.resolve()
+    if storage_root not in resolved.parents and resolved != storage_root:
+        raise HTTPException(status_code=400, detail="invalid photo path")
+    return Response(content=resolved.read_bytes(), media_type=photo.mime_type)
 
 
 @app.get("/restaurant/config")
