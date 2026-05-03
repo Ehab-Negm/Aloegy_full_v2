@@ -13,7 +13,13 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import RunContext
 from pydantic import Field
 
-from nlp.phone_extract import phone_digits_only, validate_phone
+from nlp.phone_extract import (
+    is_plausible_partial_phone_digits,
+    local_phone_digits,
+    merge_phone_digits,
+    phone_digits_only,
+    validate_phone,
+)
 from state.user_data import UserData
 from utils.money import money2ar, num2ar, phone2ar
 
@@ -73,24 +79,69 @@ async def set_name(
 async def set_phone(
     phone: Annotated[
         str,
-        Field(description="رقم موبايل مصري — مثل 01012345678 أو نطق العميل بالأرقام"),
+        Field(
+            description=(
+                "أرقام موبايل العميل زي ما قالها — كاملة (01012345678) أو مجزأة "
+                "(0155 أو 8950484). الـ tool بيبافر الأجزاء لحد ما يكتمل الرقم."
+            )
+        ),
     ],
     context: RunContext_T,
 ) -> str:
-    """سجّل رقم موبايل العميل. الـ tool هيتأكد إن الرقم مصري صح قبل ما يحفظ."""
+    """سجّل أو كمّل رقم موبايل العميل. بيقبل الرقم كامل أو على chunks ويبافر لحد ما يكتمل ١١ رقم."""
     ud = context.userdata
-    digits = phone_digits_only(phone)
-    validated = validate_phone(digits)
-    if not validated:
+
+    incoming_digits = phone_digits_only(phone)
+    if not incoming_digits:
         return (
-            f"الرقم {phone} مش رقم مصري صحيح. "
-            "لازم يكون 11 رقم ويبدأ بـ 010 أو 011 أو 012 أو 015. "
-            "اطلب من العميل يعيده."
+            f"مفيش أرقام في كلام العميل ({phone!r}). "
+            "اطلب منه يقول الرقم تاني بوضوح."
         )
-    ud.customer_phone = validated
+
+    # Try the incoming chunk on its own first (in case the customer restated
+    # the full number rather than continuing a partial).
+    direct_valid = validate_phone(incoming_digits)
+    combined_digits = merge_phone_digits(ud.pending_phone_digits or "", incoming_digits)
+    combined_valid = validate_phone(combined_digits)
+    cleaned = direct_valid or combined_valid
+
+    if cleaned:
+        was_chunked = bool(ud.pending_phone_digits) and not direct_valid
+        ud.customer_phone = cleaned
+        ud.pending_phone_digits = ""
+        logger.info(
+            "call=%s | phone_set | chunked=%s",
+            ud.call_id, was_chunked,
+        )
+        return f"الرقم اتسجل كامل: {phone2ar(cleaned)}"
+
+    # Not yet a full valid number — buffer if it looks plausible.
+    partial = combined_digits if is_plausible_partial_phone_digits(combined_digits) else ""
+    if partial:
+        ud.pending_phone_digits = partial
+        local = local_phone_digits(partial)
+        remaining = max(0, 11 - len(local))
+        logger.info(
+            "call=%s | phone_partial_buffered | digits=%d | remaining=%d",
+            ud.call_id, len(partial), remaining,
+        )
+        if remaining > 0:
+            return (
+                f"اتخزّن مبدئياً ({len(local)} رقم من ١١). "
+                f"اطلب من العميل باقي الـ{remaining} رقم."
+            )
+        return (
+            f"اتخزّن {len(local)} رقم بس مش valid. "
+            "ممكن يبدأ بـ 010 أو 011 أو 012 أو 015 — اطلب من العميل يعيد الرقم."
+        )
+
+    # Not plausible at all — reset buffer and ask for re-entry
     ud.pending_phone_digits = ""
-    logger.info("call=%s | phone_set", ud.call_id)
-    return f"الرقم اتسجل: {phone2ar(validated)}"
+    return (
+        f"الرقم اللي قاله ({phone!r}) مش رقم مصري صحيح. "
+        "لازم يبدأ بـ 010 أو 011 أو 012 أو 015 ويكون ١١ رقم. "
+        "اطلب من العميل يعيده من الأول."
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
