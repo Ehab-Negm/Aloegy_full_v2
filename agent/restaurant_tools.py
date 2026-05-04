@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 
 from livekit.agents.llm import function_tool
 from livekit.agents.voice import RunContext
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from nlp.phone_extract import (
     is_plausible_partial_phone_digits,
@@ -148,14 +148,26 @@ async def set_phone(
 # Order
 # ─────────────────────────────────────────────────────────────────────────────
 
+class OrderItemSpec(BaseModel):
+    """Structured order line — name + quantity. Keeps qty separate from
+    the item name so quantities like 'تلاتة شاورما' or '12 صندوق' get
+    recorded correctly instead of being baked into the name string."""
+    name: Annotated[str, Field(description="اسم الصنف زي ما هو في المنيو، بدون كميات")]
+    qty: Annotated[int, Field(description="الكمية المطلوبة من الصنف ده", ge=1, le=99)] = 1
+
+
 @function_tool()
 async def update_order(
     items: Annotated[
-        list[str],
+        list[OrderItemSpec],
         Field(
             description=(
-                "قائمة الأصناف اللي طلبها العميل، كل عنصر يكون نص. "
-                "مثال: ['كشري كبير', 'بيبسي', 'كباب 2']."
+                "قائمة الأصناف. كل عنصر فيه name (اسم الصنف فقط) و qty (الكمية). "
+                "أمثلة:\n"
+                "- 'بيتزا واحدة' → [{name:'بيتزا مارجريتا', qty:1}]\n"
+                "- 'تلاتة شاورما فراخ' → [{name:'شاورما فراخ', qty:3}]\n"
+                "- '12 صندوق شاورما لحمة' → [{name:'شاورما لحمة', qty:12}]\n"
+                "- 'بيتزا وكولا' → [{name:'بيتزا', qty:1}, {name:'كولا', qty:1}]"
             )
         ),
     ],
@@ -163,20 +175,30 @@ async def update_order(
         bool,
         Field(
             description=(
-                "True لو العميل بيغيّر الطلب كله (بدّل اللي طلبه قبل كده)، "
+                "True لو العميل بدّل الطلب كله. "
                 "False لو بيضيف على الموجود."
             )
         ),
     ],
     context: RunContext_T,
 ) -> str:
-    """سجّل أو حدّث طلب العميل. الـ tool هيتأكد من المنيو ويحسب الإجمالي."""
+    """سجّل أو حدّث طلب العميل بالكميات. الـ tool بيتأكد من المنيو ويحسب الإجمالي."""
     from agent import _normalize_order_items
 
     ud = context.userdata
     cfg = ud.restaurant
 
-    new_items = [item.strip() for item in items if item and item.strip()]
+    # Convert structured (name, qty) into the "name x qty" string format
+    # the existing parser understands, so qty is preserved through the
+    # pipeline. qty=1 stays as a bare name (cleaner downstream display).
+    new_items: list[str] = []
+    for spec in items:
+        name = (spec.name or "").strip()
+        if not name:
+            continue
+        qty = max(1, min(99, int(spec.qty or 1)))
+        new_items.append(name if qty == 1 else f"{name} x {qty}")
+
     if not new_items:
         return "الطلب فاضي. اطلب من العميل يقول الأصناف."
 

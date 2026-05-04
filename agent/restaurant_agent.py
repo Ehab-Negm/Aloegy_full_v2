@@ -100,7 +100,13 @@ def _build_persona_prompt(cfg: RestaurantConfig) -> str:
 | `confirm_and_submit` | لما تجمع كل البيانات + العميل يأكد |
 
 ## حالة خاصة: التليفون
-الناس بتقول رقمها على chunks ("0155"... ثم "8950484"). نده `set_phone` لكل chunk تستلمه. الـ tool هيبافر الأرقام لحد ما يكتمل ١١ رقم. لو رد قال "اتسجل" يبقى تمام، لو قال "كمّل الباقي" يبقى اطلب من العميل باقي الأرقام.
+الناس بتقول رقمها على chunks ("0155"... ثم "8950484"). نده `set_phone` لكل chunk تستلمه — حتى لو رقم واحد. الـ tool بيبافر الأرقام لحد ما يكتمل ١١ رقم. لو رد قال "اتسجل" يبقى تمام، لو قال "كمّل الباقي" يبقى اطلب من العميل باقي الأرقام.
+
+## حالة خاصة: الكميات في الطلب
+الـ `update_order` بياخد كل صنف بـ `name` و `qty` منفصلين. **متحطش الكمية في الـ name.**
+- "تلاتة شاورما فراخ" → `[{name:"شاورما فراخ", qty:3}]` ✅
+- "12 صندوق شاورما لحمة" → `[{name:"شاورما لحمة", qty:12}]` ✅
+- ❌ غلط: `[{name:"شاورما فراخ × 3"}]` أو `[{name:"12 صندوق شاورما لحمة"}]`
 
 # قواعد إضافية
 1. **اقرا [CALL_STATE] في كل turn قبل ما ترد.** اللي مكتوب فيه هو اللي العميل قاله بالفعل — ممنوع تسأل عنه تاني.
@@ -109,7 +115,8 @@ def _build_persona_prompt(cfg: RestaurantConfig) -> str:
 4. لما تنادي tools، رد بجملة واحدة قصيرة بعد كده. متلخصش الطلب تاني.
 5. **متخترعش معلومات.** متقولش سعر، متقولش صنف موجود ولا لأ — كل ده شغل الـ tools.
 6. لما تجمع كل اللي محتاجه + العميل يأكد → confirm_and_submit.
-7. لو العميل غيّر رأيه، استخدم نفس الـ tools — البيانات هتتعدّل."""
+7. لو العميل غيّر رأيه، استخدم نفس الـ tools — البيانات هتتعدّل.
+8. **بعد ما يتأكد الطلب/الحجز/الشكوى** (شفت ✅ في الـ STATE): متسألش "في حاجة تانية؟". لو قال شكراً قول "نورتنا يا فندم" بس وخلاص — متبدأش حوار جديد."""
 
 
 class RestaurantAgent(Agent):
@@ -164,7 +171,12 @@ class RestaurantAgent(Agent):
         if not normalized:
             logger.info("call=%s | empty transcript ignored", ud.call_id)
             raise StopResponse()
-        if len(normalized) < 2:
+        # Single-character transcripts are usually STT noise, BUT during
+        # phone capture (when we already have buffered digits) a single
+        # digit like "9." is a legitimate continuation chunk that must
+        # reach the LLM so it can call set_phone. Skip the noise gate
+        # while pending_phone_digits is non-empty.
+        if len(normalized) < 2 and not ud.pending_phone_digits:
             logger.info(
                 "call=%s | too-short transcript ignored | text=%r", ud.call_id, text
             )

@@ -286,6 +286,36 @@ async def entrypoint(ctx: JobContext):
                 continue
 
             idle_for = time.monotonic() - last_user_activity_at
+
+            # If the call has already produced its outcome (order/reservation/
+            # complaint confirmed), there is nothing more to do — close
+            # gracefully with a goodbye instead of asking "are you still
+            # there?" which sounds rude after the customer just said thanks.
+            call_completed = (
+                userdata.order_confirmed
+                or userdata.reservation_confirmed
+                or userdata.complaint_logged
+            )
+            if call_completed and idle_for >= _agent.NO_SPEECH_PROMPT_SECONDS:
+                close_reason = "completed_idle"
+                userdata.session_transitional_state = True
+                logger.info(
+                    "call=%s | completed-idle close | idle_for=%.1fs",
+                    call_id, idle_for,
+                )
+                _agent._emit_event(
+                    "call.inactivity",
+                    call_id=call_id,
+                    action="completed_close",
+                    idle_for_s=round(idle_for, 3),
+                )
+                await _agent._safe_close_session_once(
+                    session,
+                    close_state,
+                    farewell="نورتنا يا فندم، يا هلا تاني.",
+                )
+                return
+
             if (
                 inactivity_prompt_count < _agent.NO_SPEECH_REPROMPT_LIMIT
                 and idle_for >= _agent.NO_SPEECH_PROMPT_SECONDS
@@ -297,7 +327,11 @@ async def entrypoint(ctx: JobContext):
                     "call=%s | inactivity reprompt | idle_for=%.1fs | count=%d",
                     call_id, idle_for, inactivity_prompt_count,
                 )
-                flow_name = session.current_agent.__class__.__name__.lower() if session.current_agent else ""
+                # Use the LLM-tracked intent from set_intent rather than the
+                # agent class name (which is always "restaurantagent" in the
+                # single-agent design). Lets _inactivity_reprompt produce
+                # flow-specific nudges like "تحب تطلب إيه؟" when relevant.
+                flow_name = (userdata.active_flow or "").strip().lower()
                 _agent._emit_event(
                     "call.inactivity",
                     call_id=call_id,
@@ -325,7 +359,11 @@ async def entrypoint(ctx: JobContext):
                     "call=%s | inactivity close | idle_for=%.1fs",
                     call_id, idle_for,
                 )
-                flow_name = session.current_agent.__class__.__name__.lower() if session.current_agent else ""
+                # Use the LLM-tracked intent from set_intent rather than the
+                # agent class name (which is always "restaurantagent" in the
+                # single-agent design). Lets _inactivity_reprompt produce
+                # flow-specific nudges like "تحب تطلب إيه؟" when relevant.
+                flow_name = (userdata.active_flow or "").strip().lower()
                 _agent._emit_event(
                     "call.inactivity",
                     call_id=call_id,
