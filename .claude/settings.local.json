@@ -10,7 +10,20 @@
       "Bash(ls *.py)",
       "Bash(grep -E \"\\(\\\\.py|\\\\.bak\\)$\")",
       "Bash(python -c ' *)",
-      "WebFetch(domain:ai.google.dev)"
+      "WebFetch(domain:ai.google.dev)",
+      "Bash(git -C \"D:/lovable livekit\" add agent/.env agent/agent.py agent/restaurant_agent.py)",
+      "Bash(git -C \"D:/lovable livekit\" status --short)",
+      "Bash(git -C \"D:/lovable livekit\" add agent/.env agent/restaurant_agent.py backend/main.py)",
+      "Bash(git -C 'D:/lovable livekit' commit -m ' *)",
+      "Bash(git *)",
+      "WebFetch(domain:tryhamsa.com)",
+      "Bash(curl -s -X POST \"https://api.tryhamsa.com/v1/realtime/voices\" -H \"X-Api-Key: 76204cfb-28b7-4cc6-b02d-cef981706c75\")",
+      "Bash(curl -s \"https://api.tryhamsa.com/v1/voices/list\" -H \"X-Api-Key: 76204cfb-28b7-4cc6-b02d-cef981706c75\")",
+      "Bash(curl -s \"https://api.tryhamsa.com/v1/realtime?api_key=76204cfb-28b7-4cc6-b02d-cef981706c75\")",
+      "Bash(findstr :8000)",
+      "Bash(findstr LISTENING)",
+      "Bash(tasklist *)",
+      "WebFetch(domain:docs.livekit.io)"
     ]
   }
 }
