@@ -322,6 +322,61 @@ async def get_menu(context: RunContext_T) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# End call — graceful hangup
+# ─────────────────────────────────────────────────────────────────────────────
+
+@function_tool()
+async def end_call(
+    reason: Annotated[
+        Literal[
+            "order_completed",
+            "reservation_completed",
+            "complaint_logged",
+            "customer_done",
+            "other",
+        ],
+        Field(
+            description=(
+                "سبب إنهاء المكالمة. order_completed/reservation_completed/"
+                "complaint_logged بعد ما يخلص الـ flow، customer_done لو "
+                "العميل قال خلاص شكراً، other لأي حاجة تانية."
+            )
+        ),
+    ],
+    context: RunContext_T,
+) -> str:
+    """قفل المكالمة بشكل لائق بعد ما تكون قلت جملة الوداع.
+
+    استخدمها بعد ما العميل يأكد على الطلب وتقولّه جملة الوداع — الـ tool
+    هيستنى الكلام يخلص قبل ما يقفل، فالعميل هيسمع كل الجملة بأمان.
+    """
+    ud = context.userdata
+    logger.info("call=%s | end_call requested | reason=%s", ud.call_id, reason)
+    # Wait for the goodbye line to finish playing before tearing down
+    # the session — closing mid-speech would cut the customer off.
+    try:
+        await context.wait_for_playout()
+    except Exception as exc:
+        logger.warning("call=%s | wait_for_playout failed | %s", ud.call_id, exc)
+    # Mark this state so the watchdog doesn't reprompt while we close.
+    ud.session_transitional_state = True
+    # Schedule the actual session shutdown after this tool returns. Calling
+    # shutdown() here would cancel the current LLM turn before the tool
+    # result is processed — defer it so the surrounding turn finishes
+    # cleanly first.
+    import asyncio as _asyncio
+    session = context.session
+    async def _delayed_shutdown() -> None:
+        await _asyncio.sleep(0.05)
+        try:
+            session.shutdown(reason=f"end_call:{reason}")
+        except Exception as exc:
+            logger.warning("call=%s | session shutdown failed | %s", ud.call_id, exc)
+    _asyncio.create_task(_delayed_shutdown(), name=f"end_call_{ud.call_id}")
+    return "المكالمة هتقفل دلوقتي. متقولش حاجة تانية."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Confirm and submit
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -506,4 +561,5 @@ __all__ = [
     "set_complaint",
     "get_menu",
     "confirm_and_submit",
+    "end_call",
 ]

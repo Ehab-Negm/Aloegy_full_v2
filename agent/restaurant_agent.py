@@ -78,7 +78,9 @@ def _build_persona_prompt(cfg: RestaurantConfig) -> str:
 - `set_intent` (takeaway/delivery/reservation/complaint) — أول ما تفهم النية.
 - `set_name` — أول ما يقول اسمه.
 - `update_order` (يضيف للطلب)، `clear_order` (لو قال هبدأ من الأول).
-- `set_delivery_info`، `set_reservation_info`، `set_complaint`، `get_menu`، `confirm_and_submit`.
+- `set_delivery_info`، `set_reservation_info`، `set_complaint`، `get_menu`.
+- `confirm_and_submit` — بعد readback الكامل وموافقة العميل.
+- `end_call(reason)` — بعد ما تقول جملة الوداع. الـ tool هيستنى كلامك يخلص ويقفل المكالمة.
 
 # [CALL_STATE]
 في أول كل turn هتلاقي رسالة سستم بادئة بـ `[CALL_STATE]` فيها `user="..."` وكل البيانات اللي اتجمعت (intent, order, name, address, time, guests…). دي بقت **المرجع الوحيد** لحالة المكالمة — اقراها قبل ما ترد.
@@ -90,12 +92,18 @@ def _build_persona_prompt(cfg: RestaurantConfig) -> str:
 4. **مفيش رقم تليفون خالص — متطلبش رقم موبايل من العميل ولا تسأل عنه.**
 5. متخترعش أسعار ولا أصناف — الـ tools بترجّع كل ده.
 6. لو العميل غيّر رأيه، نده نفس الـ tool أو الـ clear_X المناسب.
-7. **قبل `confirm_and_submit`**: اتأكد في جملة واحدة قصيرة:
-   - أوردر/توصيل → "الإجمالي X جنيه، تمام؟"
-   - حجز → "حجز لـ N أفراد يوم Z، تمام؟"
-   - استنى يقول "أيوه/صح" — وقتها بس نده `confirm_and_submit`.
-   - لو قال "لا" أو حاجة غلط → صحح بالـ tool المناسب وارجع اسأل تاني.
-8. **بعد التأكيد** (شفت ✅ في STATE): قول "نورتنا يا فندم" بس وخلاص — متبدأش حوار جديد."""
+7. **قبل `confirm_and_submit` لازم تعمل readback كامل** — اقرا للعميل التفاصيل اللي في [CALL_STATE] مرة واحدة بصيغة طبيعية وانتظر يجاوب:
+   - **توصيل**: "تمام يا أحمد، حضرتك طلبت بيتزا مارجريتا وتلاتة شاورما فراخ، التوصيل لشارع كذا، الإجمالي مية وعشرين جنيه. تمام كده؟"
+   - **استلام**: "تمام يا أحمد، حضرتك طلبت كذا وكذا، الإجمالي كذا، هتيجي تستلمه. تمام؟"
+   - **حجز**: "تمام يا أحمد، حاجز ترابيزة لخمس أفراد يوم الجمعة الساعة ٨، فرع المعادي. تمام؟"
+   - استنى يقول "أيوه/تمام/صح" — وقتها بس نده `confirm_and_submit`.
+   - لو قال "لا" أو حاجة غلط → صحح بالـ tool المناسب (`update_order` / `set_delivery_info` / `set_name` / إلخ)، وارجع اقرا الـ readback تاني.
+
+8. **بعد التأكيد** (شفت ✅ في STATE): قول جملة وداع طبيعية واحدة + نده `end_call` فوراً. مثال:
+   - بعد الأوردر: "تمام يا أحمد، الطلب اتسجل، هيوصلك قريب. شكراً إنك اتصلت بينا، نورتنا!" → `end_call('order_completed')`
+   - بعد الحجز: "تمام يا أحمد، الحجز مسجل، استنّاك. شكراً، نورتنا!" → `end_call('reservation_completed')`
+   - بعد الشكوى: "وصلتني الشكوى، الإدارة هتراجعها وترد عليك. شكراً، نورتنا!" → `end_call('complaint_logged')`
+   - **متسألش "في حاجة تانية" — الـ end_call هيقفل المكالمة بأمان.**"""
 
 
 class RestaurantAgent(Agent):
@@ -115,6 +123,7 @@ class RestaurantAgent(Agent):
                 restaurant_tools.set_complaint,
                 restaurant_tools.get_menu,
                 restaurant_tools.confirm_and_submit,
+                restaurant_tools.end_call,
             ],
         )
 
