@@ -222,13 +222,35 @@ class RestaurantAgent(Agent):
         ctx.items.extend(kept)
 
     def _trim_chat_ctx(self, ctx: llm.ChatContext, *, max_items: int) -> None:
-        """Keep all system messages; trim non-system history to N most recent items."""
+        """Keep all system messages; trim non-system history to N most recent items.
+
+        FunctionCall and FunctionCallOutput items must stay paired by call_id —
+        if we drop the call but keep the output, the LLM provider warns
+        "function output missing the corresponding function call, ignoring".
+        After picking the keep window, expand it to include any partner items.
+        """
         non_system_indices = [
-            idx for idx, it in enumerate(ctx.items) if getattr(it, "role", "") != "system"
+            idx for idx, it in enumerate(ctx.items)
+            if getattr(it, "role", "") != "system"
         ]
         if len(non_system_indices) <= max_items:
             return
         keep_idx = set(non_system_indices[-max_items:])
+
+        # Collect call_ids appearing in the keep window, then add any
+        # FunctionCall/FunctionCallOutput sharing those ids regardless of
+        # position. This keeps every tool exchange whole.
+        kept_call_ids: set[str] = set()
+        for idx in keep_idx:
+            item = ctx.items[idx]
+            cid = getattr(item, "call_id", None)
+            if cid:
+                kept_call_ids.add(cid)
+        for idx, item in enumerate(ctx.items):
+            cid = getattr(item, "call_id", None)
+            if cid and cid in kept_call_ids:
+                keep_idx.add(idx)
+
         kept: list[Any] = []
         for idx, item in enumerate(ctx.items):
             if getattr(item, "role", "") == "system" or idx in keep_idx:

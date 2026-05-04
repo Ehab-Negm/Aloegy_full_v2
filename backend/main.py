@@ -942,6 +942,14 @@ def validate_phone_or_400(value: str) -> str:
     return phone
 
 
+def validate_optional_phone(value: str) -> str:
+    """Like validate_phone_or_400 but accepts empty/missing strings (returns "").
+    Used by voice-agent endpoints where phone capture is not required."""
+    if not value or not value.strip():
+        return ""
+    return validate_phone_or_400(value)
+
+
 def hash_otp(phone: str, code: str) -> str:
     return hashlib.sha256(f"{normalize_phone(phone)}::{code}::{JWT_SECRET}".encode("utf-8")).hexdigest()
 
@@ -4171,7 +4179,7 @@ def create_agent_order(
             call_id=payload.call_id,
             type=payload.type,
             customer_name=payload.customer_name,
-            phone=validate_phone_or_400(payload.customer_phone),
+            phone=validate_optional_phone(payload.customer_phone),
             items_summary=" + ".join(f"{item.qty} {item.name}" for item in payload.order_items),
             amount=sum(item.qty * item.price for item in payload.order_items),
             status="received",
@@ -4259,7 +4267,7 @@ def create_agent_reservation(
         restaurant_id=restaurant.id,
         call_id=payload.call_id,
         customer_name=payload.customer_name,
-        customer_phone=validate_phone_or_400(payload.customer_phone),
+        customer_phone=validate_optional_phone(payload.customer_phone),
         reservation_time=payload.reservation_time,
         reservation_time_iso=payload.reservation_time_iso,
         guests_count=payload.guests_count,
@@ -4317,7 +4325,7 @@ def create_agent_complaint(
         restaurant_id=restaurant.id,
         call_id=payload.call_id,
         customer_name=payload.customer_name,
-        customer_phone=validate_phone_or_400(payload.customer_phone),
+        customer_phone=validate_optional_phone(payload.customer_phone),
         description=payload.complaint_text,
         complaint_type=payload.complaint_type,
         status="new",
