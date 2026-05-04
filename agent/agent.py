@@ -2031,8 +2031,6 @@ def _call_outcome_and_failure_reason(ud: "UserData", close_reason: str) -> tuple
             return "closed_without_action", "no_order_items"
         if not ud.customer_name:
             return "closed_without_action", "missing_name"
-        if not ud.customer_phone:
-            return "closed_without_action", "missing_phone"
         if flow == "delivery" and not ud.delivery_address:
             return "closed_without_action", "missing_address"
         return "closed_without_action", "order_not_confirmed"
@@ -2046,8 +2044,6 @@ def _call_outcome_and_failure_reason(ud: "UserData", close_reason: str) -> tuple
             return "closed_without_action", "missing_branch"
         if not ud.customer_name:
             return "closed_without_action", "missing_name"
-        if not ud.customer_phone:
-            return "closed_without_action", "missing_phone"
         return "closed_without_action", "reservation_not_confirmed"
 
     if flow == "complaint":
@@ -2055,8 +2051,6 @@ def _call_outcome_and_failure_reason(ud: "UserData", close_reason: str) -> tuple
             return "closed_without_action", "missing_complaint_text"
         if not ud.complaint_type:
             return "closed_without_action", "missing_complaint_type"
-        if not ud.customer_phone:
-            return "closed_without_action", "missing_phone"
         return "closed_without_action", "complaint_not_submitted"
 
     return "closed_without_action", "ended_without_action"
@@ -3887,8 +3881,6 @@ def _takeaway_next_missing_slot(ud: UserData) -> str | None:
         return "الطلب"
     if not ud.customer_name:
         return "الاسم"
-    if not ud.customer_phone:
-        return "رقم الموبايل"
     return None
 
 
@@ -3899,8 +3891,6 @@ def _delivery_next_missing_slot(ud: UserData) -> str | None:
         return "العنوان والمنطقة"
     if not ud.customer_name:
         return "الاسم"
-    if not ud.customer_phone:
-        return "رقم الموبايل"
     return None
 
 
@@ -3913,8 +3903,6 @@ def _reservation_next_missing_slot(ud: UserData, cfg: RestaurantConfig) -> str |
         return "الفرع"
     if not ud.customer_name:
         return "الاسم"
-    if not ud.customer_phone:
-        return "رقم الموبايل"
     return None
 
 
@@ -3925,8 +3913,6 @@ def _complaint_next_missing_slot(ud: UserData) -> str | None:
         return "نوع الشكوى"
     if not ud.customer_name:
         return "الاسم"
-    if not ud.customer_phone:
-        return "رقم الموبايل"
     return None
 
 
@@ -4132,8 +4118,6 @@ def _inactivity_reprompt(ud: "UserData", flow: str = "", *, prompt_count: int = 
         return _random.choice(["تحب تطلب إيه يا فندم؟", "قولي تحب إيه؟"])
     if missing == "الاسم":
         return _ask_name()
-    if missing == "رقم الموبايل":
-        return _ask_phone()
     if missing == "العنوان والمنطقة":
         return _ask_address()
     if missing == "وقت الحجز":

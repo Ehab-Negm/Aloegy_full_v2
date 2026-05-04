@@ -13,15 +13,8 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import RunContext
 from pydantic import BaseModel, Field
 
-from nlp.phone_extract import (
-    is_plausible_partial_phone_digits,
-    local_phone_digits,
-    merge_phone_digits,
-    phone_digits_only,
-    validate_phone,
-)
 from state.user_data import UserData
-from utils.money import money2ar, num2ar, phone2ar
+from utils.money import money2ar, num2ar
 
 logger = logging.getLogger("restaurant.agent")
 
@@ -75,75 +68,6 @@ async def set_name(
     return f"الاسم اتسجل: {cleaned}"
 
 
-@function_tool()
-async def set_phone(
-    phone: Annotated[
-        str,
-        Field(
-            description=(
-                "أرقام موبايل العميل زي ما قالها — كاملة (01012345678) أو مجزأة "
-                "(0155 أو 8950484). الـ tool بيبافر الأجزاء لحد ما يكتمل الرقم."
-            )
-        ),
-    ],
-    context: RunContext_T,
-) -> str:
-    """سجّل أو كمّل رقم موبايل العميل. بيقبل الرقم كامل أو على chunks ويبافر لحد ما يكتمل ١١ رقم."""
-    ud = context.userdata
-
-    incoming_digits = phone_digits_only(phone)
-    if not incoming_digits:
-        return (
-            "مفيش أرقام في كلام العميل. "
-            "اطلب منه يقول الرقم تاني بوضوح."
-        )
-
-    # Try the incoming chunk on its own first (in case the customer restated
-    # the full number rather than continuing a partial).
-    direct_valid = validate_phone(incoming_digits)
-    combined_digits = merge_phone_digits(ud.pending_phone_digits or "", incoming_digits)
-    combined_valid = validate_phone(combined_digits)
-    cleaned = direct_valid or combined_valid
-
-    if cleaned:
-        was_chunked = bool(ud.pending_phone_digits) and not direct_valid
-        ud.customer_phone = cleaned
-        ud.pending_phone_digits = ""
-        logger.info(
-            "call=%s | phone_set | chunked=%s",
-            ud.call_id, was_chunked,
-        )
-        return f"الرقم اتسجل كامل: {phone2ar(cleaned)}"
-
-    # Not yet a full valid number — buffer if it looks plausible.
-    partial = combined_digits if is_plausible_partial_phone_digits(combined_digits) else ""
-    if partial:
-        ud.pending_phone_digits = partial
-        local = local_phone_digits(partial)
-        remaining = max(0, 11 - len(local))
-        logger.info(
-            "call=%s | phone_partial_buffered | digits=%d | remaining=%d",
-            ud.call_id, len(partial), remaining,
-        )
-        if remaining > 0:
-            return (
-                f"اتخزّن مبدئياً ({len(local)} رقم من ١١). "
-                f"اطلب من العميل باقي الـ{remaining} رقم."
-            )
-        return (
-            f"اتخزّن {len(local)} رقم بس مش valid. "
-            "ممكن يبدأ بـ 010 أو 011 أو 012 أو 015 — اطلب من العميل يعيد الرقم."
-        )
-
-    # Not plausible at all — reset buffer and ask for re-entry
-    ud.pending_phone_digits = ""
-    return (
-        "الرقم اللي قاله مش رقم مصري صحيح. "
-        "لازم يبدأ بـ 010 أو 011 أو 012 أو 015 ويكون ١١ رقم. "
-        "اطلب من العميل يعيده من الأول."
-    )
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Order
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,27 +86,20 @@ async def update_order(
         list[OrderItemSpec],
         Field(
             description=(
-                "قائمة الأصناف. كل عنصر فيه name (اسم الصنف فقط) و qty (الكمية). "
-                "أمثلة:\n"
+                "قائمة الأصناف اللي العميل عايز يضيفها للطلب. كل عنصر فيه name "
+                "(اسم الصنف فقط، من غير كميات) و qty (الكمية). أمثلة:\n"
                 "- 'بيتزا واحدة' → [{name:'بيتزا مارجريتا', qty:1}]\n"
                 "- 'تلاتة شاورما فراخ' → [{name:'شاورما فراخ', qty:3}]\n"
                 "- '12 صندوق شاورما لحمة' → [{name:'شاورما لحمة', qty:12}]\n"
-                "- 'بيتزا وكولا' → [{name:'بيتزا', qty:1}, {name:'كولا', qty:1}]"
-            )
-        ),
-    ],
-    replace: Annotated[
-        bool,
-        Field(
-            description=(
-                "True لو العميل بدّل الطلب كله. "
-                "False لو بيضيف على الموجود."
+                "- 'بيتزا وكولا' → [{name:'بيتزا', qty:1}, {name:'كولا', qty:1}]\n"
+                "الـ tool دايماً بيضيف للطلب الموجود. لو العميل بدّل الطلب كله، "
+                "نده clear_order الأول."
             )
         ),
     ],
     context: RunContext_T,
 ) -> str:
-    """سجّل أو حدّث طلب العميل بالكميات. الـ tool بيتأكد من المنيو ويحسب الإجمالي."""
+    """ضيف أصناف لطلب العميل. الـ tool بيتأكد من المنيو ويحسب الإجمالي."""
     from agent import _normalize_order_items
 
     ud = context.userdata
@@ -204,10 +121,7 @@ async def update_order(
 
     # Degraded mode: no menu to validate against — accept items raw
     if not cfg.menu_items:
-        if replace or not ud.order:
-            ud.order = new_items
-        else:
-            ud.order = (ud.order or []) + new_items
+        ud.order = (ud.order or []) + new_items
         ud.order_validated = False
         ud.order_total = 0.0
         if ud.order_confirmed:
@@ -217,8 +131,8 @@ async def update_order(
             f"{', '.join(ud.order)}"
         )
 
-    # Combine with existing order if appending
-    combined = new_items if (replace or not ud.order) else (ud.order + new_items)
+    # Append to existing order (use clear_order first if customer wants reset)
+    combined = (ud.order or []) + new_items
     normalized, unknown, total = _normalize_order_items(combined, cfg.menu_items)
 
     if not normalized:
@@ -242,6 +156,21 @@ async def update_order(
             "لو حابب اعرض بدائل للعميل."
         )
     return msg
+
+
+@function_tool()
+async def clear_order(context: RunContext_T) -> str:
+    """امسح الطلب الحالي بالكامل. استخدم لما العميل يقول 'الغي الطلب' أو 'هبدأ من الأول'."""
+    ud = context.userdata
+    if not ud.order:
+        return "مفيش طلب اتسجل أصلاً."
+    ud.order = []
+    ud.order_total = 0.0
+    ud.order_validated = False
+    if ud.order_confirmed:
+        ud.order_confirmed = False
+    logger.info("call=%s | order_cleared", ud.call_id)
+    return "الطلب اتمسح. اسأل العميل عايز يطلب إيه."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -431,8 +360,6 @@ async def confirm_and_submit(context: RunContext_T) -> str:
             return "ناقص العنوان. اطلبه من العميل قبل التأكيد."
         if not ud.customer_name:
             return "ناقص الاسم. اطلبه من العميل."
-        if not ud.customer_phone:
-            return "ناقص الموبايل. اطلبه من العميل."
     elif intent == "reservation":
         if not ud.reservation_time:
             return "ناقص ميعاد الحجز."
@@ -442,8 +369,6 @@ async def confirm_and_submit(context: RunContext_T) -> str:
             return f"ناقص الفرع. الفروع المتاحة: {cfg.branch_names()}."
         if not ud.customer_name:
             return "ناقص الاسم. اطلبه من العميل."
-        if not ud.customer_phone:
-            return "ناقص الموبايل. اطلبه من العميل."
     elif intent == "complaint":
         if not ud.complaint_text:
             return "ناقص نص الشكوى. اطلب من العميل يحكي ايه اللي حصل."
@@ -574,8 +499,8 @@ async def confirm_and_submit(context: RunContext_T) -> str:
 __all__ = [
     "set_intent",
     "set_name",
-    "set_phone",
     "update_order",
+    "clear_order",
     "set_delivery_info",
     "set_reservation_info",
     "set_complaint",
