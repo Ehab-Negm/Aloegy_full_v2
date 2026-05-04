@@ -121,6 +121,10 @@ class UserData:
     # LLM entirely and says this exact line — a deterministic recovery instead
     # of a third re-ask. One-shot; cleared by on_user_turn_completed.
     pending_corrective_response: str = ""
+    # Set by the end_call function tool just before scheduling the session
+    # close. Recorded in call telemetry so we can distinguish agent-initiated
+    # hangups from inactivity / participant disconnect / errors.
+    end_call_reason: str = ""
 
     customer_name: InitVar[str | None] = None
     customer_phone: InitVar[str | None] = None

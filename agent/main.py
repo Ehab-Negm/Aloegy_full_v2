@@ -423,6 +423,11 @@ async def entrypoint(ctx: JobContext):
                 logger.warning("call=%s | call log deferred to queue", call_id)
         except Exception:
             logger.exception("call=%s | call log submit failed", call_id)
+        # If the agent invoked end_call(reason), surface it as the close_reason
+        # so call.end telemetry distinguishes graceful agent hangups from
+        # participant disconnects, errors, and timeouts.
+        if userdata.end_call_reason:
+            close_reason = f"end_call:{userdata.end_call_reason}"
         _agent._emit_event(
             "call.end",
             call_id=call_id,

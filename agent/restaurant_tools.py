@@ -352,27 +352,34 @@ async def end_call(
     """
     ud = context.userdata
     logger.info("call=%s | end_call requested | reason=%s", ud.call_id, reason)
+    # Mark transitional state so the inactivity watchdog stops reprompting
+    # and the call-end bookkeeping treats this as a clean close.
+    ud.session_transitional_state = True
+    ud.end_call_reason = reason
+
     # Wait for the goodbye line to finish playing before tearing down
     # the session — closing mid-speech would cut the customer off.
     try:
         await context.wait_for_playout()
     except Exception as exc:
         logger.warning("call=%s | wait_for_playout failed | %s", ud.call_id, exc)
-    # Mark this state so the watchdog doesn't reprompt while we close.
-    ud.session_transitional_state = True
-    # Schedule the actual session shutdown after this tool returns. Calling
-    # shutdown() here would cancel the current LLM turn before the tool
-    # result is processed — defer it so the surrounding turn finishes
-    # cleanly first.
+
+    # Defer the actual close so this tool result reaches the LLM and the
+    # surrounding turn finishes cleanly. session.aclose() here would
+    # cancel the in-flight LLM call.
     import asyncio as _asyncio
     session = context.session
-    async def _delayed_shutdown() -> None:
-        await _asyncio.sleep(0.05)
+
+    async def _delayed_close() -> None:
+        # Small grace period for the LLM to receive this tool's return
+        # value and emit any final text reply.
+        await _asyncio.sleep(0.3)
         try:
-            session.shutdown(reason=f"end_call:{reason}")
+            await session.aclose()
         except Exception as exc:
-            logger.warning("call=%s | session shutdown failed | %s", ud.call_id, exc)
-    _asyncio.create_task(_delayed_shutdown(), name=f"end_call_{ud.call_id}")
+            logger.warning("call=%s | session aclose failed | %s", ud.call_id, exc)
+
+    _asyncio.create_task(_delayed_close(), name=f"end_call_{ud.call_id}")
     return "المكالمة هتقفل دلوقتي. متقولش حاجة تانية."
 
 
