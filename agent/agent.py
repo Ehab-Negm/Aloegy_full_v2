@@ -344,15 +344,45 @@ def _build_base_session_tts() -> Any:
             language=SESSION_TTS_LANGUAGE,
         )
 
+    # ─── Google Cloud TTS streaming (RECOMMENDED) ───────────────────
+    # Cloud TTS exposes the same Gemini-trained voices (Aoede, Sulafat,
+    # Charon, Kore, ...) under the Chirp3-HD family, but via the GA
+    # streaming `synthesize_streaming` endpoint — TTFB ~400-500ms vs
+    # the Gemini TTS preview API at 1.4-6s. Same service-account JSON.
+    #
+    # Triggered when the model name contains "chirp" or starts with
+    # "cloud-tts" / "google-cloud-tts". Voice name MUST be the full
+    # Cloud TTS voice id, e.g. "ar-XA-Chirp3-HD-Sulafat".
+    if (
+        "chirp" in model_name
+        or model_name.startswith("cloud-tts")
+        or model_name.startswith("google-cloud-tts")
+    ):
+        from google.cloud import texttospeech_v1 as _tts_v1
+        creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+        if not creds_path:
+            logger.warning(
+                "cloud tts: GOOGLE_APPLICATION_CREDENTIALS is not set — "
+                "Cloud TTS will fall back to ADC and may fail in dev"
+            )
+        return google.TTS(
+            voice_name=SESSION_TTS_VOICE,
+            language=SESSION_TTS_LANGUAGE,
+            credentials_file=creds_path or None,
+            audio_encoding=_tts_v1.AudioEncoding.LINEAR16,
+            location=os.getenv("SESSION_TTS_LOCATION", "global"),
+            use_streaming=True,
+        )
+
     if model_name.startswith("gemini"):
-        # Two paths under the gemini umbrella:
+        # Two paths under the gemini umbrella (kept for fallback):
         #   * "...-live..." → Live API streaming TTS (preview, unstable
         #     in production but lower theoretical TTFB)
         #   * everything else → regular non-streaming generate_content
-        #     TTS (GA-stable, supports Vertex AI service-account auth
-        #     via GOOGLE_APPLICATION_CREDENTIALS). Wrapped by LiveKit's
-        #     StreamAdapter so the first sentence plays while later
-        #     ones are still being synthesized.
+        #     TTS via google-genai. GA-stable but ~1.5-6s TTFB because
+        #     it has to generate the whole clip server-side first.
+        # In production prefer the Cloud TTS Chirp3-HD path above —
+        # same Gemini-trained voices, ~4-5x faster.
         if "live" in model_name:
             from gemini_live_tts import GeminiLiveTTS
             return GeminiLiveTTS(
