@@ -1,0 +1,30 @@
+{
+  "name": "Repeated Confirmation Doesn't Resubmit",
+  "description": "Customer says 'أيوه' 3 times — confirm tool must run only once.",
+  "transcript": [
+    {"role": "user", "text": "عاوز delivery"},
+    {"role": "agent_expected", "tool": "to_delivery"},
+    {"role": "user", "text": "كشري كبير"},
+    {"role": "agent_expected", "tool": "update_order"},
+    {"role": "user", "text": "العنوان شارع التحرير"},
+    {"role": "agent_expected", "tool": "update_delivery_address"},
+    {"role": "user", "text": "اسمي أحمد"},
+    {"role": "agent_expected", "tool": "update_name"},
+    {"role": "user", "text": "تليفوني صفر واحد واحد اتنين تلاتة اربعة خمسة ستة سبعة تمنية تسعة"},
+    {"role": "agent_expected", "tool": "update_phone"},
+    {"role": "user", "text": "أيوه"},
+    {"role": "agent_expected", "tool": "confirm_delivery"},
+    {"role": "user", "text": "أيوه أكدلي"},
+    {"role": "agent_expected", "behavior": "no_second_confirm_call"},
+    {"role": "user", "text": "أيوه أيوه"},
+    {"role": "agent_expected", "behavior": "no_third_confirm_call"}
+  ],
+  "forbidden_behaviors": [
+    "calling confirm_delivery more than once",
+    "re-submitting the order to backend twice"
+  ],
+  "expected_final_state": {
+    "order_confirmed": true,
+    "confirm_delivery_call_count": 1
+  }
+}

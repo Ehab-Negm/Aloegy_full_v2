@@ -1,0 +1,18 @@
+{
+  "name": "Out of Hours Reservation",
+  "description": "Customer asks for a reservation outside opening hours; agent must reject and propose nearest available slot.",
+  "transcript": [
+    {"role": "user", "text": "عايز أحجز ترابيزة"},
+    {"role": "agent_expected", "tool": "to_reservation"},
+    {"role": "user", "text": "بكره الساعة تلاتة الفجر"},
+    {"role": "agent_expected", "tool": "update_reservation_time"},
+    {"role": "agent_expected", "behavior": "agent_says_out_of_hours_with_alternative"}
+  ],
+  "forbidden_behaviors": [
+    "accepting an out-of-hours reservation silently",
+    "calling confirm_reservation while time is invalid"
+  ],
+  "expected_final_state": {
+    "reservation_confirmed": false
+  }
+}

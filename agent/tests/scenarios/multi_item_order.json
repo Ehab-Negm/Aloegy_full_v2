@@ -1,0 +1,19 @@
+{
+  "name": "Multi-Item Delivery Order",
+  "description": "Five items in one breath; agent should capture all and not drop any during confirmation.",
+  "transcript": [
+    {"role": "user", "text": "عاوز delivery"},
+    {"role": "agent_expected", "tool": "to_delivery"},
+    {"role": "user", "text": "كشري كبير، وكفتة، ومحشي ورق عنب، وسلطة، وبيبسي كبير"},
+    {"role": "agent_expected", "tool": "update_order", "args": {"items": ["كشري كبير", "كفتة", "محشي ورق عنب", "سلطة", "بيبسي كبير"]}},
+    {"role": "user", "text": "ضيفلي كمان رز معمر"},
+    {"role": "agent_expected", "tool": "update_order", "args_contains_all": ["كشري كبير", "كفتة", "محشي ورق عنب", "سلطة", "بيبسي كبير", "رز معمر"]}
+  ],
+  "forbidden_behaviors": [
+    "dropping any of the five original items when adding 'رز معمر'",
+    "asking the user to re-state items already captured"
+  ],
+  "expected_final_state": {
+    "order_count_min": 6
+  }
+}

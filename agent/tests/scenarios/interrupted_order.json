@@ -1,0 +1,23 @@
+{
+  "name": "Interrupted Order with Side Question",
+  "description": "Customer interrupts the flow with a side question; agent answers it then resumes the order.",
+  "transcript": [
+    {"role": "user", "text": "عاوز delivery"},
+    {"role": "agent_expected", "tool": "to_delivery"},
+    {"role": "user", "text": "كشري كبير"},
+    {"role": "agent_expected", "tool": "update_order"},
+    {"role": "user", "text": "بمناسبة، الكشري ده فيه عدس بني ولا أبيض؟"},
+    {"role": "agent_expected", "behavior": "agent_answers_side_question_then_resumes"},
+    {"role": "user", "text": "تمام، العنوان شارع الجمهورية ٢٠"},
+    {"role": "agent_expected", "tool": "update_delivery_address"}
+  ],
+  "forbidden_behaviors": [
+    "agent ignores the side question",
+    "agent calls a tool to answer a non-tool question",
+    "agent loses track of the order after the side question"
+  ],
+  "expected_final_state": {
+    "order_contains": "كشري كبير",
+    "delivery_address_contains": "الجمهورية"
+  }
+}

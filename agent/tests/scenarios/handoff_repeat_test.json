@@ -1,0 +1,21 @@
+{
+  "name": "Handoff Doesn't Lose Context",
+  "description": "Name captured by Greeter must NOT be re-asked by Delivery after handoff.",
+  "transcript": [
+    {"role": "user", "text": "ألو معاكم، اسمي محمد"},
+    {"role": "agent_expected", "tool": "update_name", "args": {"name": "محمد"}},
+    {"role": "user", "text": "عاوز أطلب delivery"},
+    {"role": "agent_expected", "tool": "to_delivery"},
+    {"role": "agent_expected", "behavior": "should_address_user_by_name"},
+    {"role": "user", "text": "كشري كبير"},
+    {"role": "agent_expected", "tool": "update_order"}
+  ],
+  "forbidden_behaviors": [
+    "asking 'ما اسمك' after handoff to delivery",
+    "asking the user's name a second time"
+  ],
+  "expected_final_state": {
+    "customer_name": "محمد",
+    "active_flow": "delivery"
+  }
+}

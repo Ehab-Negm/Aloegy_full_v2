@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(python -c \"from livekit.agents import inference; print\\(dir\\(inference\\)\\)\")",
+      "Bash(python -c \"from livekit.agents.voice import MultilingualModel; print\\(''ok''\\)\")",
+      "Bash(python -c \"from livekit.agents import noise_cancellation; print\\(''ok''\\)\")",
+      "Bash(python -c \"from livekit.agents.voice import room_io; print\\(''ok''\\)\")",
+      "Bash(python -c \"from livekit.agents.turn_detector import MultilingualModel; print\\(''ok''\\)\")",
+      "Bash(python -c \"from livekit.plugins.turn_detector import MultilingualModel; print\\(''ok''\\)\")",
+      "Bash(python -c \"import livekit.plugins.turn_detector as td; print\\(dir\\(td\\)\\)\")"
+    ]
+  }
+}

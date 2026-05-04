@@ -7,7 +7,10 @@
       "Bash(pip install:*)",
       "Bash(python smoke_tests.py)",
       "Bash(python -c ':*)",
-      "Bash(ls *.py)"
+      "Bash(ls *.py)",
+      "Bash(grep -E \"\\(\\\\.py|\\\\.bak\\)$\")",
+      "Bash(python -c ' *)",
+      "WebFetch(domain:ai.google.dev)"
     ]
   }
 }
