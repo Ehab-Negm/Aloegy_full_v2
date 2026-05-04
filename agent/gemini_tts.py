@@ -56,13 +56,13 @@ from livekit.agents.utils import is_given
 
 logger = logging.getLogger("restaurant.agent")
 
-DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"
+DEFAULT_MODEL = "gemini-2.5-pro-preview-tts"
 DEFAULT_VOICE = "Sulafat"  # warm female multilingual; Aoede also good
 DEFAULT_LANGUAGE = "ar-EG"
 DEFAULT_SAMPLE_RATE = 24000  # spec: 16-bit PCM, mono, 24 kHz
 NUM_CHANNELS = 1
 DEFAULT_LOCATION = "global"  # lowest latency from most regions
-SYNTH_TIMEOUT_SECONDS = 8.0
+SYNTH_TIMEOUT_SECONDS = 12.0  # slightly higher; pro TTS occasionally takes longer
 MAX_RETRIES = 2  # in addition to the first attempt
 
 # Voice direction prefix. The TTS API takes a single `contents` text
@@ -131,7 +131,14 @@ class GeminiTTS(tts.TTS):
         project: NotGivenOr[str] = NOT_GIVEN,
         location: str = DEFAULT_LOCATION,
         timeout: float = SYNTH_TIMEOUT_SECONDS,
+        stream: bool = True,
     ) -> None:
+        # ChunkedStream is a per-utterance API; we always emit through it
+        # so livekit's StreamAdapter still gets sentence-level chunking.
+        # The `stream` flag controls whether the underlying genai call is
+        # generate_content_stream (chunks arrive as they're synthesized,
+        # ~300ms first-byte) or generate_content (one full response,
+        # ~2-6s for short utterances).
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False),
             sample_rate=DEFAULT_SAMPLE_RATE,
@@ -190,6 +197,7 @@ class GeminiTTS(tts.TTS):
             style_prefix=resolved_prefix,
             timeout=max(1.0, timeout),
         )
+        self._stream = stream
 
     @property
     def model(self) -> str:
@@ -279,26 +287,24 @@ class GeminiChunkedStream(tts.ChunkedStream):
         last_exc: Exception | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                response = await asyncio.wait_for(
-                    self._tts._client.aio.models.generate_content(
-                        model=opts.model,
-                        contents=prompt,
-                        config=config,
-                    ),
-                    timeout=opts.timeout,
-                )
-                audio_data = self._extract_audio(response)
-                if not audio_data:
+                if self._tts._stream:
+                    audio_received = await self._run_streaming(
+                        output_emitter, prompt, config, opts.timeout,
+                    )
+                else:
+                    audio_received = await self._run_blocking(
+                        output_emitter, prompt, config, opts.timeout,
+                    )
+                if not audio_received:
                     # Per docs: "Model occasionally returns text tokens
                     # instead of audio tokens, causing 500 error." Treat
-                    # an empty inline_data the same way and retry.
+                    # an empty response the same way and retry.
                     raise APIStatusError(
-                        "gemini tts: response had no audio inline_data",
+                        "gemini tts: response had no audio data",
                         status_code=502,
                         body="empty audio response",
                         retryable=True,
                     )
-                output_emitter.push(audio_data)
                 return
             except asyncio.TimeoutError as exc:
                 last_exc = exc
@@ -328,6 +334,56 @@ class GeminiChunkedStream(tts.ChunkedStream):
             f"gemini tts: error generating speech: {last_exc}",
             retryable=True,
         ) from last_exc
+
+    async def _run_blocking(
+        self,
+        output_emitter: tts.AudioEmitter,
+        prompt: str,
+        config: types.GenerateContentConfig,
+        timeout: float,
+    ) -> bool:
+        response = await asyncio.wait_for(
+            self._tts._client.aio.models.generate_content(
+                model=self._tts._opts.model,
+                contents=prompt,
+                config=config,
+            ),
+            timeout=timeout,
+        )
+        audio_data = self._extract_audio(response)
+        if not audio_data:
+            return False
+        output_emitter.push(audio_data)
+        return True
+
+    async def _run_streaming(
+        self,
+        output_emitter: tts.AudioEmitter,
+        prompt: str,
+        config: types.GenerateContentConfig,
+        timeout: float,
+    ) -> bool:
+        """Push audio chunks as they arrive from generate_content_stream.
+
+        Each streamed response part may contain a chunk of inline audio
+        bytes. We forward them straight to the AudioEmitter so the
+        first audio plays back ~300-500ms after the call instead of
+        waiting for the full clip (~2-6s).
+        """
+        async def _consume() -> bool:
+            received = False
+            async for chunk in await self._tts._client.aio.models.generate_content_stream(
+                model=self._tts._opts.model,
+                contents=prompt,
+                config=config,
+            ):
+                audio_data = self._extract_audio(chunk)
+                if audio_data:
+                    output_emitter.push(audio_data)
+                    received = True
+            return received
+
+        return await asyncio.wait_for(_consume(), timeout=timeout)
 
     @staticmethod
     def _extract_audio(response: object) -> bytes | None:

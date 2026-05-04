@@ -375,14 +375,13 @@ def _build_base_session_tts() -> Any:
         )
 
     if model_name.startswith("gemini"):
-        # Two paths under the gemini umbrella (kept for fallback):
-        #   * "...-live..." → Live API streaming TTS (preview, unstable
-        #     in production but lower theoretical TTFB)
-        #   * everything else → regular non-streaming generate_content
-        #     TTS via google-genai. GA-stable but ~1.5-6s TTFB because
-        #     it has to generate the whole clip server-side first.
-        # In production prefer the Cloud TTS Chirp3-HD path above —
-        # same Gemini-trained voices, ~4-5x faster.
+        # Two paths under the gemini umbrella:
+        #   * "...-live..." → Live API streaming TTS (preview, unstable)
+        #   * everything else → google-genai. The TTS preview models
+        #     (gemini-2.5-pro-preview-tts, gemini-2.5-flash-preview-tts,
+        #     gemini-3.1-flash-tts-preview) support generate_content_stream
+        #     for sub-second TTFB; GeminiTTS with stream=True (default)
+        #     pushes audio chunks as they arrive.
         if "live" in model_name:
             from gemini_live_tts import GeminiLiveTTS
             return GeminiLiveTTS(
