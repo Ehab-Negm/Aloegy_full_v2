@@ -80,8 +80,11 @@ def _build_persona_prompt(cfg: RestaurantConfig) -> str:
 - `update_order` (يضيف للطلب)، `clear_order` (لو قال هبدأ من الأول).
 - `set_delivery_info`، `set_reservation_info`، `set_complaint`، `get_menu`، `confirm_and_submit`.
 
+# [CALL_STATE]
+في أول كل turn هتلاقي رسالة سستم بادئة بـ `[CALL_STATE]` فيها `user="..."` وكل البيانات اللي اتجمعت (intent, order, name, address, time, guests…). دي بقت **المرجع الوحيد** لحالة المكالمة — اقراها قبل ما ترد.
+
 # قواعد مهمة
-1. **اقرا [CALL_STATE] في كل turn — اللي فيه ممنوع تسأله تاني.**
+1. **اللي في [CALL_STATE] ممنوع تسأله تاني.**
 2. سؤال واحد في المرة.
 3. الأولوية: الطلب → العنوان (للتوصيل) → الاسم.
 4. **مفيش رقم تليفون خالص — متطلبش رقم موبايل من العميل ولا تسأل عنه.**
@@ -172,76 +175,39 @@ class RestaurantAgent(Agent):
         cfg = self.cfg
 
         intent = (ud.active_flow or "").strip()
-        intent_label = {
-            "takeaway": "استلام (العميل هييجي ياخده)",
-            "delivery": "توصيل (محتاج عنوان)",
-            "reservation": "حجز ترابيزة",
-            "complaint": "شكوى",
-        }.get(intent, "")
-
-        lines: list[str] = [
-            _STATE_PROMPT_MARKER,
-            "🧠 معلومات المكالمة الحالية — العميل قال الكلام ده بالفعل، ممنوع تسأل عنه تاني:",
-        ]
+        parts: list[str] = [_STATE_PROMPT_MARKER]
         if ud.last_user_message:
-            lines.append(f"• آخر كلام العميل: \"{ud.last_user_message}\"")
-            lines.append(
-                "  ⚠️ شوف الكلام ده — لو فيه أي معلومة جديدة (صنف، عنوان، اسم)، "
-                "نده الـ tool المناسب فوراً قبل ما ترد."
-            )
-        lines.append(f"• النية: {intent_label or 'مش متحددة لسه — اسأل العميل'}")
-
-        # Order info — shown for takeaway/delivery, or whenever order exists
-        if intent in {"takeaway", "delivery"} or ud.order:
-            if ud.order:
-                items_str = "، ".join(ud.order)
-                if ud.order_validated and ud.order_total:
-                    lines.append(
-                        f"• الطلب: {items_str} (إجمالي تقديري: {money2ar(ud.order_total)} جنيه)"
-                    )
-                else:
-                    lines.append(f"• الطلب: {items_str}")
+            parts.append(f'user="{ud.last_user_message}"')
+        parts.append(f"intent={intent or '?'}")
+        if ud.order:
+            order_str = "، ".join(ud.order)
+            if ud.order_total:
+                parts.append(f"order=[{order_str}] total={money2ar(ud.order_total)}ج")
             else:
-                lines.append("• الطلب: لسه مفيش حاجة")
-
-        lines.append(f"• الاسم: {ud.customer_name or 'لسه'}")
-
-        if intent == "delivery" or ud.delivery_address:
-            lines.append(f"• عنوان التوصيل: {ud.delivery_address or 'لسه'}")
-            if ud.delivery_landmark:
-                lines.append(f"• معلم قريب: {ud.delivery_landmark}")
-
-        if intent == "reservation" or ud.reservation_time:
-            lines.append(f"• ميعاد الحجز: {ud.reservation_time or 'لسه'}")
-            lines.append(
-                f"• عدد الضيوف: {ud.guests_count if ud.guests_count else 'لسه'}"
-            )
-            if len(cfg.branches) > 1:
-                lines.append(
-                    f"• الفرع: {ud.selected_branch or 'لسه — الفروع المتاحة: ' + cfg.branch_names()}"
-                )
-
-        if intent == "complaint" or ud.complaint_text:
-            lines.append(f"• نص الشكوى: {ud.complaint_text or 'لسه'}")
-
-        if ud.special_requests:
-            lines.append(f"• ملاحظات خاصة: {ud.special_requests}")
-
+                parts.append(f"order=[{order_str}]")
+        if ud.customer_name:
+            parts.append(f"name={ud.customer_name}")
+        if ud.delivery_address:
+            parts.append(f"address={ud.delivery_address}")
+        if ud.delivery_landmark:
+            parts.append(f"landmark={ud.delivery_landmark}")
+        if ud.reservation_time:
+            parts.append(f"time={ud.reservation_time}")
+        if ud.guests_count:
+            parts.append(f"guests={ud.guests_count}")
+        if ud.selected_branch:
+            parts.append(f"branch={ud.selected_branch}")
+        elif intent == "reservation" and len(cfg.branches) > 1:
+            parts.append(f"branch=? (متاح: {cfg.branch_names()})")
+        if ud.complaint_text:
+            parts.append(f'complaint="{ud.complaint_text[:80]}"')
         if ud.order_confirmed:
-            lines.append(
-                f"• ✅ الطلب اتسجل (رقم: {ud.order_id or '-'}) — لو سأل العميل عن حاجة تانية رد طبيعي."
-            )
+            parts.append(f"DONE order_id={ud.order_id or '-'}")
         if ud.reservation_confirmed:
-            lines.append(f"• ✅ الحجز اتسجل (رقم: {ud.reservation_id or '-'})")
+            parts.append(f"DONE reservation_id={ud.reservation_id or '-'}")
         if ud.complaint_logged:
-            lines.append("• ✅ الشكوى اتسجلت")
-
-        lines.append("")
-        lines.append(
-            "📌 اسأل عن أول حاجة ناقصة بس، جملة واحدة. "
-            "الـ confirm_and_submit هتقولك لو في حاجة ناقصة."
-        )
-        return "\n".join(lines)
+            parts.append("DONE complaint_logged")
+        return " | ".join(parts)
 
     def _strip_state_messages(self, ctx: llm.ChatContext) -> None:
         """Remove all prior [CALL_STATE] system messages so the prompt doesn't bloat."""
