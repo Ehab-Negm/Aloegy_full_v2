@@ -345,12 +345,40 @@ def _build_base_session_tts() -> Any:
         )
 
     if model_name.startswith("gemini"):
-        from gemini_live_tts import GeminiLiveTTS
-        return GeminiLiveTTS(
+        # Two paths under the gemini umbrella:
+        #   * "...-live..." → Live API streaming TTS (preview, unstable
+        #     in production but lower theoretical TTFB)
+        #   * everything else → regular non-streaming generate_content
+        #     TTS (GA-stable, supports Vertex AI service-account auth
+        #     via GOOGLE_APPLICATION_CREDENTIALS). Wrapped by LiveKit's
+        #     StreamAdapter so the first sentence plays while later
+        #     ones are still being synthesized.
+        if "live" in model_name:
+            from gemini_live_tts import GeminiLiveTTS
+            return GeminiLiveTTS(
+                model=SESSION_TTS_MODEL,
+                voice_name=SESSION_TTS_VOICE,
+                language=SESSION_TTS_LANGUAGE,
+                api_key=os.getenv("GOOGLE_API_KEY", ""),
+            )
+        from gemini_tts import GeminiTTS
+        # use_vertex=None → auto-detect from GOOGLE_APPLICATION_CREDENTIALS.
+        # Pass an explicit override via SESSION_TTS_USE_VERTEX if needed.
+        use_vertex_env = os.getenv("SESSION_TTS_USE_VERTEX", "").strip().lower()
+        if use_vertex_env in {"1", "true", "yes"}:
+            use_vertex: bool | None = True
+        elif use_vertex_env in {"0", "false", "no"}:
+            use_vertex = False
+        else:
+            use_vertex = None
+        return GeminiTTS(
             model=SESSION_TTS_MODEL,
             voice_name=SESSION_TTS_VOICE,
             language=SESSION_TTS_LANGUAGE,
             api_key=os.getenv("GOOGLE_API_KEY", ""),
+            use_vertex=use_vertex,
+            project=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
+            location=os.getenv("SESSION_TTS_LOCATION", "global"),
         )
 
     if not os.getenv("HAMSA_API_KEY"):
