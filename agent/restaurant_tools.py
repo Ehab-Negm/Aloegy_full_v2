@@ -94,7 +94,7 @@ async def set_phone(
     incoming_digits = phone_digits_only(phone)
     if not incoming_digits:
         return (
-            f"مفيش أرقام في كلام العميل ({phone!r}). "
+            "مفيش أرقام في كلام العميل. "
             "اطلب منه يقول الرقم تاني بوضوح."
         )
 
@@ -138,7 +138,7 @@ async def set_phone(
     # Not plausible at all — reset buffer and ask for re-entry
     ud.pending_phone_digits = ""
     return (
-        f"الرقم اللي قاله ({phone!r}) مش رقم مصري صحيح. "
+        "الرقم اللي قاله مش رقم مصري صحيح. "
         "لازم يبدأ بـ 010 أو 011 أو 012 أو 015 ويكون ١١ رقم. "
         "اطلب من العميل يعيده من الأول."
     )
