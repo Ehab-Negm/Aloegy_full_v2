@@ -1,0 +1,298 @@
+{
+  "nav": {
+    "home": "Home",
+    "features": "Features",
+    "pricing": "Pricing",
+    "about": "About",
+    "contact": "Contact",
+    "login": "Log in",
+    "switchLanguage": "العربية"
+  },
+  "hero": {
+    "badge": "AI built in Egypt, for Egypt",
+    "title": "AloEgy",
+    "tagline": "Voice AI for Egyptian restaurants",
+    "subtitle": "Native Egyptian Arabic, never a busy line",
+    "description": "AloEgy is a voice AI agent that picks up every restaurant call, takes orders fluently in Egyptian Arabic, suggests upsells, and pushes orders straight to your POS — so your team can focus on cooking and serving, not answering phones.",
+    "tryVoice": "Try the voice demo",
+    "learnMore": "How it works"
+  },
+  "stats": {
+    "egyptianArabic": {
+      "value": "Egyptian Arabic",
+      "label": "Native dialect",
+      "desc": "Understands and speaks the way your customers do"
+    },
+    "concurrent": {
+      "value": "Unlimited",
+      "label": "Concurrent calls",
+      "desc": "No more busy lines during peak hours"
+    },
+    "alwaysOn": {
+      "value": "24/7",
+      "label": "Always-on",
+      "desc": "Lunch, dinner, midnight — every call is answered"
+    },
+    "latency": {
+      "value": "< 1s",
+      "label": "Response latency",
+      "desc": "Feels like a human conversation, not an IVR"
+    }
+  },
+  "services": {
+    "title": "What AloEgy does",
+    "subtitle": "Everything your restaurant needs to stop missing orders and start growing revenue",
+    "items": {
+      "voiceAgent": {
+        "title": "Native Egyptian voice agent",
+        "description": "Answers every call in fluent Egyptian Arabic and takes the order exactly the way the customer wants it."
+      },
+      "noMissedCalls": {
+        "title": "Never miss a call",
+        "description": "Even if 100 customers call at the same second, every single one is answered. No more busy lines."
+      },
+      "upsell": {
+        "title": "Boosts your sales",
+        "description": "Suggests smart add-ons naturally, lifting average ticket size by 20% or more without sounding pushy."
+      },
+      "posIntegration": {
+        "title": "Connected to your POS",
+        "description": "Orders flow straight to your cashier and kitchen automatically. We integrate with Foodics and others."
+      },
+      "analytics": {
+        "title": "Full analytics",
+        "description": "Detailed reports on every call and every order. Know what's working and what needs fixing."
+      },
+      "alwaysOn": {
+        "title": "Runs 24/7",
+        "description": "No sick days, no overtime. Working at dawn, lunch, and midnight with instant responses every time."
+      }
+    }
+  },
+  "about": {
+    "title": "Who we are",
+    "p1": "AloEgy is a voice AI platform purpose-built for Egyptian restaurants. We trained our agent on thousands of hours of authentic Egyptian Arabic dialogue so it understands how real customers speak — including slang, regional accents, and the back-and-forth of an actual order.",
+    "p2": "The problem is concrete: restaurants lose 20–30% of phone orders during peak hours because the line is busy or staff are overwhelmed. AloEgy answers an unlimited number of concurrent calls and adds intelligent upselling that lifts the average ticket size.",
+    "p3": "We integrate with the most-used POS systems in Egypt so orders land in the kitchen automatically. Our team is made up of Egyptian engineers building this technology specifically for the Egyptian market.",
+    "stat1Value": "Cairo",
+    "stat1Label": "Built in Egypt",
+    "stat2Value": "2025",
+    "stat2Label": "Founded",
+    "stat3Value": "AR",
+    "stat3Label": "Egyptian dialect"
+  },
+  "howItWorks": {
+    "title": "How it works",
+    "subtitle": "Three steps from a ringing phone to a kitchen ticket",
+    "step1": {
+      "title": "Customer calls",
+      "desc": "The customer dials your restaurant's existing number — exactly as they always have."
+    },
+    "step2": {
+      "title": "AloEgy answers",
+      "desc": "The AI agent answers in fluent Egyptian Arabic, takes the order, and suggests smart upsells."
+    },
+    "step3": {
+      "title": "Order hits the kitchen",
+      "desc": "The order flows automatically to your POS and the kitchen starts preparing — within seconds."
+    },
+    "cta": "Start now"
+  },
+  "contact": {
+    "title": "Talk to us",
+    "subtitle": "Want to see AloEgy live in your restaurant? Send us a message and we'll get back to you within 24 hours.",
+    "restaurantName": "Restaurant name",
+    "phone": "Phone number",
+    "message": "Tell us a bit about your restaurant",
+    "submit": "Send message",
+    "submitting": "Sending...",
+    "successTitle": "Got it — message received",
+    "successDesc": "We'll be in touch shortly."
+  },
+  "footer": {
+    "tagline": "Voice AI for Egyptian restaurants",
+    "description": "AloEgy is the voice AI agent that answers every restaurant call in native Egyptian Arabic, takes orders, and pushes them straight to your POS.",
+    "quickLinks": "Quick links",
+    "company": "Company",
+    "contactUs": "Get in touch",
+    "rights": "All rights reserved.",
+    "privacy": "Privacy Policy",
+    "terms": "Terms of Service",
+    "address": "Cairo, Egypt"
+  },
+  "pricing": {
+    "pageTitle": "Choose the plan that fits your restaurant",
+    "pageSubtitle": "Every plan includes the AI voice agent that takes orders in Egyptian Arabic. Plans differ by concurrent call capacity and advanced features.",
+    "popular": "Most popular",
+    "perMonth": "EGP / month",
+    "subscribe": "Get started",
+    "contactSales": "Talk to sales",
+    "faqTitle": "Why your restaurant needs AloEgy",
+    "plans": {
+      "starter": {
+        "name": "Starter",
+        "description": "Get started with a 24/7 AI agent that takes your orders",
+        "features": [
+          "Egyptian-Arabic AI voice agent",
+          "Runs 24/7",
+          "1 concurrent call",
+          "Smart upsell suggestions",
+          "POS integration",
+          "Daily call reports",
+          "Business-hours support"
+        ]
+      },
+      "pro": {
+        "name": "Pro",
+        "description": "For busy restaurants that need to scale phone orders and revenue",
+        "features": [
+          "Everything in Starter",
+          "Up to 5 concurrent calls",
+          "Advanced analytics + weekly reports",
+          "Custom agent persona for your menu",
+          "Personalized upsells per customer",
+          "Priority technical support",
+          "Free continuous updates"
+        ]
+      },
+      "enterprise": {
+        "name": "Enterprise",
+        "description": "The complete solution for restaurant chains and high-volume operations",
+        "features": [
+          "Everything in Pro",
+          "Up to 12 concurrent calls",
+          "WhatsApp ordering channel",
+          "Direct calls on the restaurant number",
+          "Dedicated account manager",
+          "Multi-branch integration",
+          "AI-powered analytics & forecasting"
+        ],
+        "priceLabel": "Contact us"
+      }
+    },
+    "faqs": {
+      "moreSales": {
+        "title": "More sales without more effort",
+        "desc": "The AI agent suggests add-ons naturally for every customer. The result? Average tickets grow 20% to 90% on certain orders."
+      },
+      "noMissed": {
+        "title": "No more missed calls",
+        "desc": "During peak hours, busy lines send customers to your competitors. With AloEgy, every call is answered the moment it comes in."
+      },
+      "saveSalary": {
+        "title": "Save on staffing",
+        "desc": "A phone-line employee costs EGP 5,000+ per month and works 8 hours. AloEgy works 24/7 at lower cost and higher consistency."
+      },
+      "trueDialect": {
+        "title": "Speaks real Egyptian",
+        "desc": "Not a robot reciting MSA. AloEgy speaks the way your customers actually speak — they often can't tell they're talking to AI."
+      }
+    }
+  },
+  "aboutPage": {
+    "heroTitle": "Building voice AI for the Egyptian market",
+    "heroSubtitle": "We're a team of engineers, designers, and operators building the voice infrastructure that Egyptian restaurants run on.",
+    "missionTitle": "Our mission",
+    "missionText": "Make every restaurant phone call in Egypt answered, accurate, and revenue-positive — without adding headcount. Voice is the most natural ordering interface; we're making it AI-native and dialect-aware.",
+    "storyTitle": "Our story",
+    "storyP1": "AloEgy started in 2025 from a simple observation: phone ordering is still how most Egyptian customers reach restaurants — but most calls during peak hours go unanswered. The lost revenue per restaurant runs into the tens of thousands of pounds every month.",
+    "storyP2": "We built AloEgy because none of the global voice-AI players supported Egyptian Arabic well enough for real customer conversations. We assembled a team that combines voice-AI engineering, real-world restaurant operations experience, and an obsession with Egyptian dialect quality.",
+    "storyP3": "Today, AloEgy is in pilot with restaurants in Cairo and is preparing to expand across Egypt and the wider MENA region.",
+    "valuesTitle": "What we believe",
+    "values": {
+      "dialect": {
+        "title": "Dialect-first, not dialect-last",
+        "desc": "Egyptian Arabic isn't a localization step we add at the end — it's the foundation everything else is built on."
+      },
+      "honest": {
+        "title": "Honest about what AI can do",
+        "desc": "We don't oversell. The agent does what we say it does, and where humans are still better, we say so."
+      },
+      "operators": {
+        "title": "Built with operators",
+        "desc": "Every feature is shaped by feedback from real restaurant owners and managers, not just engineering preferences."
+      },
+      "infra": {
+        "title": "Production-grade infrastructure",
+        "desc": "Voice runs on LiveKit, dialogue on best-in-class LLMs, and our stack scales to thousands of concurrent calls."
+      }
+    },
+    "ctaTitle": "Want to bring AloEgy to your restaurant?",
+    "ctaSubtitle": "We're onboarding pilot partners in Egypt now.",
+    "ctaButton": "Talk to us"
+  },
+  "widget": {
+    "label": "Try AloEgy",
+    "title": "AloEgy",
+    "participantName": "AloEgy website visitor",
+    "error": "We can't start the call right now.",
+    "state": {
+      "creating": "Starting the call...",
+      "connecting": "Connecting...",
+      "connectedSpeaking": "Keep talking",
+      "connectedListening": "Speak now",
+      "error": "Something went wrong",
+      "ended": "Call ended",
+      "idle": "Press Start"
+    },
+    "helper": {
+      "connected": "Just say your order naturally",
+      "idle": "Your browser will ask for microphone permission the first time"
+    },
+    "button": {
+      "start": "Start",
+      "startAgain": "Start again",
+      "end": "End call"
+    }
+  },
+  "privacy": {
+    "title": "Privacy Policy",
+    "lastUpdated": "Last updated: May 2026",
+    "intro": "AloEgy (\"we\", \"our\", \"us\") operates the voice-AI platform available at aloegy.ai (the \"Service\"). This Privacy Policy explains what data we collect, how we use it, and the rights you have over your data.",
+    "section1Title": "1. Information we collect",
+    "section1": "We collect three categories of data: (a) account data you provide when signing up — name, phone number, restaurant name, email; (b) operational data generated when the Service is used — call audio, transcripts, order details, and timestamps; and (c) technical data — IP address, browser type, and usage logs needed to keep the Service secure and reliable.",
+    "section2Title": "2. How we use voice data",
+    "section2": "When a customer calls a restaurant using AloEgy, the audio is transcribed in real time, processed by an AI model to determine the customer's intent, and a synthesized voice response is generated. Audio recordings and transcripts are retained for quality assurance, dispute resolution, and product improvement, and are encrypted at rest. Restaurant administrators can request deletion of specific recordings at any time.",
+    "section3Title": "3. Third-party services",
+    "section3": "AloEgy is built on a stack of vetted infrastructure providers, each with their own privacy and security commitments: LiveKit (real-time voice transport), OpenAI (language model inference), Soniox (speech-to-text), Hamsa AI (text-to-speech), and Supabase (database and authentication). We share only the minimum data necessary with each provider to deliver the Service.",
+    "section4Title": "4. Data retention",
+    "section4": "We retain account data for as long as your account is active. Call recordings and transcripts are retained for 12 months by default, unless your plan specifies a different retention window. You may request deletion at any time by emailing contact@aloegy.ai.",
+    "section5Title": "5. Your rights",
+    "section5": "You have the right to access, correct, export, or delete your personal data. You also have the right to object to certain processing. To exercise any of these rights, contact contact@aloegy.ai and we will respond within 30 days.",
+    "section6Title": "6. Security",
+    "section6": "We use industry-standard security practices: TLS encryption in transit, encryption at rest, role-based access controls, and audit logging. No system is 100% secure, but we work to minimize risk and respond quickly to any incident.",
+    "section7Title": "7. Children",
+    "section7": "AloEgy is a B2B service for restaurants. The Service is not directed at children under 16 and we do not knowingly collect personal data from children.",
+    "section8Title": "8. Changes to this policy",
+    "section8": "We may update this Privacy Policy from time to time. We will post the updated version here with a new \"Last updated\" date and, where the change is material, notify account holders by email.",
+    "section9Title": "9. Contact",
+    "section9": "Questions about this Privacy Policy? Email contact@aloegy.ai or write to us at AloEgy, Cairo, Egypt."
+  },
+  "terms": {
+    "title": "Terms of Service",
+    "lastUpdated": "Last updated: May 2026",
+    "intro": "These Terms of Service (\"Terms\") govern your access to and use of AloEgy's voice-AI platform (the \"Service\"), operated by AloEgy (\"we\", \"our\", \"us\"). By using the Service, you agree to these Terms.",
+    "section1Title": "1. The Service",
+    "section1": "AloEgy is a SaaS voice-AI platform that answers phone calls on behalf of restaurants, takes orders in Egyptian Arabic, and pushes orders to a connected POS system. The Service is provided on a subscription basis.",
+    "section2Title": "2. Eligibility & accounts",
+    "section2": "You must be at least 18 years old and authorized to enter into agreements on behalf of your restaurant. You are responsible for maintaining the confidentiality of your account credentials and for all activity that occurs under your account.",
+    "section3Title": "3. Subscription, billing, and refunds",
+    "section3": "Subscriptions are billed monthly in advance. Fees are non-refundable except where required by law. We may change pricing with 30 days' notice; changes apply to the next billing cycle. Late payments may result in suspension of the Service.",
+    "section4Title": "4. Acceptable use",
+    "section4": "You agree not to use the Service to: (a) violate any law; (b) infringe intellectual property; (c) transmit malware or attempt to compromise our infrastructure; (d) reverse-engineer the Service; or (e) use the Service for prank calls, harassment, or any non-restaurant use case.",
+    "section5Title": "5. Intellectual property",
+    "section5": "AloEgy retains all rights, title, and interest in the Service, including the AI models, software, branding, and documentation. You retain ownership of your restaurant data and content. By using the Service, you grant us a limited license to process your data solely to deliver the Service.",
+    "section6Title": "6. Voice data",
+    "section6": "Calls handled by AloEgy may be recorded and transcribed. You are responsible for complying with any local notification or consent requirements regarding call recording in your jurisdiction.",
+    "section7Title": "7. Limitation of liability",
+    "section7": "To the maximum extent permitted by law, AloEgy is not liable for indirect, incidental, special, or consequential damages, or for lost profits or revenue. Our total liability for any claim arising out of these Terms is limited to the fees you paid us in the 12 months preceding the claim.",
+    "section8Title": "8. Termination",
+    "section8": "Either party may terminate this agreement on 30 days' written notice. We may suspend or terminate the Service immediately for material breach. On termination, we will export your account data on request and then delete it within 60 days.",
+    "section9Title": "9. Governing law",
+    "section9": "These Terms are governed by the laws of the Arab Republic of Egypt. Any dispute arising from these Terms shall be resolved in the competent courts of Cairo, Egypt.",
+    "section10Title": "10. Changes",
+    "section10": "We may update these Terms from time to time. Material changes will be notified by email at least 30 days before they take effect. Continued use after the effective date constitutes acceptance.",
+    "section11Title": "11. Contact",
+    "section11": "Questions about these Terms? Email contact@aloegy.ai or write to AloEgy, Cairo, Egypt."
+  }
+}

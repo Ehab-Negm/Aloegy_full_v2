@@ -323,6 +323,7 @@ class Restaurant(Base):
     delivery_minutes: Mapped[int] = mapped_column(Integer, default=45)
     delivery_fee: Mapped[float] = mapped_column(Float, default=15.0)
     min_order: Mapped[float] = mapped_column(Float, default=80.0)
+    sip_provisioning_json: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
@@ -702,6 +703,22 @@ class AdminRestaurantCreatePayload(BaseModel):
     assignedPhone: str = ""
 
 
+class SipProvisionPayload(BaseModel):
+    """Provision a LiveKit-SIP inbound trunk + dispatch rule for a tenant.
+
+    The customer runs Issabel/Asterisk on-prem and forwards inbound calls to
+    our LiveKit-SIP gateway. We need: their DID (the public number customers
+    dial) and their Issabel server's public IP (so we can IP-allowlist it on
+    our trunk and reject anyone else).
+    """
+
+    did: str  # E.164, e.g. "+201001234567"
+    issabelIp: str  # IPv4/IPv6 of customer's PBX, used for allowed_addresses
+    sipUsername: str = ""  # optional digest auth username (empty = IP-only)
+    sipPassword: str = ""  # optional digest auth password (empty = IP-only)
+    krispEnabled: bool = True  # noise cancellation on the SIP leg
+
+
 class SalesMemberPayload(BaseModel):
     name: str
     phone: str
@@ -774,6 +791,7 @@ class VisitReportPayload(BaseModel):
 class DemoLivekitSessionPayload(BaseModel):
     restaurantId: str | None = None
     participantName: str | None = None
+    qaPreflight: bool = False
 
 
 class AgentOrderItemPayload(BaseModel):
@@ -2034,19 +2052,36 @@ async def create_livekit_demo_session(data: DemoLivekitSessionPayload, db: Sessi
     if not restaurant:
         raise HTTPException(status_code=404, detail="restaurant not found")
 
-    room_name = f"web-demo-{restaurant.public_id}-{uuid.uuid4().hex[:10]}"
+    room_prefix = "qa-preflight" if data.qaPreflight else "web-demo"
+    room_name = f"{room_prefix}-{restaurant.public_id}-{uuid.uuid4().hex[:10]}"
     participant_identity = f"web-user-{uuid.uuid4().hex[:12]}"
     participant_name = (data.participantName or "Website Demo Visitor").strip() or "Website Demo Visitor"
-    room_metadata = json.dumps({"restaurant_id": restaurant.public_id, "source": "website_demo"}, ensure_ascii=False)
+    source = "qa_service_preflight" if data.qaPreflight else "website_demo"
+    room_metadata_payload = {
+        "restaurant_id": restaurant.public_id,
+        "source": source,
+        "qa_preflight": bool(data.qaPreflight),
+    }
+    room_metadata = json.dumps(room_metadata_payload, ensure_ascii=False)
 
     try:
         async with livekit_api.LiveKitAPI(url=LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET) as lk_api:
+            agent_name = (os.getenv("LIVEKIT_AGENT_NAME") or "aloegy-agent").strip()
+            agents = []
+            if agent_name and hasattr(livekit_api, "RoomAgentDispatch"):
+                agents.append(
+                    livekit_api.RoomAgentDispatch(
+                        agent_name=agent_name,
+                        metadata=room_metadata,
+                    )
+                )
             await lk_api.room.create_room(
                 livekit_api.CreateRoomRequest(
                     name=room_name,
                     empty_timeout=60,
                     max_participants=4,
                     metadata=room_metadata,
+                    agents=agents,
                 )
             )
     except Exception as exc:
@@ -2057,7 +2092,7 @@ async def create_livekit_demo_session(data: DemoLivekitSessionPayload, db: Sessi
         livekit_api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
         .with_identity(participant_identity)
         .with_name(participant_name)
-        .with_metadata(json.dumps({"source": "website_demo", "restaurant_id": restaurant.public_id}, ensure_ascii=False))
+        .with_metadata(json.dumps(room_metadata_payload, ensure_ascii=False))
         .with_grants(
             livekit_api.VideoGrants(
                 room_join=True,
@@ -2269,6 +2304,7 @@ def _run_migrations() -> None:
         ("reservations", "reservation_time_iso", "VARCHAR(64)"),
         ("otp_codes", "attempts", "INTEGER DEFAULT 0"),
         ("restaurants", "branches_json", "TEXT DEFAULT ''"),
+        ("restaurants", "sip_provisioning_json", "TEXT DEFAULT ''"),
         ("call_logs", "call_id", "VARCHAR(40)"),
         ("call_logs", "customer_name", "VARCHAR(120) DEFAULT ''"),
         ("call_logs", "flow", "VARCHAR(40) DEFAULT ''"),
@@ -3080,6 +3116,281 @@ def create_admin_restaurant(
     db.add(User(name=payload.ownerName, phone=owner_phone, role="owner", restaurant_id=restaurant.id))
     db.commit()
     return fetch_admin_restaurants(skip=0, limit=DEFAULT_COLLECTION_LIMIT, user=user, db=db)[-1]
+
+
+async def _repair_existing_sip_dispatch_rule(
+    restaurant: Restaurant,
+    existing: dict[str, Any],
+) -> bool:
+    """Add explicit agent dispatch to older SIP rules created before the fix."""
+    rule_id = str(existing.get("dispatch_rule_id") or "").strip()
+    trunk_id = str(existing.get("trunk_id") or "").strip()
+    if not (rule_id and trunk_id):
+        return False
+
+    livekit_url = (os.getenv("LIVEKIT_URL") or "").strip()
+    livekit_api_key = (os.getenv("LIVEKIT_API_KEY") or "").strip()
+    livekit_api_secret = (os.getenv("LIVEKIT_API_SECRET") or "").strip()
+    agent_name = (os.getenv("LIVEKIT_AGENT_NAME") or "aloegy-agent").strip()
+    if not (livekit_url and livekit_api_key and livekit_api_secret and agent_name):
+        return False
+
+    try:
+        from livekit.api import (
+            RoomAgentDispatch,
+            RoomConfiguration,
+            SIPDispatchRule,
+            SIPDispatchRuleIndividual,
+            SIPDispatchRuleInfo,
+        )
+    except ImportError:
+        logger.warning("sip dispatch repair skipped | RoomAgentDispatch unavailable")
+        return False
+
+    slug = (restaurant.public_id or f"r{restaurant.id}").strip()
+    did = str(existing.get("did") or "").strip()
+    dispatch_metadata = json.dumps(
+        {
+            "restaurant_id": slug,
+            "source": "sip",
+            "trunk_id": trunk_id,
+            "did": did,
+        },
+        ensure_ascii=False,
+    )
+    rule_info = SIPDispatchRuleInfo(
+        sip_dispatch_rule_id=rule_id,
+        name=f"{slug}-rule",
+        trunk_ids=[trunk_id],
+        rule=SIPDispatchRule(
+            dispatch_rule_individual=SIPDispatchRuleIndividual(room_prefix=f"sip-{slug}-"),
+        ),
+        metadata=dispatch_metadata,
+        room_config=RoomConfiguration(
+            agents=[RoomAgentDispatch(agent_name=agent_name, metadata=dispatch_metadata)],
+        ),
+    )
+
+    lk_api = livekit_api.LiveKitAPI(
+        url=livekit_url, api_key=livekit_api_key, api_secret=livekit_api_secret,
+    )
+    try:
+        await lk_api.sip.update_sip_dispatch_rule(rule_id, rule_info)
+    except Exception:
+        logger.exception("sip dispatch repair failed | restaurant_id=%s | rule=%s", restaurant.id, rule_id)
+        return False
+    finally:
+        with suppress(Exception):
+            await lk_api.aclose()
+
+    logger.info("sip dispatch repaired | restaurant_id=%s | rule=%s | agent=%s", restaurant.id, rule_id, agent_name)
+    return True
+
+
+@app.post("/admin/restaurants/{restaurant_id}/sip-provision")
+async def provision_restaurant_sip(
+    restaurant_id: int,
+    payload: SipProvisionPayload,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Create a LiveKit-SIP inbound trunk + dispatch rule for this tenant.
+
+    Idempotent: if the restaurant already has provisioning JSON, the existing
+    trunk/rule IDs are returned as-is (no duplicate Meta-side resources).
+    Re-running with new credentials should go through ``DELETE`` first; this
+    is intentional so a fat-finger doesn't strand orphan trunks.
+    """
+    restaurant = db.get(Restaurant, restaurant_id)
+    if restaurant is None:
+        raise HTTPException(status_code=404, detail="restaurant not found")
+
+    if restaurant.sip_provisioning_json:
+        try:
+            existing = json.loads(restaurant.sip_provisioning_json)
+            if isinstance(existing, dict) and existing.get("trunk_id"):
+                repaired = await _repair_existing_sip_dispatch_rule(restaurant, existing)
+                return {
+                    "alreadyProvisioned": True,
+                    "trunkId": existing.get("trunk_id"),
+                    "dispatchRuleId": existing.get("dispatch_rule_id"),
+                    "did": existing.get("did"),
+                    "issabelIp": existing.get("issabel_ip"),
+                    "provisionedAt": existing.get("provisioned_at"),
+                    "dispatchRuleRepaired": repaired,
+                }
+        except (TypeError, ValueError):
+            # Stored JSON is corrupt — re-provision.
+            pass
+
+    did = (payload.did or "").strip()
+    if not did or not did.startswith("+"):
+        raise HTTPException(status_code=400, detail="did must be E.164 (e.g. +201001234567)")
+    issabel_ip = (payload.issabelIp or "").strip()
+    if not issabel_ip:
+        raise HTTPException(status_code=400, detail="issabelIp required for IP-allowlist")
+
+    livekit_url = (os.getenv("LIVEKIT_URL") or "").strip()
+    livekit_api_key = (os.getenv("LIVEKIT_API_KEY") or "").strip()
+    livekit_api_secret = (os.getenv("LIVEKIT_API_SECRET") or "").strip()
+    if not (livekit_url and livekit_api_key and livekit_api_secret):
+        raise HTTPException(
+            status_code=503,
+            detail="LIVEKIT_URL/LIVEKIT_API_KEY/LIVEKIT_API_SECRET not configured on backend",
+        )
+
+    try:
+        from livekit.api import (
+            CreateSIPDispatchRuleRequest,
+            CreateSIPInboundTrunkRequest,
+            RoomConfiguration,
+            SIPDispatchRule,
+            SIPDispatchRuleIndividual,
+            SIPInboundTrunkInfo,
+        )
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"livekit-api SDK does not expose SIP types: {exc}",
+        ) from exc
+
+    slug = (restaurant.public_id or f"r{restaurant.id}").strip()
+    trunk_name = f"{slug}-trunk"
+    rule_name = f"{slug}-rule"
+    room_prefix = f"sip-{slug}-"
+
+    lk_api = livekit_api.LiveKitAPI(
+        url=livekit_url, api_key=livekit_api_key, api_secret=livekit_api_secret,
+    )
+    try:
+        trunk_kwargs: dict[str, Any] = {
+            "name": trunk_name,
+            "numbers": [did],
+            "allowed_addresses": [f"{issabel_ip}/32"],
+            "krisp_enabled": payload.krispEnabled,
+        }
+        if payload.sipUsername and payload.sipPassword:
+            trunk_kwargs["auth_username"] = payload.sipUsername
+            trunk_kwargs["auth_password"] = payload.sipPassword
+        trunk = await lk_api.sip.create_sip_inbound_trunk(
+            CreateSIPInboundTrunkRequest(trunk=SIPInboundTrunkInfo(**trunk_kwargs))
+        )
+        trunk_id = getattr(trunk, "sip_trunk_id", "")
+
+        dispatch_metadata = json.dumps(
+            {
+                "restaurant_id": slug,
+                "source": "sip",
+                "trunk_id": trunk_id,
+                "did": did,
+            },
+            ensure_ascii=False,
+        )
+        rule_kwargs: dict[str, Any] = {
+            "name": rule_name,
+            "trunk_ids": [trunk_id] if trunk_id else [],
+            "rule": SIPDispatchRule(
+                dispatch_rule_individual=SIPDispatchRuleIndividual(room_prefix=room_prefix),
+            ),
+            "metadata": dispatch_metadata,
+        }
+        agent_name = os.getenv("LIVEKIT_AGENT_NAME", "aloegy-agent").strip()
+        if agent_name:
+            try:
+                from livekit.api import RoomAgentDispatch
+                rule_kwargs["room_config"] = RoomConfiguration(
+                    agents=[RoomAgentDispatch(agent_name=agent_name, metadata=dispatch_metadata)],
+                )
+            except ImportError:
+                logger.warning("RoomAgentDispatch unavailable — relying on default dispatch")
+
+        dispatch = await lk_api.sip.create_sip_dispatch_rule(
+            CreateSIPDispatchRuleRequest(**rule_kwargs)
+        )
+        rule_id = getattr(dispatch, "sip_dispatch_rule_id", "")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("sip provision failed | restaurant_id=%s", restaurant_id)
+        raise HTTPException(status_code=502, detail=f"livekit sip provision failed: {exc}") from exc
+    finally:
+        with suppress(Exception):
+            await lk_api.aclose()
+
+    provisioning_record = {
+        "trunk_id": trunk_id,
+        "dispatch_rule_id": rule_id,
+        "did": did,
+        "issabel_ip": issabel_ip,
+        "krisp_enabled": payload.krispEnabled,
+        "provisioned_at": datetime.now(UTC).isoformat(),
+        "agent_name": agent_name or "",
+    }
+    restaurant.sip_provisioning_json = json.dumps(provisioning_record, ensure_ascii=False)
+    db.commit()
+    logger.info(
+        "sip provisioned | restaurant_id=%s | trunk=%s | rule=%s | did=%s",
+        restaurant_id, trunk_id, rule_id, did,
+    )
+    return {
+        "alreadyProvisioned": False,
+        "trunkId": trunk_id,
+        "dispatchRuleId": rule_id,
+        "did": did,
+        "issabelIp": issabel_ip,
+        "provisionedAt": provisioning_record["provisioned_at"],
+        "sipUri": f"sip:{did.lstrip('+')}@{(os.getenv('LIVEKIT_SIP_HOST') or 'sip.aloegy.ai')}",
+    }
+
+
+@app.delete("/admin/restaurants/{restaurant_id}/sip-provision")
+async def deprovision_restaurant_sip(
+    restaurant_id: int,
+    user: CurrentUser = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Tear down the LiveKit-SIP trunk + dispatch rule for this tenant."""
+    restaurant = db.get(Restaurant, restaurant_id)
+    if restaurant is None:
+        raise HTTPException(status_code=404, detail="restaurant not found")
+    if not restaurant.sip_provisioning_json:
+        return {"deprovisioned": False, "reason": "no provisioning record"}
+
+    try:
+        record = json.loads(restaurant.sip_provisioning_json)
+    except (TypeError, ValueError):
+        record = {}
+    trunk_id = record.get("trunk_id") or ""
+    rule_id = record.get("dispatch_rule_id") or ""
+
+    livekit_url = (os.getenv("LIVEKIT_URL") or "").strip()
+    livekit_api_key = (os.getenv("LIVEKIT_API_KEY") or "").strip()
+    livekit_api_secret = (os.getenv("LIVEKIT_API_SECRET") or "").strip()
+    if not (livekit_url and livekit_api_key and livekit_api_secret):
+        raise HTTPException(status_code=503, detail="LIVEKIT_URL not configured")
+
+    try:
+        from livekit.api import DeleteSIPDispatchRuleRequest, DeleteSIPTrunkRequest
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"livekit-api SDK missing SIP delete types: {exc}") from exc
+
+    lk_api = livekit_api.LiveKitAPI(
+        url=livekit_url, api_key=livekit_api_key, api_secret=livekit_api_secret,
+    )
+    try:
+        if rule_id:
+            with suppress(Exception):
+                await lk_api.sip.delete_sip_dispatch_rule(DeleteSIPDispatchRuleRequest(sip_dispatch_rule_id=rule_id))
+        if trunk_id:
+            with suppress(Exception):
+                await lk_api.sip.delete_sip_trunk(DeleteSIPTrunkRequest(sip_trunk_id=trunk_id))
+    finally:
+        with suppress(Exception):
+            await lk_api.aclose()
+
+    restaurant.sip_provisioning_json = ""
+    db.commit()
+    return {"deprovisioned": True, "trunkId": trunk_id, "dispatchRuleId": rule_id}
 
 
 @app.get("/admin/sales-team")

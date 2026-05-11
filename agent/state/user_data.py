@@ -99,32 +99,57 @@ class UserData:
     write_health: CallWriteHealth = field(default_factory=CallWriteHealth)
     worker_context: WorkerContext | None = None
     session_transitional_state: bool = False
-    last_guard_flow: str | None = None
-    last_guard_signature: str | None = None
     last_user_message: str = ""
     last_agent_message: str = ""
+    turn_count: int = 0
+    asked_slot_questions: dict[str, int] = field(default_factory=dict)
     active_flow: str = ""
+    intents_seen: set[str] = field(default_factory=set)
     handoff_target: str = ""
-    # Set by the repetition detector when the agent re-asks a captured slot.
-    # The per-turn state prompt reads this and escalates its directive so the
-    # next reply doesn't re-ask. Cleared by _build_per_turn_state_prompt once
-    # consumed.
-    repetition_alert: str = ""
-    # Set by _handle_flow_switch_intercept just before _transfer_live, to
-    # tell the new flow's on_enter to use this exact opening line (a brief
-    # acknowledgement of the switch) instead of the agent's static _opening.
-    # One-shot — cleared by on_enter after use.
-    pending_switch_ack: str = ""
     # Set by the conversation_item_added listener when the LLM re-asks a slot
     # that's already captured in this UserData (the "soft" alert in the
     # per-turn prompt was ignored). On the next user turn, the agent skips the
     # LLM entirely and says this exact line — a deterministic recovery instead
     # of a third re-ask. One-shot; cleared by on_user_turn_completed.
     pending_corrective_response: str = ""
+    pending_corrective_turn: int = 0
+    pending_corrective_source: str = ""
     # Set by the end_call function tool just before scheduling the session
     # close. Recorded in call telemetry so we can distinguish agent-initiated
     # hangups from inactivity / participant disconnect / errors.
     end_call_reason: str = ""
+    backend_unavailable: bool = False
+    background_tasks: list[Any] = field(default_factory=list)
+    # Channel the call arrived on: "web" for browser widgets, "sip" for
+    # phone calls bridged through LiveKit-SIP (e.g. customer's Issabel PBX).
+    # Logging, prompts, and the realtime greeting bootstrap branch on this.
+    call_source: str = "web"
+    # E.164 caller phone for SIP calls (e.g. "+201001234567"). Empty for
+    # web calls or anonymous SIP From headers.
+    caller_phone: str = ""
+    # Asterisk / SIP trunk that delivered the call. Lets us correlate
+    # agent-side incidents with the customer's PBX logs and bill calls
+    # back to the right tenant when one trunk == one restaurant.
+    sip_trunk_id: str = ""
+    sip_call_id: str = ""
+    # Unix timestamp when the call entered the agent. Used to gate
+    # `end_call(customer_done)` so a polite "شكراً" within the first few
+    # seconds doesn't trigger a premature hangup before the customer has
+    # placed anything.
+    call_started_at: float = 0.0
+    # Public restaurant identifier from room metadata (e.g. "demo-restaurant",
+    # "pizza-king"). The agent forwards this as ``X-Restaurant-ID`` on every
+    # /orders, /reservations, /complaints, /calls/upsert POST so the backend
+    # stores the row under the correct tenant instead of always defaulting to
+    # ``demo-restaurant``. Empty string = agent should NOT send the header and
+    # let the backend pick its default.
+    restaurant_public_id: str = ""
+    # Tracks the last missing_* code returned by confirm_and_submit and how
+    # many times it's been returned in a row. Lets the tool escalate its
+    # response when the model loops on confirm_and_submit instead of routing
+    # through the relevant slot tool (set_name, set_delivery_info, …).
+    confirm_last_missing: str = ""
+    confirm_missing_count: int = 0
 
     customer_name: InitVar[str | None] = None
     customer_phone: InitVar[str | None] = None

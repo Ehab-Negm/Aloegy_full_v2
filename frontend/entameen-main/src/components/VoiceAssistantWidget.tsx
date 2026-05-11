@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertCircle, Loader2, PhoneCall, PhoneOff, X } from "lucide-react";
 import { Room, RoomEvent, Track, type RemoteTrack } from "livekit-client";
+import { useTranslation } from "react-i18next";
 
 import logo from "@/assets/logo.png";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,7 @@ const DEFAULT_RESTAURANT_ID = "demo-restaurant";
 const WAVE_BARS = [0.26, 0.42, 0.6, 0.82, 1, 0.82, 0.6, 0.42, 0.26];
 
 const VoiceAssistantWidget = () => {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [demoState, setDemoState] = useState<DemoState>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -101,7 +103,7 @@ const VoiceAssistantWidget = () => {
     try {
       const session = await createLiveKitDemoSession({
         restaurantId: DEFAULT_RESTAURANT_ID,
-        participantName: "زائر موقع ألو إيچي",
+        participantName: t("widget.participantName"),
       });
 
       if (!mountedRef.current) {
@@ -168,7 +170,7 @@ const VoiceAssistantWidget = () => {
     } catch (error) {
       console.error("Live demo start error:", error);
       await disconnectRoom("error");
-      setErrorMessage("مش قادرين نبدأ المكالمة دلوقتي.");
+      setErrorMessage(t("widget.error"));
     }
   };
 
@@ -181,18 +183,18 @@ const VoiceAssistantWidget = () => {
 
   const stateLabel =
     demoState === "creating"
-      ? "بنبدأ المكالمة..."
+      ? t("widget.state.creating")
       : demoState === "connecting"
-        ? "جاري الاتصال..."
+        ? t("widget.state.connecting")
         : demoState === "connected"
           ? isSpeaking
-            ? "كمل كلامك"
-            : "اتكلم دلوقتي"
+            ? t("widget.state.connectedSpeaking")
+            : t("widget.state.connectedListening")
           : demoState === "error"
-            ? "فيه مشكلة"
+            ? t("widget.state.error")
             : demoState === "ended"
-              ? "المكالمة انتهت"
-              : "اضغط ابدأ"
+              ? t("widget.state.ended")
+              : t("widget.state.idle");
 
   const hasActiveCall = demoState === "connected" || demoState === "connecting";
   const buttonBusy = demoState === "creating" || demoState === "connecting";
@@ -214,14 +216,17 @@ const VoiceAssistantWidget = () => {
       <AnimatePresence>
         {!open && (
           <motion.button
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            exit={{ scale: 0 }}
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0, opacity: 0 }}
+            transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
             onClick={() => setOpen(true)}
-            className="fixed bottom-6 start-6 z-50 flex items-center gap-2 rounded-full bg-primary px-5 py-3.5 shadow-brand transition-all hover:scale-105 hover:bg-primary/90"
+            className="group fixed bottom-6 start-6 z-50 flex items-center gap-2.5 rounded-full bg-primary px-4 py-3 glow-brand transition-all duration-250 ease-smooth hover:scale-[1.04] hover:bg-primary/90"
           >
-            <img src={logo} alt="ألو إيچي" className="h-8 w-8 object-contain" />
-            <span className="text-sm font-heading font-bold text-primary-foreground">جرّب ألو إيچي</span>
+            <img src={logo} alt={t("widget.title")} className="h-7 w-7 object-contain" />
+            <span className="text-sm font-medium text-primary-foreground">
+              {t("widget.label")}
+            </span>
           </motion.button>
         )}
       </AnimatePresence>
@@ -232,14 +237,16 @@ const VoiceAssistantWidget = () => {
             initial={{ opacity: 0, y: 20, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            transition={{ duration: 0.25 }}
-            className="fixed bottom-6 start-6 z-50 w-[360px] max-w-[calc(100vw-3rem)] overflow-hidden rounded-[28px] border border-border/60 bg-card shadow-elevated"
+            transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+            className="fixed bottom-6 start-6 z-50 w-[360px] max-w-[calc(100vw-3rem)] overflow-hidden rounded-3xl border border-border/60 bg-card ring-lift glow-brand"
           >
-            <div className="flex items-center justify-between px-4 py-4">
-              <div className="flex items-center gap-3">
-                <img src={logo} alt="ألو إيچي" className="h-8 w-8 object-contain" />
+            <div className="flex items-center justify-between px-5 py-4">
+              <div className="flex items-center gap-2.5">
+                <img src={logo} alt={t("widget.title")} className="h-7 w-7 object-contain" />
                 <div>
-                  <p className="font-heading text-base font-bold text-foreground">ألو إيچي</p>
+                  <p className="text-sm font-semibold tracking-tight text-foreground">
+                    {t("widget.title")}
+                  </p>
                   <p className="text-xs text-muted-foreground">{stateLabel}</p>
                 </div>
               </div>
@@ -247,14 +254,15 @@ const VoiceAssistantWidget = () => {
                 onClick={() => {
                   void handleClose();
                 }}
-                className="text-muted-foreground transition-colors hover:text-foreground"
+                className="text-muted-foreground transition-colors duration-250 hover:text-foreground"
+                aria-label="Close"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div className="px-5 pb-5">
-              <div className="relative overflow-hidden rounded-[24px] border border-border/60 bg-muted/20 px-4 py-8">
+            <div className="px-4 pb-4">
+              <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-background/50 px-4 py-8 ring-lift">
                 <div className="absolute inset-x-0 top-1/2 h-24 -translate-y-1/2 bg-primary/10 blur-3xl" />
 
                 <div className="relative mx-auto flex h-28 max-w-[220px] items-end justify-center gap-2">
@@ -309,23 +317,27 @@ const VoiceAssistantWidget = () => {
                     </p>
                   ) : (
                     <p className="mt-2 text-xs text-muted-foreground">
-                      {demoState === "connected" ? "قول طلبك عادي" : "أول مرة المتصفح هيطلب إذن المايك"}
+                      {demoState === "connected"
+                        ? t("widget.helper.connected")
+                        : t("widget.helper.idle")}
                     </p>
                   )}
                 </div>
               </div>
 
-              <div className="mt-4">
+              <div className="mt-3">
                 {!hasActiveCall ? (
                   <Button
                     onClick={() => {
                       void startLiveDemo();
                     }}
-                    className="h-11 w-full gap-2 rounded-xl bg-primary text-sm text-primary-foreground shadow-brand hover:bg-primary/90"
+                    className="h-11 w-full gap-2 rounded-full bg-primary text-sm font-medium text-primary-foreground transition-all duration-250 ease-smooth hover:bg-primary/90"
                     disabled={buttonBusy}
                   >
                     {buttonBusy ? <Loader2 size={16} className="animate-spin" /> : <PhoneCall size={16} />}
-                    {demoState === "error" || demoState === "ended" ? "ابدأ تاني" : "ابدأ"}
+                    {demoState === "error" || demoState === "ended"
+                      ? t("widget.button.startAgain")
+                      : t("widget.button.start")}
                   </Button>
                 ) : (
                   <Button
@@ -333,10 +345,10 @@ const VoiceAssistantWidget = () => {
                       void disconnectRoom("ended");
                     }}
                     variant="destructive"
-                    className="h-11 w-full gap-2 rounded-xl"
+                    className="h-11 w-full gap-2 rounded-full"
                   >
                     <PhoneOff size={16} />
-                    إنهاء المكالمة
+                    {t("widget.button.end")}
                   </Button>
                 )}
               </div>

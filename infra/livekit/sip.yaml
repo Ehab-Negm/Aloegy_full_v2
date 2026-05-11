@@ -1,0 +1,43 @@
+# LiveKit-SIP gateway config for the Hostinger VPS deployment.
+#
+# Deployed to /etc/livekit/sip.yaml on the VPS, alongside the existing
+# /etc/livekit/config.yaml that drives livekit-server. Both services share
+# the same API key/secret so livekit-sip can talk to livekit-server over
+# the local WebSocket on 127.0.0.1:7880.
+#
+# This file does NOT contain trunks or dispatch rules — those are created
+# at runtime by the backend's /admin/restaurants/{id}/sip-provision
+# endpoint (or the agent/ops/provision_tenant.py CLI). Per-tenant config
+# never lives in this YAML.
+
+api_key: APICCqUMXRRWoH9
+# api_secret is read from the LIVEKIT_API_SECRET env var so the secret
+# never leaks into config files / git / backups. Set it in the systemd
+# unit's Environment= line.
+
+ws_url: ws://127.0.0.1:7880
+
+# SIP listening sockets. Both UDP and TCP on 5060 for legacy clients;
+# 5061 for SIPS over TLS (recommended for customer Issabel deployments).
+sip_port: 5060
+sips_port: 5061
+
+# RTP/SRTP port range. MUST stay disjoint from livekit-server's RTC range
+# (50000-60000 in the existing /etc/livekit/config.yaml).
+rtp_port:
+  start: 10000
+  end: 20000
+
+# The VPS public IPv4. SDP offers must advertise this (not the docker
+# bridge or loopback) so the customer's Issabel can reach our RTP port.
+# Set via env at startup; the dollar-brace syntax is interpreted by the
+# livekit-sip binary at load time.
+nat_external_ip: ${PUBLIC_IP}
+
+# Tear down callers that don't get a 200 OK within 8s. Keeps stuck
+# connections from holding caller phone lines silently.
+invite_timeout: 8s
+
+logging:
+  level: info
+  json: true

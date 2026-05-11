@@ -1,0 +1,8 @@
+﻿{
+  "trunk": {
+    "name": "local-test-trunk",
+    "numbers": ["+201001234567"],
+    "allowed_addresses": ["172.27.81.15/32"],
+    "krisp_enabled": false
+  }
+}

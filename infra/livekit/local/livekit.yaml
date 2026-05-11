@@ -1,0 +1,36 @@
+# Local LiveKit server config for Windows/Docker Desktop testing.
+# API keys come from env (compose passes LIVEKIT_KEYS).
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+# Empty keys block — populated at runtime by the LIVEKIT_KEYS env var
+# in docker-compose.yml. Keeping this stub silences "no keys configured"
+# warnings on some livekit-server versions.
+keys: {}
+
+# Redis ties livekit-server and livekit-sip together — without it,
+# trunk/dispatch-rule API calls return "sip not connected".
+redis:
+  address: redis:6379
+
+rtc:
+  # Small range — Docker Desktop is slow at publishing huge UDP ranges.
+  # 21 ports = ~5 concurrent WebRTC participants. Plenty for testing.
+  port_range_start: 50000
+  port_range_end: 50020
+  # The agent connects to ws://localhost:7880, so use_external_ip is on
+  # so SIP-bridged participants (which route through the LAN) get the
+  # right address.
+  use_external_ip: true
+  tcp_port: 7881
+
+logging:
+  level: info
+  json: false
+
+room:
+  auto_create: true
+  empty_timeout: 60
+  max_participants: 4

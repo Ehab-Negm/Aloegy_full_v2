@@ -1,0 +1,146 @@
+{
+  "scenario_id": "PK-GREEN-008",
+  "title": "Reservation tomorrow",
+  "category": "green",
+  "passed": true,
+  "scores": {
+    "routing": 3,
+    "entity_capture": 5,
+    "state_memory": 4,
+    "clarification_quality": 3,
+    "tone_and_empathy": 4,
+    "no_hallucination": 5,
+    "finalization_safety": 5
+  },
+  "critical_failures": [],
+  "agent_mistakes": [
+    "intent inferred only via downstream tool, set_intent never called",
+    "re-asked 'branch' after it was captured in [CALL_STATE]"
+  ],
+  "missing_fields": [],
+  "hallucinations": [],
+  "final_state_captured_by_agent": {
+    "intent": "reservation",
+    "customer_name": "عمر",
+    "order": [],
+    "order_total": 0.0,
+    "order_total_history": [],
+    "order_validated": false,
+    "order_confirmed": false,
+    "order_id": "",
+    "delivery_address": "",
+    "delivery_landmark": "",
+    "reservation_time": "بكرة الساعة 7",
+    "guests_count": 6,
+    "selected_branch": "فرع المعادي",
+    "complaint_text": "",
+    "complaint_type": "",
+    "complaint_logged": false,
+    "reservation_confirmed": true,
+    "reservation_id": "PK-RES-9667809",
+    "end_call_requested": true,
+    "end_call_reason": "reservation_completed"
+  },
+  "recommended_fix": "no fix required at this severity",
+  "harness_error": null,
+  "trace": [
+    {
+      "role": "agent",
+      "text": "أهلاً بيك! معاك ليلي من بيتزا كينج، أقدر أساعدك في إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "عاوز أحجز بكرة الساعة 7.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "حاضر يا فندم، عايز تحجز كام شخص وفي أي فرع؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "لـ 6 أشخاص.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام، في فرع معين تحب تحجز فيه؟ عندنا المعادي، المعادي الجديدة، وزهراء المعادي.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "الاسم عمر.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الاسم اتسجل: عمر",
+      "tool_name": "set_name",
+      "tool_args": {
+        "name": "عمر"
+      }
+    },
+    {
+      "role": "tool",
+      "text": "الحجز اتسجل: بكرة الساعة 7 لـ6 نفر - فرع المعادي",
+      "tool_name": "set_reservation_info",
+      "tool_args": {
+        "time_text": "بكرة الساعة 7",
+        "guests": 6,
+        "branch": ""
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا عمر، الحجز معمول لبكرة الساعة 7 لـ6 أشخاص في فرع المعادي. هل في حاجة تانية؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "رقمي 01234567890.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "حاضر يا فندم، الرقم مش مطلوب، الحجز معمول باسمك عمر. هل تأكد الحجز؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "تمام.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "تم التأكيد. reservation_id=PK-RES-9667809. أكد للعميل: 'تمام يا عمر، حجزتلك ترابيزة لـ6 نفر يوم بكرة الساعة 7.'",
+      "tool_name": "confirm_and_submit",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "تم قول جملة الوداع للعميل، والمكالمة هتقفل بعد ما الصوت يخلص.",
+      "tool_name": "end_call",
+      "tool_args": {
+        "reason": "reservation_completed"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا عمر، حجزتلك ترابيزة لـ6 نفر يوم بكرة الساعة 7. شكراً ليك، في أمان الله.",
+      "tool_name": "",
+      "tool_args": {}
+    }
+  ]
+}

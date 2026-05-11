@@ -1,55 +1,29 @@
-import { useEffect, useRef, useState } from "react";
-import { motion, useInView, useMotionValue, useSpring, useTransform } from "framer-motion";
-import { Mic, PhoneCall, PhoneIncoming, TrendingUp, Utensils, Zap, ArrowLeft, BarChart3 } from "lucide-react";
+import { useState } from "react";
+import { motion, useMotionValue, useSpring, useTransform } from "framer-motion";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ArrowUpRight,
+  BarChart3,
+  Mic,
+  PhoneCall,
+  PhoneIncoming,
+  TrendingUp,
+  Utensils,
+  Zap,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import VoiceAssistantWidget from "@/components/VoiceAssistantWidget";
-import { Link } from "react-router-dom";
+import { useLanguageDirection } from "@/hooks/use-language-direction";
+import { submitContactForm } from "@/services/api";
 import logo from "@/assets/logo.png";
 import mascot from "@/assets/aloegy-mascot.png";
-import { submitContactForm } from "@/services/api";
-
-const services = [
-  {
-    icon: PhoneCall,
-    title: "وكيل صوتي ابن بلد",
-    description: "بيرد على كل تليفون بمصري صميم وبيأخد الأوردر زي ما الزبون عايز بالظبط.",
-  },
-  {
-    icon: PhoneIncoming,
-    title: "مفيش مكالمة بتضيع",
-    description: "لو ١٠٠ واحد اتصلوا في نفس الثانية، كلهم هيترد عليهم. مفيش خط مشغول تاني.",
-  },
-  {
-    icon: TrendingUp,
-    title: "بيزوّد مبيعاتك",
-    description: "بيقترح إضافات ذكية للزبون وبيزوّد الفاتورة ٢٠٪ أو أكتر من غير ما الزبون يحس.",
-  },
-  {
-    icon: Utensils,
-    title: "متوصّل بالكاشير",
-    description: "الأوردر بينزل على الكاشير والمطبخ أوتوماتيك. بنشتغل مع فودكس وغيرها.",
-  },
-  {
-    icon: BarChart3,
-    title: "بتعرف كل حاجة",
-    description: "تقارير عن كل مكالمة وكل أوردر. تعرف إيه اللي ماشي وإيه اللي محتاج يتظبط.",
-  },
-  {
-    icon: Zap,
-    title: "شغال ٢٤ ساعة",
-    description: "مش بيعيا ومش بيأخد إجازة. شغال الفجر والضهر وبليل. ردود فورية دايماً.",
-  },
-];
-
-const advantages = [
-  { value: "٢٠٪+", counter: { to: 20, suffix: "٪+" }, label: "زيادة في المبيعات", desc: "من الإضافات الذكية اللي بيقترحها" },
-  { value: "٠", counter: { to: 0, suffix: "" }, label: "مكالمة ضايعة", desc: "كل تليفون بيترد عليه" },
-  { value: "∞", counter: null, label: "مكالمة في وقت واحد", desc: "مفيش حدود خالص" },
-  { value: "٢٤/٧", counter: null, label: "شغال من غير ما يقفل", desc: "مفيش إجازات ولا أوفر تايم" },
-];
 
 const fadeUp = {
   hidden: { opacity: 0, y: 30 },
@@ -60,35 +34,19 @@ const fadeUp = {
   }),
 };
 
-// Convert Western digits to Arabic-Indic for UI display.
-const AR_DIGIT_MAP = ["٠","١","٢","٣","٤","٥","٦","٧","٨","٩"];
-const toArabicDigits = (n: number): string =>
-  String(Math.round(n))
-    .split("")
-    .map((c) => (c >= "0" && c <= "9" ? AR_DIGIT_MAP[+c] : c))
-    .join("");
-
-// Counter that animates 0 → `to` when the node scrolls into view.
-const AnimatedCounter = ({ to, prefix = "", suffix = "" }: { to: number; prefix?: string; suffix?: string }) => {
-  const ref = useRef<HTMLSpanElement>(null);
-  const inView = useInView(ref, { once: true, margin: "-80px" });
-  const value = useMotionValue(0);
-  const spring = useSpring(value, { duration: 1.6, bounce: 0 });
-  const display = useTransform(spring, (v) => `${prefix}${toArabicDigits(v)}${suffix}`);
-  useEffect(() => {
-    if (inView) value.set(to);
-  }, [inView, to, value]);
-  return <motion.span ref={ref}>{display}</motion.span>;
+const useDirectionalArrow = () => {
+  const { i18n } = useTranslation();
+  const isRTL = (i18n.resolvedLanguage ?? i18n.language ?? "en").startsWith("ar");
+  return isRTL ? ArrowLeft : ArrowRight;
 };
 
-// The mascot character with a layered in-place idle animation (float + sway
-// + tilt + breathing scale), concentric voice-wave rings, and subtle
-// mouse-parallax.  The PNG has a transparent background so no blend tricks
-// are needed.
+/* -------------------------------------------------------------------------- */
+/* Hero mascot                                                                */
+/* -------------------------------------------------------------------------- */
+
 const HeroMascot = () => {
   const mx = useMotionValue(0);
   const my = useMotionValue(0);
-  // Parallax tilt follows the mouse; spring-smoothed so motion feels organic.
   const parallaxX = useSpring(useTransform(mx, [-0.5, 0.5], [-8, 8]), { stiffness: 70, damping: 16 });
   const parallaxY = useSpring(useTransform(my, [-0.5, 0.5], [-8, 8]), { stiffness: 70, damping: 16 });
 
@@ -109,7 +67,6 @@ const HeroMascot = () => {
       onMouseLeave={handleMouseLeave}
       style={{ perspective: 1200 }}
     >
-      {/* Voice wave rings — 3 concentric pulses at staggered delays. */}
       {[0, 1, 2].map((i) => (
         <motion.div
           key={i}
@@ -124,21 +81,13 @@ const HeroMascot = () => {
         />
       ))}
 
-      {/* Soft primary-colour glow behind the mascot. */}
       <motion.div
         className="absolute w-[300px] h-[300px] rounded-full bg-primary/20 blur-[70px] pointer-events-none"
         animate={{ opacity: [0.6, 0.9, 0.6] }}
         transition={{ duration: 2.6, repeat: Infinity, ease: "easeInOut" }}
       />
 
-      {/* Parallax layer: follows the mouse with a gentle spring. */}
-      <motion.div
-        style={{ x: parallaxX, y: parallaxY }}
-        className="relative z-10"
-      >
-        {/* Float + sway + head-tilt layer: idle-in-place motion. Each axis
-           has its own duration so the combined motion never loops exactly,
-           which reads as "alive" instead of "looping". */}
+      <motion.div style={{ x: parallaxX, y: parallaxY }} className="relative z-10">
         <motion.div
           animate={{
             y: [0, -12, -4, -10, 0],
@@ -149,15 +98,13 @@ const HeroMascot = () => {
             rotate: { duration: 5.2, repeat: Infinity, ease: "easeInOut" },
           }}
         >
-          {/* Breathing scale — short/subtle, inner wrapper so it doesn't
-             interfere with the sway rotation. */}
           <motion.div
             animate={{ scale: [1, 1.035, 1] }}
             transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
           >
             <img
               src={mascot}
-              alt="ألو إيچي"
+              alt="AloEgy mascot"
               className="w-[180px] md:w-[230px] drop-shadow-[0_20px_40px_rgba(59,130,246,0.4)] select-none"
               draggable={false}
             />
@@ -168,7 +115,37 @@ const HeroMascot = () => {
   );
 };
 
+/* -------------------------------------------------------------------------- */
+/* Index                                                                      */
+/* -------------------------------------------------------------------------- */
+
 const Index = () => {
+  useLanguageDirection();
+  const { t } = useTranslation();
+  const ArrowIcon = useDirectionalArrow();
+
+  const services = [
+    { icon: PhoneCall, key: "voiceAgent" },
+    { icon: PhoneIncoming, key: "noMissedCalls" },
+    { icon: TrendingUp, key: "upsell" },
+    { icon: Utensils, key: "posIntegration" },
+    { icon: BarChart3, key: "analytics" },
+    { icon: Zap, key: "alwaysOn" },
+  ] as const;
+
+  const stats = [
+    { key: "egyptianArabic" },
+    { key: "concurrent" },
+    { key: "alwaysOn" },
+    { key: "latency" },
+  ] as const;
+
+  const howSteps = [
+    { step: "١", key: "step1" },
+    { step: "٢", key: "step2" },
+    { step: "٣", key: "step3" },
+  ] as const;
+
   const [contactForm, setContactForm] = useState({ restaurantName: "", phone: "", message: "" });
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -213,21 +190,21 @@ const Index = () => {
                 transition={{ delay: 0.2 }}
                 className="inline-block px-4 py-1.5 rounded-full text-xs font-semibold bg-primary/10 text-primary mb-6 border border-primary/15"
               >
-                الذكاء الاصطناعي المتربي في مصر
+                {t("hero.badge")}
               </motion.span>
 
               <h1 className="text-5xl md:text-7xl font-heading font-extrabold text-foreground leading-tight mb-4">
-                ألو إيچي
+                {t("hero.title")}
               </h1>
 
               <p className="text-2xl md:text-3xl font-heading font-semibold text-foreground/75 mb-2">
-                أسرع ألو في مصر
+                {t("hero.tagline")}
               </p>
               <p className="text-lg text-muted-foreground mb-3">
-                ذكاء اصطناعي بلسان مصري
+                {t("hero.subtitle")}
               </p>
               <p className="text-base text-muted-foreground mb-8 max-w-xl md:mx-0 mx-auto leading-relaxed">
-                وكيل صوتي ابن بلد بيتكلم مصري زيك بالظبط، بيأخد أوردرات المطاعم بدل الموظف، وبيزوّد مبيعاتك ٢٠٪ من الإضافات الذكية. مفيش تليفون هيرن ومحدش يرد عليه تاني.
+                {t("hero.description")}
               </p>
               <div className="flex flex-col sm:flex-row gap-3 md:justify-start justify-center">
                 <Button
@@ -236,12 +213,12 @@ const Index = () => {
                   className="rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 shadow-brand px-8 gap-2 h-12"
                 >
                   <Mic size={18} />
-                  جرب صوت ألو إيچي
+                  {t("hero.tryVoice")}
                 </Button>
                 <a href="#services">
                   <Button size="lg" variant="outline" className="rounded-lg border-border px-8 h-12 hover:bg-muted/50 gap-2 w-full sm:w-auto">
-                    اعرف أكتر
-                    <ArrowLeft size={18} />
+                    {t("hero.learnMore")}
+                    <ArrowIcon size={18} />
                   </Button>
                 </a>
               </div>
@@ -260,13 +237,13 @@ const Index = () => {
         </div>
       </section>
 
-      {/* Advantages Stats */}
+      {/* Stats */}
       <section className="py-16 border-y border-border/50 bg-card">
         <div className="container mx-auto px-4">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
-            {advantages.map((item, i) => (
+            {stats.map((item, i) => (
               <motion.div
-                key={item.label}
+                key={item.key}
                 custom={i}
                 initial="hidden"
                 whileInView="visible"
@@ -275,12 +252,14 @@ const Index = () => {
                 className="text-center"
               >
                 <div className="text-4xl md:text-5xl font-heading font-extrabold text-primary mb-1">
-                  {item.counter
-                    ? <AnimatedCounter to={item.counter.to} suffix={item.counter.suffix} />
-                    : item.value}
+                  {t(`stats.${item.key}.value`)}
                 </div>
-                <div className="font-heading font-semibold text-foreground text-sm mb-0.5">{item.label}</div>
-                <div className="text-xs text-muted-foreground">{item.desc}</div>
+                <div className="font-heading font-semibold text-foreground text-sm mb-0.5">
+                  {t(`stats.${item.key}.label`)}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {t(`stats.${item.key}.desc`)}
+                </div>
               </motion.div>
             ))}
           </div>
@@ -297,17 +276,17 @@ const Index = () => {
             className="text-center mb-16"
           >
             <h2 className="text-3xl md:text-5xl font-heading font-bold mb-4 text-foreground">
-              إيه اللي بنعمله؟
+              {t("services.title")}
             </h2>
             <p className="text-muted-foreground max-w-md mx-auto">
-              كل اللي مطعمك محتاجه عشان مفيش تليفون يضيع ومبيعاتك تزيد
+              {t("services.subtitle")}
             </p>
           </motion.div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
             {services.map((service, i) => (
               <motion.div
-                key={service.title}
+                key={service.key}
                 custom={i}
                 initial="hidden"
                 whileInView="visible"
@@ -319,8 +298,12 @@ const Index = () => {
                     <div className="w-11 h-11 rounded-lg bg-primary/10 flex items-center justify-center mb-4 group-hover:bg-primary group-hover:shadow-brand transition-all duration-300">
                       <service.icon size={22} className="text-primary group-hover:text-primary-foreground transition-colors" />
                     </div>
-                    <h3 className="font-heading font-semibold text-lg mb-2 text-foreground">{service.title}</h3>
-                    <p className="text-sm text-muted-foreground leading-relaxed">{service.description}</p>
+                    <h3 className="font-heading font-semibold text-lg mb-2 text-foreground">
+                      {t(`services.items.${service.key}.title`)}
+                    </h3>
+                    <p className="text-sm text-muted-foreground leading-relaxed">
+                      {t(`services.items.${service.key}.description`)}
+                    </p>
                   </CardContent>
                 </Card>
               </motion.div>
@@ -340,37 +323,18 @@ const Index = () => {
               transition={{ duration: 0.6 }}
             >
               <h2 className="text-3xl md:text-5xl font-heading font-bold mb-6 text-foreground">
-                مين إحنا؟
+                {t("about.title")}
               </h2>
-              <p className="text-muted-foreground leading-relaxed mb-4">
-                ألو إيچي هي أول منصة ذكاء اصطناعي صوتي في مصر متخصصة في المطاعم. عملنا وكيل صوتي بيتكلم مصري ابن بلد زيك بالظبط، بيأخد الأوردرات من الزباين على التليفون بدل الموظف.
-              </p>
-              <p className="text-muted-foreground leading-relaxed mb-4">
-                المشكلة بسيطة: مطعمك بيضيع مكالمات كتير وقت الزحمة لإن الخط مشغول. إحنا بنرد على عدد لا نهائي من التليفونات في نفس اللحظة، وكمان بنقترح إضافات ذكية بتزوّد الفاتورة ٢٠٪ أو أكتر.
-              </p>
-              <p className="text-muted-foreground leading-relaxed mb-8">
-                متوصّلين بأشهر أنظمة الكاشير في مصر عشان الأوردر ينزل المطبخ لوحده من غير تدخل بشري. فريقنا كله مهندسين مصريين بيبنوا التكنولوجيا دي عشان تمشي مع السوق المصري.
-              </p>
-              <div className="flex gap-10">
-                <div>
-                  <div className="text-3xl font-heading font-extrabold text-primary">
-                    <AnimatedCounter prefix="+" to={200} />
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">مطعم معانا</div>
-                </div>
-                <div>
-                  <div className="text-3xl font-heading font-extrabold text-primary">
-                    <AnimatedCounter prefix="+" to={50} suffix=" ألف" />
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">مكالمة اتأخدت</div>
-                </div>
-                <div>
-                  <div className="text-3xl font-heading font-extrabold text-primary">
-                    <AnimatedCounter to={20} suffix="٪+" />
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">زيادة مبيعات</div>
-                </div>
-              </div>
+              <p className="text-muted-foreground leading-relaxed mb-4">{t("about.p1")}</p>
+              <p className="text-muted-foreground leading-relaxed mb-4">{t("about.p2")}</p>
+              <p className="text-muted-foreground leading-relaxed mb-8">{t("about.p3")}</p>
+              <Link
+                to="/about"
+                className="inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:text-primary/80 transition-colors"
+              >
+                {t("nav.about")}
+                <ArrowUpRight size={14} />
+              </Link>
             </motion.div>
 
             <motion.div
@@ -385,14 +349,14 @@ const Index = () => {
                   <div className="text-center p-8">
                     <motion.img
                       src={logo}
-                      alt="ألو إيچي"
+                      alt={t("hero.title")}
                       className="w-28 h-28 mx-auto mb-5 object-contain drop-shadow-md"
                       animate={{ rotate: [0, 3, -3, 0] }}
                       transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
                     />
-                    <p className="font-heading font-bold text-xl text-foreground">ألو إيچي</p>
-                    <p className="text-sm text-muted-foreground mt-1">أسرع ألو في مصر</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">الذكاء الاصطناعي المتربي في مصر</p>
+                    <p className="font-heading font-bold text-xl text-foreground">{t("hero.title")}</p>
+                    <p className="text-sm text-muted-foreground mt-1">{t("hero.tagline")}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{t("hero.badge")}</p>
                   </div>
                 </div>
               </div>
@@ -411,16 +375,12 @@ const Index = () => {
             className="text-center mb-16"
           >
             <h2 className="text-3xl md:text-5xl font-heading font-bold mb-4 text-foreground">
-              إزاي بيشتغل؟
+              {t("howItWorks.title")}
             </h2>
           </motion.div>
 
           <div className="grid md:grid-cols-3 gap-10 max-w-4xl mx-auto">
-            {[
-              { step: "١", title: "الزبون بيتصل", desc: "الزبون بيكلم نمرة المطعم زي ما هو معوّد عادي" },
-              { step: "٢", title: "ألو إيچي بيرد", desc: "الوكيل الذكي بيرد بمصري ابن بلد وبيأخد الأوردر ويقترح إضافات" },
-              { step: "٣", title: "الأوردر بينزل المطبخ", desc: "الأوردر بينزل الكاشير والمطبخ أوتوماتيك في ثانية" },
-            ].map((item, i) => (
+            {howSteps.map((item, i) => (
               <motion.div
                 key={item.step}
                 custom={i}
@@ -433,18 +393,21 @@ const Index = () => {
                 <div className="w-14 h-14 rounded-full bg-primary text-primary-foreground flex items-center justify-center mx-auto mb-4 text-xl font-bold shadow-brand">
                   {item.step}
                 </div>
-                <h3 className="font-heading font-semibold text-lg mb-2 text-foreground">{item.title}</h3>
-                <p className="text-sm text-muted-foreground leading-relaxed">{item.desc}</p>
+                <h3 className="font-heading font-semibold text-lg mb-2 text-foreground">
+                  {t(`howItWorks.${item.key}.title`)}
+                </h3>
+                <p className="text-sm text-muted-foreground leading-relaxed">
+                  {t(`howItWorks.${item.key}.desc`)}
+                </p>
               </motion.div>
             ))}
           </div>
 
-          {/* CTA */}
           <div className="text-center mt-14">
             <Link to="/pricing">
               <Button size="lg" className="rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 shadow-brand px-10 gap-2 text-lg h-13">
-                ابدأ دلوقتي
-                <ArrowLeft size={20} />
+                {t("howItWorks.cta")}
+                <ArrowIcon size={20} />
               </Button>
             </Link>
           </div>
@@ -461,39 +424,41 @@ const Index = () => {
             className="max-w-lg mx-auto text-center"
           >
             <h2 className="text-3xl md:text-5xl font-heading font-bold mb-4 text-foreground">
-              كلمنا دلوقتي
+              {t("contact.title")}
             </h2>
-            <p className="text-muted-foreground mb-8">
-              عايز تشوف ألو إيچي في مطعمك؟ ابعتلنا وهنكلمك في أسرع وقت.
-            </p>
+            <p className="text-muted-foreground mb-8">{t("contact.subtitle")}</p>
             <div className="bg-background rounded-2xl p-8 shadow-elevated border border-border/60">
               {submitted ? (
                 <div className="text-center py-8">
                   <div className="w-14 h-14 rounded-full bg-emerald-100 flex items-center justify-center mx-auto mb-4">
-                    <svg className="w-7 h-7 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                    <svg className="w-7 h-7 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
                   </div>
-                  <p className="text-lg font-heading font-semibold text-foreground mb-2">تمام! وصلتنا رسالتك</p>
-                  <p className="text-sm text-muted-foreground">هنكلمك في أقرب وقت إن شاء الله</p>
+                  <p className="text-lg font-heading font-semibold text-foreground mb-2">
+                    {t("contact.successTitle")}
+                  </p>
+                  <p className="text-sm text-muted-foreground">{t("contact.successDesc")}</p>
                 </div>
               ) : (
                 <div className="space-y-4">
                   <input
                     value={contactForm.restaurantName}
                     onChange={(e) => setContactForm((p) => ({ ...p, restaurantName: e.target.value }))}
-                    placeholder="اسم المطعم"
+                    placeholder={t("contact.restaurantName")}
                     className="w-full px-4 py-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/30 transition-all"
                   />
                   <input
                     value={contactForm.phone}
                     onChange={(e) => setContactForm((p) => ({ ...p, phone: e.target.value }))}
-                    placeholder="رقم الموبايل"
+                    placeholder={t("contact.phone")}
                     className="w-full px-4 py-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/30 transition-all"
                     dir="ltr"
                   />
                   <textarea
                     value={contactForm.message}
                     onChange={(e) => setContactForm((p) => ({ ...p, message: e.target.value }))}
-                    placeholder="عايز تقولنا إيه..."
+                    placeholder={t("contact.message")}
                     rows={4}
                     className="w-full px-4 py-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/30 transition-all resize-none"
                   />
@@ -502,7 +467,7 @@ const Index = () => {
                     disabled={submitting || !contactForm.restaurantName || !contactForm.phone}
                     className="w-full rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 shadow-brand h-12"
                   >
-                    {submitting ? "جاري الإرسال..." : "ابعت الرسالة"}
+                    {submitting ? t("contact.submitting") : t("contact.submit")}
                   </Button>
                 </div>
               )}

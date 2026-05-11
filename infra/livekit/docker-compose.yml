@@ -1,0 +1,110 @@
+# Self-hosted LiveKit + LiveKit-SIP stack for AloEgy.
+#
+# ⚠️ ALTERNATIVE PATH — only use this on a fresh VPS with no existing
+# AloEgy services. The current Hostinger production deploy already runs
+# `livekit-server` natively via systemd (see DEPLOY.md), nginx is fronting
+# wss://lk.aloegy.ai, and ports 80/443/7880 are taken. Running this
+# compose file there would conflict.
+#
+# For the existing Hostinger VPS (KVM 16), use `install-sip.sh` instead —
+# it adds livekit-sip alongside the running services without touching the
+# rest of the stack.
+#
+# This compose is for: greenfield deploys, dev/staging boxes, or moving
+# LiveKit to its own VPS in the future.
+#
+# Required env (in .env beside this file):
+#   LIVEKIT_API_KEY       — random 64-byte hex
+#   LIVEKIT_API_SECRET    — random 64-byte hex
+#   PUBLIC_IP             — VPS public IPv4 (used for SIP NAT advertising)
+#   LIVEKIT_DOMAIN        — DNS for WebRTC signaling, e.g. livekit.aloegy.ai
+#   SIP_DOMAIN            — DNS for SIP, e.g. sip.aloegy.ai
+#   ACME_EMAIL            — Let's Encrypt registration email
+#
+# Ports to open on the host firewall (ufw):
+#   5060/udp+tcp    — SIP signaling (legacy)
+#   5061/tcp        — SIPS over TLS
+#   10000-20000/udp — RTP/SRTP
+#   443/tcp         — Caddy (LiveKit signaling proxied here)
+#   80/tcp          — Caddy (Let's Encrypt HTTP-01 challenge)
+#   22/tcp          — SSH (restrict to admin IPs)
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - lk-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  livekit-server:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    ports:
+      # WebRTC signaling proxied via Caddy (TLS termination there).
+      - "7880:7880"
+      # ICE/UDP for media; range-published so callers can reach the SFU.
+      - "50000-60000:50000-60000/udp"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    networks:
+      - lk-internal
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  livekit-sip:
+    image: livekit/sip:latest
+    restart: unless-stopped
+    command: ["--config", "/etc/sip.yaml"]
+    environment:
+      LIVEKIT_URL: "ws://livekit-server:7880"
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET}"
+      REDIS_URL: "redis://redis:6379"
+    # SIP needs host networking so it advertises the real public IP in SDP
+    # offers. Bridge networking would put a NATted Docker IP in the SDP and
+    # break RTP for any caller outside this host.
+    network_mode: host
+    volumes:
+      - ./sip.yaml:/etc/sip.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit-server:
+        condition: service_started
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      LIVEKIT_DOMAIN: "${LIVEKIT_DOMAIN}"
+      ACME_EMAIL: "${ACME_EMAIL}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - lk-internal
+
+networks:
+  lk-internal:
+    driver: bridge
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:

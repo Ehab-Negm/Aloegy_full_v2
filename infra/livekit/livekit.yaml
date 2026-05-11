@@ -1,0 +1,46 @@
+# LiveKit server configuration — production self-host.
+# Ships alongside docker-compose.yml. API keys come from env so this file
+# stays free of secrets and can live in git. RTP uses a constrained UDP
+# port range that must match the host firewall and Docker port-publish.
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+# The compose file feeds LIVEKIT_KEYS as "<key>: <secret>" so the server
+# accepts API calls authenticated with a JWT minted from these creds. Keep
+# the key/secret in sync between the agent worker, backend, and SIP gateway.
+keys:
+  # Filled at runtime by the docker-compose env. The dummy default below is
+  # never used because env interpolation always wins.
+  PLACEHOLDER_REPLACED_BY_LIVEKIT_KEYS_ENV: PLACEHOLDER_REPLACED_BY_LIVEKIT_KEYS_ENV
+
+redis:
+  # Lets multiple replicas share session/participant state. Single node in
+  # v1; bump to a Redis cluster if you scale livekit-server horizontally.
+  address: "redis:6379"
+
+rtc:
+  # WebRTC media. The published range matches docker-compose's port mapping.
+  # Keep this small (~10k ports) so the firewall config stays manageable.
+  port_range_start: 50000
+  port_range_end: 60000
+  # The agent worker connects to ws://livekit-server:7880 inside the docker
+  # network; external browsers connect through Caddy (wss://livekit.aloegy.ai).
+  use_external_ip: true
+  # ICE TCP fallback for callers behind restrictive corporate firewalls.
+  tcp_port: 7881
+
+logging:
+  level: info
+  pion_level: warn
+  json: true
+
+room:
+  # Auto-create rooms when an SDK joins with a JWT. SIP dispatch rules also
+  # create rooms server-side, so this keeps both paths simple.
+  auto_create: true
+  # Empty rooms close after 60s — long enough that the agent can reconnect
+  # if it crashes mid-call without losing the customer's session.
+  empty_timeout: 60
+  max_participants: 8

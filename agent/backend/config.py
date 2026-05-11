@@ -92,7 +92,7 @@ class RestaurantConfig:
         available = [i for i in self.menu_items if i.get("available", True)]
         if not available:
             return "المنيو مش متاح مؤقتًا دلوقتي" if self.degraded_mode else "المنيو مش متاح دلوقتي"
-        max_shown = min(3, _voice_menu_limit(), len(available))
+        max_shown = min(_voice_menu_limit(), len(available))
         extra_suffix = "، ولو عايز حاجة تانية قولهولي." if len(available) > max_shown else "."
 
         for shown_count in range(max_shown, 0, -1):
@@ -101,10 +101,11 @@ class RestaurantConfig:
                 f"{i['name']} بـ{money2ar(i['price'])}" for i in shown
             )
             text += extra_suffix
-            if len(text) <= 120:
+            if len(text) <= 220:
                 return text
 
-        return "المتاح دلوقتي: كوشري صغير، وكوشري وسط، وكوشري كبير. ولو عايز حاجة تانية قولهولي."
+        shown = available[:min(3, len(available))]
+        return "المتاح دلوقتي: " + "، ".join(str(i["name"]) for i in shown) + ". ولو عايز حاجة تانية قولهولي."
 
     def menu_names(self) -> str:
         available = [i["name"] for i in self.menu_items if i.get("available", True)]

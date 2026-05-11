@@ -23,7 +23,9 @@
       "Bash(findstr :8000)",
       "Bash(findstr LISTENING)",
       "Bash(tasklist *)",
-      "WebFetch(domain:docs.livekit.io)"
+      "WebFetch(domain:docs.livekit.io)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); import agent; print\\('LLM:', agent.SESSION_LLM_MODEL\\); print\\('CTX max:', agent.TURN_CHAT_CTX_MAX_ITEMS\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); import main; print\\('main.py imported OK'\\)\")"
     ]
   }
 }

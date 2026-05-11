@@ -1,0 +1,76 @@
+# Local LiveKit + SIP stack for testing on Windows / Docker Desktop.
+#
+# Deliberately small RTP/RTC ranges (publishing thousands of UDP ports
+# is painfully slow on Docker Desktop). 21 RTP ports = ~10 concurrent
+# test calls, more than enough for a smoke test from Issabel.
+#
+# Usage:
+#   1. Copy .env.example to .env, set PUBLIC_IP to your Windows LAN IP
+#   2. docker compose up -d
+#   3. Open Windows Firewall for UDP 5060, 10000-10020, 7880
+#   4. Provision a test trunk (see README.md)
+#   5. Point Issabel's outbound trunk at <PUBLIC_IP>:5060
+#
+# This stack does NOT include Caddy/TLS — agent + frontend connect
+# directly to ws://<PUBLIC_IP>:7880 for local testing.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: aloegy-local-redis
+    restart: unless-stopped
+    networks:
+      - lk-local
+
+  livekit-server:
+    image: livekit/livekit-server:latest
+    container_name: aloegy-local-livekit
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml", "--node-ip", "${PUBLIC_IP}"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    ports:
+      # WebSocket signaling (agent + browser connect here)
+      - "7880:7880"
+      # WebRTC ICE/UDP — small range for local testing only
+      - "50000-50020:50000-50020/udp"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    networks:
+      - lk-local
+    depends_on:
+      - redis
+
+  livekit-sip:
+    image: livekit/sip:latest
+    container_name: aloegy-local-sip
+    restart: unless-stopped
+    environment:
+      SIP_CONFIG_FILE: /sip/config.yaml
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET}"
+      # livekit-sip's config.yaml uses ${PUBLIC_IP} via env-substitution.
+      PUBLIC_IP: "${PUBLIC_IP}"
+    ports:
+      # SIP signaling — Issabel sends INVITE here
+      - "5060:5060/udp"
+      # RTP media — keep the published range and the rtp_port string in
+      # sip.yaml in sync. Docker Desktop on Windows is painfully slow when
+      # publishing thousands of UDP ports, so 100 (≈50 concurrent calls)
+      # is the practical local cap. Use the string form
+      # `rtp_port: "10000-10100"` in sip.yaml — the struct form
+      # `start: / end:` was silently ignored on this build and the
+      # allocator fell back to the default 10000–20000 range, picking
+      # ports that were never published.
+      - "10000-10100:10000-10100/udp"
+    volumes:
+      - ./sip.yaml:/sip/config.yaml:ro
+    networks:
+      - lk-local
+    depends_on:
+      - redis
+      - livekit-server
+
+networks:
+  lk-local:
+    driver: bridge

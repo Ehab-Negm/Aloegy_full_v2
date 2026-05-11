@@ -1,190 +1,248 @@
 import { motion } from "framer-motion";
-import { Check, ArrowLeft, PhoneCall, MessageSquare, Headphones } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  Headphones,
+  MessageSquare,
+  PhoneCall,
+  Sparkles,
+} from "lucide-react";
+import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
-import { Link } from "react-router-dom";
+import { useLanguageDirection } from "@/hooks/use-language-direction";
 
-const plans = [
-  {
-    name: "الأساسية",
-    icon: PhoneCall,
-    description: "ابدأ مع وكيل ذكي شغال ليل ونهار يأخد أوردراتك",
-    price: "٤,٠٠٠",
-    oldPrice: "٦,٠٠٠",
-    period: "شهرياً",
-    popular: false,
-    features: [
-      "وكيل صوتي ذكي بلهجة مصرية",
-      "شغال ٢٤ ساعة / ٧ أيام",
-      "مكالمة واحدة في نفس الوقت",
-      "اقتراح إضافات ذكية لزيادة المبيعات",
-      "ربط مع نظام الكاشير",
-      "تقارير يومية عن المكالمات",
-      "دعم فني خلال ساعات العمل",
-    ],
-  },
-  {
-    name: "المتقدمة",
-    icon: Headphones,
-    description: "للمطاعم اللي عندها ضغط مكالمات وعايزة تكبر مبيعاتها",
-    price: "٦,٠٠٠",
-    oldPrice: "٨,٠٠٠",
-    period: "شهرياً",
-    popular: true,
-    features: [
-      "كل مميزات الباقة الأساسية",
-      "لحد ٥ مكالمات في نفس الوقت",
-      "تحليلات متقدمة وتقارير أسبوعية",
-      "تخصيص ردود الوكيل حسب المنيو",
-      "اقتراحات ذكية مخصصة لكل زبون",
-      "أولوية في الدعم الفني",
-      "تحديثات دورية مجانية",
-    ],
-  },
-  {
-    name: "الاحترافية",
-    icon: MessageSquare,
-    description: "الحل الكامل للمطاعم الكبيرة والسلاسل اللي عايزة تسيطر على كل القنوات",
-    price: "تواصل معانا",
-    oldPrice: null,
-    period: "",
-    popular: false,
-    features: [
-      "كل مميزات الباقة المتقدمة",
-      "لحد ١٢ مكالمة في نفس الوقت",
-      "رد على الواتساب مجاني",
-      "أخد أوردرات من واتساب",
-      "مكالمات على رقم المطعم مباشرة",
-      "مدير حساب مخصص",
-      "ربط مع أكتر من فرع",
-      "تقارير وتحليلات بالذكاء الاصطناعي",
-    ],
-  },
-];
+const easeSmooth = [0.16, 1, 0.3, 1] as const;
 
-const fadeUp = {
-  hidden: { opacity: 0, y: 30 },
-  visible: (i: number) => ({
-    opacity: 1,
-    y: 0,
-    transition: { delay: i * 0.15, duration: 0.5, ease: "easeOut" as const },
-  }),
+const fadeUpItem = {
+  hidden: { opacity: 0, y: 20 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.6, ease: easeSmooth } },
 };
 
+interface PlanDef {
+  key: "starter" | "pro" | "enterprise";
+  icon: typeof PhoneCall;
+  price: number | null;
+  oldPrice: number | null;
+  popular: boolean;
+}
+
+const PLAN_DEFS: PlanDef[] = [
+  { key: "starter", icon: PhoneCall, price: 4000, oldPrice: 6000, popular: false },
+  { key: "pro", icon: Headphones, price: 6000, oldPrice: 8000, popular: true },
+  { key: "enterprise", icon: MessageSquare, price: null, oldPrice: null, popular: false },
+];
+
+const FAQ_KEYS = ["moreSales", "noMissed", "saveSalary", "trueDialect"] as const;
+
 const Pricing = () => {
+  useLanguageDirection();
+  const { t, i18n } = useTranslation();
+
+  const isRTL = (i18n.resolvedLanguage ?? i18n.language ?? "en").startsWith("ar");
+  const ArrowIcon = isRTL ? ArrowLeft : ArrowRight;
+  const numberFormatter = new Intl.NumberFormat(isRTL ? "ar-EG" : "en-US");
+  const formatPrice = (n: number | null) => (n === null ? null : numberFormatter.format(n));
+
   return (
     <div className="min-h-screen bg-background">
       <Navbar />
 
-      <section className="relative pt-32 pb-20 overflow-hidden">
-        <div className="absolute inset-0 pointer-events-none gradient-hero" />
-
-        <div className="container mx-auto px-4 relative">
+      {/* Hero */}
+      <section className="relative overflow-hidden gradient-hero pt-24 pb-10 sm:pt-28 sm:pb-14">
+        <div className="absolute inset-0 pointer-events-none">
           <motion.div
-            initial={{ opacity: 0, y: 30 }}
+            className="absolute top-0 start-1/3 h-[400px] w-[400px] rounded-full bg-primary/5 blur-[100px]"
+            animate={{ x: [0, 30, -10, 0], y: [0, -15, 10, 0] }}
+            transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
+          />
+        </div>
+
+        <div className="container relative mx-auto">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6 }}
-            className="text-center mb-16"
+            transition={{ duration: 0.7, ease: easeSmooth }}
+            className="mx-auto max-w-2xl text-center"
           >
-            <h1 className="text-3xl md:text-5xl font-heading font-bold mb-4 text-foreground">
-              اختار الباقة المناسبة لمطعمك
-            </h1>
-            <p className="text-muted-foreground max-w-lg mx-auto leading-relaxed">
-              كل الباقات فيها وكيل صوتي ذكي بيتكلم مصري وبيأخد الأوردرات بدل الموظف. الفرق في عدد المكالمات المتزامنة والمميزات الإضافية.
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/10 px-4 py-1.5 text-xs font-semibold text-primary mb-6">
+              <Sparkles size={12} />
+              {t("nav.pricing")}
+            </span>
+            <h1 className="text-display text-foreground mb-4">{t("pricing.pageTitle")}</h1>
+            <p className="text-base sm:text-lg text-muted-foreground leading-relaxed">
+              {t("pricing.pageSubtitle")}
             </p>
           </motion.div>
+        </div>
+      </section>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 max-w-5xl mx-auto">
-            {plans.map((plan, i) => (
-              <motion.div
-                key={plan.name}
-                custom={i}
-                initial="hidden"
-                animate="visible"
-                variants={fadeUp}
-                className="relative"
-              >
-                {plan.popular && (
-                  <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-10">
-                    <Badge className="bg-primary text-primary-foreground border-0 px-4 py-1 text-xs font-medium shadow-brand">
-                      الأكتر طلباً
-                    </Badge>
-                  </div>
-                )}
-                <Card className={`h-full border-border/60 bg-card transition-all duration-300 hover:shadow-elevated ${
-                  plan.popular ? "border-primary/30 shadow-brand ring-1 ring-primary/10" : ""
-                }`}>
-                  <CardHeader className="pb-2 pt-8 text-center">
-                    <div className={`w-12 h-12 rounded-lg flex items-center justify-center mx-auto mb-4 ${
-                      plan.popular ? "bg-primary shadow-brand" : "bg-primary/10"
-                    }`}>
-                      <plan.icon size={24} className={plan.popular ? "text-primary-foreground" : "text-primary"} />
+      {/* Plans */}
+      <section className="pb-16 sm:pb-20">
+        <div className="container mx-auto">
+          <motion.div
+            initial="hidden"
+            whileInView="visible"
+            viewport={{ once: true, margin: "-60px" }}
+            variants={{
+              hidden: {},
+              visible: { transition: { staggerChildren: 0.1 } },
+            }}
+            className="mx-auto grid max-w-5xl grid-cols-1 gap-4 md:grid-cols-3"
+          >
+            {PLAN_DEFS.map((plan) => {
+              const features = (
+                t(`pricing.plans.${plan.key}.features`, { returnObjects: true }) as string[]
+              );
+              const featureList = Array.isArray(features) ? features : [];
+              const formattedPrice = formatPrice(plan.price);
+              const formattedOld = formatPrice(plan.oldPrice);
+
+              return (
+                <motion.div
+                  key={plan.key}
+                  variants={fadeUpItem}
+                  whileHover={{ y: -4 }}
+                  transition={{ duration: 0.25, ease: easeSmooth }}
+                  className="relative"
+                >
+                  {plan.popular && (
+                    <div className="absolute -top-3 left-1/2 z-10 -translate-x-1/2">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-primary px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-primary-foreground shadow-brand">
+                        <Sparkles size={11} />
+                        {t("pricing.popular")}
+                      </span>
                     </div>
-                    <h3 className="font-heading font-bold text-xl text-foreground">{plan.name}</h3>
-                    <p className="text-sm text-muted-foreground mt-1 min-h-[40px]">{plan.description}</p>
-                  </CardHeader>
-                  <CardContent className="pt-4">
-                    <div className="text-center mb-6">
-                      {plan.oldPrice && (
-                        <p className="text-sm text-muted-foreground line-through mb-1">{plan.oldPrice} ج.م</p>
+                  )}
+
+                  <div
+                    className={`flex h-full flex-col rounded-2xl border bg-card p-7 transition-all duration-400 ease-smooth ${
+                      plan.popular
+                        ? "border-primary/40 shadow-elevated ring-1 ring-primary/15"
+                        : "border-border/60 hover:shadow-elevated hover:border-primary/30"
+                    }`}
+                  >
+                    <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                      <plan.icon size={20} strokeWidth={1.75} />
+                    </div>
+
+                    <h3 className="text-xl font-bold tracking-tight text-foreground">
+                      {t(`pricing.plans.${plan.key}.name`)}
+                    </h3>
+                    <p className="mt-1.5 min-h-[42px] text-sm text-muted-foreground leading-relaxed">
+                      {t(`pricing.plans.${plan.key}.description`)}
+                    </p>
+
+                    <div className="mt-6 mb-6 border-t border-border/60 pt-6">
+                      {formattedOld && (
+                        <p className="text-sm text-muted-foreground/70 line-through">
+                          {formattedOld}
+                        </p>
                       )}
-                      <div className="flex items-baseline justify-center gap-1">
-                        <span className="text-4xl font-heading font-extrabold text-foreground">{plan.price}</span>
-                        {plan.period && <span className="text-sm text-muted-foreground">ج.م / {plan.period}</span>}
+                      <div className="flex items-baseline gap-1.5">
+                        {formattedPrice ? (
+                          <>
+                            <span className="text-4xl font-bold tracking-tight text-foreground">
+                              {formattedPrice}
+                            </span>
+                            <span className="text-sm text-muted-foreground">
+                              {t("pricing.perMonth")}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-2xl font-bold tracking-tight text-foreground">
+                            {t(`pricing.plans.${plan.key}.priceLabel`)}
+                          </span>
+                        )}
                       </div>
                     </div>
 
-                    <ul className="space-y-3 mb-8">
-                      {plan.features.map((feature) => (
-                        <li key={feature} className="flex items-start gap-2 text-sm">
-                          <Check size={15} className="text-primary mt-0.5 shrink-0" />
-                          <span className="text-muted-foreground">{feature}</span>
+                    <ul className="mb-7 flex-1 space-y-2.5">
+                      {featureList.map((feature) => (
+                        <li key={feature} className="flex items-start gap-2.5 text-sm">
+                          <Check
+                            size={14}
+                            strokeWidth={2.5}
+                            className="mt-0.5 shrink-0 text-primary"
+                          />
+                          <span className="text-foreground/80 leading-relaxed">{feature}</span>
                         </li>
                       ))}
                     </ul>
 
-                    <Link to="/#contact">
-                      <Button className={`w-full rounded-lg h-11 ${
-                        plan.popular
-                          ? "bg-primary text-primary-foreground hover:bg-primary/90 shadow-brand"
-                          : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
-                      }`}>
-                        {plan.price === "تواصل معانا" ? "كلمنا دلوقتي" : "اشترك دلوقتي"}
+                    <Link to="/#contact" className="mt-auto">
+                      <Button
+                        className={`h-11 w-full rounded-xl text-sm font-semibold transition-all duration-250 ease-smooth ${
+                          plan.popular
+                            ? "bg-primary text-primary-foreground shadow-brand hover:bg-primary/90 hover:shadow-elevated"
+                            : "bg-secondary text-foreground hover:bg-secondary/80"
+                        }`}
+                      >
+                        {plan.price === null ? t("pricing.contactSales") : t("pricing.subscribe")}
                       </Button>
                     </Link>
-                  </CardContent>
-                </Card>
-              </motion.div>
-            ))}
-          </div>
+                  </div>
+                </motion.div>
+              );
+            })}
+          </motion.div>
 
-          {/* FAQ section */}
+          {/* FAQ */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.6, duration: 0.5 }}
-            className="max-w-3xl mx-auto mt-24 text-center"
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, margin: "-60px" }}
+            transition={{ duration: 0.6, ease: easeSmooth }}
+            className="mx-auto mt-24 max-w-3xl"
           >
-            <h2 className="text-2xl font-heading font-bold mb-8 text-foreground">
-              ليه مطعمك محتاج ألو إيچي؟
-            </h2>
-            <div className="grid md:grid-cols-2 gap-5 text-start">
-              {[
-                { title: "مبيعات أكتر من غير مجهود", desc: "الوكيل الذكي بيقترح إضافات لكل زبون بطريقة طبيعية. النتيجة؟ زيادة في الفاتورة من ٢٠٪ لحد ٩٠٪ في بعض الأوردرات." },
-                { title: "مفيش تليفون بيضيع تاني", desc: "في أوقات الذروة، الخط مشغول والزبون بيروح لمطعم تاني. مع ألو إيچي، كل المكالمات بيترد عليها في نفس اللحظة." },
-                { title: "وفّر في المرتبات", desc: "موظف التليفونات بيكلّفك ٥,٠٠٠ جنيه أو أكتر في الشهر، وبيشتغل ٨ ساعات بس. ألو إيچي شغال ٢٤ ساعة بتكلفة أقل وأداء أعلى." },
-                { title: "بيتكلم مصري صميم", desc: "مش روبوت بيتكلم فصحى. ده وكيل ذكي بيتكلم مصري ابن بلد، الزبون مش هيفرق إنه بيكلم ذكاء اصطناعي." },
-              ].map((item) => (
-                <Card key={item.title} className="border-border/60 bg-card">
-                  <CardContent className="p-6">
-                    <h4 className="font-heading font-semibold text-foreground mb-2">{item.title}</h4>
-                    <p className="text-sm text-muted-foreground leading-relaxed">{item.desc}</p>
-                  </CardContent>
-                </Card>
+            <div className="text-center mb-10">
+              <div className="eyebrow mb-3">FAQ</div>
+              <h2 className="text-section text-foreground">{t("pricing.faqTitle")}</h2>
+            </div>
+            <motion.div
+              initial="hidden"
+              whileInView="visible"
+              viewport={{ once: true, margin: "-60px" }}
+              variants={{
+                hidden: {},
+                visible: { transition: { staggerChildren: 0.07 } },
+              }}
+              className="grid gap-4 md:grid-cols-2"
+            >
+              {FAQ_KEYS.map((key) => (
+                <motion.div
+                  key={key}
+                  variants={fadeUpItem}
+                  whileHover={{ y: -3 }}
+                  transition={{ duration: 0.25, ease: easeSmooth }}
+                  className="rounded-2xl border border-border/60 bg-card p-6 transition-all duration-400 ease-smooth hover:shadow-elevated hover:border-primary/30"
+                >
+                  <h4 className="mb-2 text-card-title text-foreground">
+                    {t(`pricing.faqs.${key}.title`)}
+                  </h4>
+                  <p className="text-body-card text-muted-foreground">
+                    {t(`pricing.faqs.${key}.desc`)}
+                  </p>
+                </motion.div>
               ))}
+            </motion.div>
+            <div className="mt-12 text-center">
+              <Link to="/#contact">
+                <Button
+                  size="lg"
+                  className="group h-12 gap-2 rounded-xl bg-primary px-8 text-sm font-semibold text-primary-foreground shadow-brand transition-all duration-250 ease-smooth hover:bg-primary/90 hover:shadow-elevated hover:-translate-y-0.5"
+                >
+                  {t("pricing.contactSales")}
+                  <ArrowIcon
+                    size={16}
+                    className="transition-transform duration-250 ease-smooth group-hover:translate-x-0.5"
+                  />
+                </Button>
+              </Link>
             </div>
           </motion.div>
         </div>

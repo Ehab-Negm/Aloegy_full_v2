@@ -10,8 +10,8 @@ One `Agent` class, one persona prompt, one live state snapshot per turn.
 
 ```
 ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌────────────────────┐   ┌──────────┐
-│  Caller  │──▶│  Soniox  │──▶│ GPT-4.1  │──▶│ Cloud TTS          │──▶│  Caller  │
-│          │   │   STT    │   │   mini   │   │ (Chirp3-HD-Sulafat)│   │          │
+│  Caller  │──▶│  Soniox  │──▶│  Groq    │──▶│ Cloud TTS          │──▶│  Caller  │
+│          │   │   STT    │   │Llama 70B │   │ (Chirp3-HD-Sulafat)│   │          │
 └──────────┘   └──────────┘   └──────────┘   └────────────────────┘   └──────────┘
                                     │
                                     ▼  function tools
@@ -63,25 +63,28 @@ SESSION_STT_MODEL=stt-rt-v4
 SESSION_STT_LANGUAGE=ar
 SESSION_STT_LANGUAGE_HINTS_STRICT=true
 
-# ── LLM (OpenAI) ────────────────────────────────────────────────────
-OPENAI_API_KEY=...
-SESSION_LLM_MODEL=gpt-4.1-mini
+# ── LLM (low-latency Groq profile) ──────────────────────────────────
+GROQ_API_KEY=...
+SESSION_LLM_MODEL=groq/llama-3.3-70b-versatile
 SESSION_LLM_TEMPERATURE=0.25
-SESSION_LLM_MAX_COMPLETION_TOKENS=200
+SESSION_LLM_MAX_COMPLETION_TOKENS=64
 
 # ── TTS (Google Cloud, Chirp3-HD) ───────────────────────────────────
 # Auth via service-account JSON. Same JSON works for both
 # Vertex AI (Gemini fallback) and Cloud TTS streaming.
 GOOGLE_APPLICATION_CREDENTIALS=/abs/path/to/service-account.json
-SESSION_TTS_MODEL=cloud-tts/chirp3-hd
-SESSION_TTS_VOICE=ar-XA-Chirp3-HD-Sulafat
-SESSION_TTS_LANGUAGE=ar-XA
+SESSION_TTS_MODEL=gemini-3.1-flash-tts-preview
+SESSION_TTS_VOICE=Leda
+SESSION_TTS_LANGUAGE=ar-EG
+SESSION_TTS_LOCATION=global
 
 # ── Endpointing (tuned for Egyptian Arabic conversational pauses) ──
-MIN_ENDPOINTING_DELAY_SECONDS=0.5
-MAX_ENDPOINTING_DELAY_SECONDS=1.2
+TARGET_E2E_FIRST_AUDIO_MS=1000
+MIN_ENDPOINTING_DELAY_SECONDS=0.12
+MAX_ENDPOINTING_DELAY_SECONDS=0.35
 MIN_INTERRUPTION_DURATION_SECONDS=0.5
-FALSE_INTERRUPTION_TIMEOUT_SECONDS=1.0
+FALSE_INTERRUPTION_TIMEOUT_SECONDS=0.25
+AEC_WARMUP_DURATION_SECONDS=0.8
 USER_AWAY_TIMEOUT_SECONDS=9.0
 
 # ── Inactivity / no-speech ──────────────────────────────────────────
@@ -116,8 +119,62 @@ AGENT_HEALTH_PORT=8082
 ### Alternate TTS providers
 Set `SESSION_TTS_MODEL` to switch — same env, no code changes:
 - `hamsa/tts-realtime` + `SESSION_TTS_VOICE=Nermin` — fastest (~350ms TTFB)
-- `gemini-3.1-flash-tts-preview` + `SESSION_TTS_VOICE=Sulafat` — non-streaming, ~1.5-6s TTFB
+- `gemini-3.1-flash-tts-preview` + `SESSION_TTS_VOICE=Leda` — Cloud TTS native streaming
 - `xai/...` — see `xai_tts.py`
+
+### Realtime (speech-to-speech) mode
+
+Set `SESSION_REALTIME_MODEL=gemini-3.1-flash-live-preview` to switch from the
+classic STT + LLM + TTS pipeline to the unified Gemini Live model. The model
+owns audio in, dialogue, tool calls, and audio out in one bidirectional
+WebSocket session. STT/LLM/TTS env vars are ignored in this mode.
+
+```env
+SESSION_REALTIME_MODEL=gemini-3.1-flash-live-preview
+SESSION_REALTIME_VOICE=Puck            # Puck | Charon | Kore | Fenrir | Aoede | Leda | Orus | Zephyr
+SESSION_REALTIME_LANGUAGE=ar-EG
+SESSION_REALTIME_TEMPERATURE=0.6
+# Auth: either GOOGLE_API_KEY (default) ...
+GOOGLE_API_KEY=...
+# ... or Vertex AI:
+SESSION_REALTIME_USE_VERTEX=true
+GOOGLE_APPLICATION_CREDENTIALS=/abs/path/to/service-account.json
+GOOGLE_CLOUD_PROJECT=your-project
+GOOGLE_CLOUD_LOCATION=us-central1
+```
+
+Limitations on Gemini 3.1 Live (and how the agent runs under them):
+
+- **Tool calls are synchronous only.** The model pauses while a tool is running.
+- **`update_instructions()` is ignored.** The persona is set once at session
+  start; per-turn state goes into the user message itself via
+  `RestaurantAgent._embed_state_in_user_msg`, not via a system message update.
+- **`update_chat_ctx()` is ignored.** History trimming is a local no-op in
+  realtime mode; the realtime model maintains its own context internally.
+- **`generate_reply()` is ignored.** The model is reactive-only — it cannot
+  start the call with a greeting or speak any deterministic phrase by itself.
+
+Because of those rejections, when `SESSION_REALTIME_MODEL` is set the agent
+runs in **pure realtime mode**:
+
+- `llm = google.realtime.RealtimeModel(...)` is the entire audio pipeline —
+  audio in, turn detection, tool calls, audio out, all on one bidirectional
+  WebSocket session.
+- **No standalone STT, LLM, or TTS is built.** Mixing a side TTS into the
+  same session caused audio echo (the realtime model heard its own TTS
+  opening as user speech and called tools unprompted), so we removed it.
+- Deterministic phrases — opening line, corrective replies, inactivity
+  reprompt, end-call farewell — are **silently skipped** in realtime mode
+  (`_speak()` and `say_safe()` are no-ops when there is no TTS). The model
+  handles all dialogue itself based on the persona prompt.
+
+UX implication: the customer hears silence at call start until they speak
+first. The model greets them when they say "ألو" or anything else —
+matching how Egyptian phone calls naturally work (caller speaks first).
+
+If you need a proactive opening line, switch to a realtime model that
+supports `generate_reply` (e.g. `gemini-2.5-flash-native-audio-preview-12-2025`)
+— `say_safe()` will start working again on those models.
 
 ## Run
 
@@ -247,11 +304,11 @@ Pass `restaurant_id` in the LiveKit room metadata. The agent reads it and forwar
 ## Latency budget (warm)
 
 ```
-EOU detect       ~750-800ms   (Soniox + LiveKit endpointing)
-LLM TTFT         ~700-1500ms  (gpt-4.1-mini, prompt ~2k tokens)
-TTS TTFB           400-500ms  (Cloud TTS Chirp3-HD streaming)
+EOU detect       ~120-500ms   (LiveKit endpointing + Soniox minimum endpoint)
+LLM TTFT         ~500-900ms   (warmed Groq Llama 3.3 70B probe)
+TTS TTFB           320-500ms  (streaming TTS)
 ─────────────────────────
-user → first audio ~2.0-2.8s  perceived
+user → first audio ~1.1-2.0s  for full LLM turns; deterministic turns can be lower
 ```
 
 If the agent reply spans multiple sentences, LiveKit's audio pipeline plays the first

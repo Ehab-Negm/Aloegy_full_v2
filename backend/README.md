@@ -28,9 +28,14 @@ BACKEND_API_KEY=mock_secret_key
 LIVEKIT_URL=wss://your-project.livekit.cloud
 LIVEKIT_API_KEY=your_livekit_api_key
 LIVEKIT_API_SECRET=your_livekit_api_secret
-CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
 DEMO_RESTAURANT_ID=demo-restaurant
 ```
+
+For `APP_ENV=prod`, set real values for `JWT_SECRET`, `BACKEND_API_KEY`, and
+the core `BIRD_*` WhatsApp keys in `backend/.env` or the process environment.
+The backend intentionally refuses to start in prod with missing/placeholder
+credentials.
 
 ## What it serves
 

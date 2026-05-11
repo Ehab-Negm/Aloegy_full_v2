@@ -1,0 +1,19 @@
+[Unit]
+Description=LiveKit SIP Gateway (AloEgy)
+After=network.target livekit.service redis-server.service
+Requires=livekit.service
+
+[Service]
+Type=simple
+User=root
+# LIVEKIT_API_SECRET is read by livekit-sip directly; PUBLIC_IP is
+# substituted into /etc/livekit/sip.yaml's nat_external_ip. Both come
+# from /etc/livekit/sip.env (NOT in git — created at install time).
+EnvironmentFile=/etc/livekit/sip.env
+ExecStart=/usr/local/bin/livekit-sip --config /etc/livekit/sip.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,7 @@
 # Environment variables
 .env
+agent/.env
+backend/.env
 
 # Google Cloud service account keys — never commit these
 *-gcp-key.json

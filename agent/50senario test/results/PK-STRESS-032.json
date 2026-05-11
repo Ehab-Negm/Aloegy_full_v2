@@ -1,0 +1,162 @@
+{
+  "scenario_id": "PK-STRESS-032",
+  "title": "Caller asks to remove item after confirmation",
+  "category": "stress",
+  "passed": true,
+  "scores": {
+    "routing": 5,
+    "entity_capture": 5,
+    "state_memory": 5,
+    "clarification_quality": 4,
+    "tone_and_empathy": 4,
+    "no_hallucination": 5,
+    "finalization_safety": 5
+  },
+  "critical_failures": [],
+  "agent_mistakes": [],
+  "missing_fields": [],
+  "hallucinations": [],
+  "final_state_captured_by_agent": {
+    "intent": "delivery",
+    "customer_name": "شادي",
+    "order": [
+      "بيتزا بيبروني لارج"
+    ],
+    "order_total": 220.0,
+    "order_total_history": [
+      265.0,
+      220.0
+    ],
+    "order_validated": true,
+    "order_confirmed": false,
+    "order_id": "",
+    "delivery_address": "",
+    "delivery_landmark": "",
+    "reservation_time": "",
+    "guests_count": null,
+    "selected_branch": "",
+    "complaint_text": "",
+    "complaint_type": "",
+    "complaint_logged": false,
+    "reservation_confirmed": false,
+    "reservation_id": "",
+    "end_call_requested": false,
+    "end_call_reason": ""
+  },
+  "recommended_fix": "no fix required at this severity",
+  "harness_error": null,
+  "trace": [
+    {
+      "role": "agent",
+      "text": "أهلاً بيك! معاك ليلي من بيتزا كينج، أقدر أساعدك في إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "أكد أوردر بيبروني لارج وبطاطس.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الطلب اتسجل: بيتزا بيبروني لارج, بطاطس (إجمالي: 265 جنيه).",
+      "tool_name": "update_order",
+      "tool_args": {
+        "items": [
+          {
+            "name": "بيتزا بيبروني لارج"
+          },
+          {
+            "name": "بطاطس"
+          }
+        ]
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، عندك بيتزا بيبروني لارج مع بطاطس، الإجمالي 265 جنيه. تحب توصيل ولا تيك أواي؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "لا ثانية، شيل البطاطس.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الطلب اتمسح. اسأل العميل عايز يطلب إيه.",
+      "tool_name": "clear_order",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "ماشي يا فندم، شلت البطاطس. تحب تأكد طلب بيتزا بيبروني لارج بس؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "لا خلاص أكد من غير بطاطس.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الطلب اتسجل: بيتزا بيبروني لارج (إجمالي: 220 جنيه).",
+      "tool_name": "update_order",
+      "tool_args": {
+        "items": [
+          {
+            "name": "بيتزا بيبروني لارج"
+          }
+        ]
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، طلبك بيتزا بيبروني لارج بس، الإجمالي 220 جنيه. توصيل ولا تيك أواي؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "العنوان شارع 9، الاسم شادي، الرقم 01057575757.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الاسم اتسجل: شادي",
+      "tool_name": "set_name",
+      "tool_args": {
+        "name": "شادي"
+      }
+    },
+    {
+      "role": "tool",
+      "text": "العنوان خارج نطاق التوصيل عندنا. التوصيل متاح في المعادي، المعادي الجديدة، زهراء المعادي، دجلة المعادي، كورنيش المعادي، ثكنات المعادي. اعتذر للعميل واعرض عليه الاستلام من الفرع.",
+      "tool_name": "set_delivery_info",
+      "tool_args": {
+        "address": "شارع 9",
+        "landmark": ""
+      }
+    },
+    {
+      "role": "tool",
+      "text": "النية اتسجلت: delivery. كمّل عادي وشوف ناقص إيه.",
+      "tool_name": "set_intent",
+      "tool_args": {
+        "intent": "delivery"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا شادي، للأسف عنوان شارع 9 مش من مناطق التوصيل عندنا. ممكن تستلم الطلب من أي فرع من فروعنا في المعادي؟",
+      "tool_name": "",
+      "tool_args": {}
+    }
+  ]
+}

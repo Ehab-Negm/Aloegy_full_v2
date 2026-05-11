@@ -1,0 +1,95 @@
+{
+  "scenario_id": "PK-GREEN-010",
+  "title": "Ask opening hours then end",
+  "category": "green",
+  "passed": true,
+  "scores": {
+    "routing": 5,
+    "entity_capture": 5,
+    "state_memory": 5,
+    "clarification_quality": 3,
+    "tone_and_empathy": 4,
+    "no_hallucination": 5,
+    "finalization_safety": 5
+  },
+  "critical_failures": [],
+  "agent_mistakes": [],
+  "missing_fields": [],
+  "hallucinations": [],
+  "final_state_captured_by_agent": {
+    "intent": "",
+    "customer_name": "",
+    "order": [],
+    "order_total": 0.0,
+    "order_total_history": [],
+    "order_validated": false,
+    "order_confirmed": false,
+    "order_id": "",
+    "delivery_address": "",
+    "delivery_landmark": "",
+    "reservation_time": "",
+    "guests_count": null,
+    "selected_branch": "",
+    "complaint_text": "",
+    "complaint_type": "",
+    "complaint_logged": false,
+    "reservation_confirmed": false,
+    "reservation_id": "",
+    "end_call_requested": true,
+    "end_call_reason": "customer_done"
+  },
+  "recommended_fix": "no fix required at this severity",
+  "harness_error": null,
+  "trace": [
+    {
+      "role": "agent",
+      "text": "أهلاً بيك! معاك ليلي من بيتزا كينج، أقدر أساعدك في إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "هو الفرع شغال لحد الساعة كام؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، فروعنا شغالة من 12 الظهر لحد 2 الفجر في أيام السبت للأربع، والخميس والجمعة لحد 3 الفجر. تحب تعرف مواعيد فرع معين؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "تمام شكراً، مش هطلب دلوقتي.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "حاضر يا فندم، لو احتجت أي حاجة في أي وقت أنا موجودة. يومك سعيد!",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "سلام.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "تم قول جملة الوداع للعميل، والمكالمة هتقفل بعد ما الصوت يخلص.",
+      "tool_name": "end_call",
+      "tool_args": {
+        "reason": "customer_done"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "سلام يا فندم، في أمان الله!",
+      "tool_name": "",
+      "tool_args": {}
+    }
+  ]
+}

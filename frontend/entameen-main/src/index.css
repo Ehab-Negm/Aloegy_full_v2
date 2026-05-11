@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&family=Tajawal:wght@300;400;500;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800;900&family=Tajawal:wght@300;400;500;700;800;900&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -96,16 +96,33 @@
     @apply border-border;
   }
 
-  html {
-    direction: rtl;
-  }
-
   body {
-    @apply bg-background text-foreground font-body antialiased;
+    @apply bg-background text-foreground antialiased;
   }
 
-  h1, h2, h3, h4, h5, h6 {
+  /* Direction + script switch by html[lang] (set by useLanguageDirection). */
+  html[lang="ar"] body {
+    font-family: 'Tajawal', sans-serif;
+  }
+  html[lang="ar"] h1,
+  html[lang="ar"] h2,
+  html[lang="ar"] h3,
+  html[lang="ar"] h4,
+  html[lang="ar"] h5,
+  html[lang="ar"] h6 {
     font-family: 'Cairo', sans-serif;
+  }
+
+  html[lang="en"] body {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  html[lang="en"] h1,
+  html[lang="en"] h2,
+  html[lang="en"] h3,
+  html[lang="en"] h4,
+  html[lang="en"] h5,
+  html[lang="en"] h6 {
+    font-family: 'Inter', sans-serif;
   }
 }
 
@@ -144,7 +161,7 @@
   .shadow-elevated {
     box-shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.12);
   }
-  /* Keep old class names as aliases */
+  /* Aliases kept for older components */
   .gradient-gold {
     background: linear-gradient(135deg, hsl(224, 82%, 51%), hsl(224, 75%, 62%));
   }
@@ -156,5 +173,8 @@
   }
   .shadow-gold {
     box-shadow: 0 8px 32px -8px hsla(224, 82%, 51%, 0.2);
+  }
+  .no-tap-highlight {
+    -webkit-tap-highlight-color: transparent;
   }
 }

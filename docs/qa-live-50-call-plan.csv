@@ -1,0 +1,51 @@
+planned_call,scenarios,customer_prompt,expected_outcome,review_notes
+1,takeaway,Order one pizza for pickup and give name when asked,takeaway confirmed,Audio natural and no repeated captured slot
+2,takeaway,Order two menu items for pickup in one sentence,takeaway confirmed,First audio under target
+3,takeaway;change_order,Order pizza then change to cola before confirmation,takeaway confirmed with changed order,No duplicate submit
+4,takeaway;cancel_order,Start pickup order then cancel before confirmation,call ended cleanly,No backend order confirmed
+5,takeaway;interruption,Interrupt assistant while it is asking for name,takeaway confirmed,Assistant recovers without repeating known info
+6,takeaway;noisy_stt,Place pickup order with background noise,takeaway confirmed,Transcript understandable
+7,takeaway,no matching item then choose available item,takeaway confirmed,Unavailable item handled clearly
+8,takeaway,Give name before order then order pickup,takeaway confirmed,Name not asked again
+9,takeaway,Ask menu question then place pickup order,takeaway confirmed,Menu answer concise
+10,takeaway,Confirm order then ask for estimated wait,order confirmed and wait answered,No second confirmation loop
+11,delivery,Order delivery and provide address and name,delivery confirmed,Address not asked again
+12,delivery,Give delivery address before items then order,delivery confirmed,Address retained
+13,delivery;change_order,Order delivery then add extra item before confirmation,delivery confirmed with changed order,Total recalculated
+14,delivery;cancel_order,Start delivery then cancel before confirmation,call ended cleanly,No order submitted
+15,delivery;interruption,Interrupt during address question with full address,delivery confirmed,No repeated address ask
+16,delivery;noisy_stt,Delivery call with noisy address spelling,delivery confirmed,Address captured acceptably
+17,delivery,Ask delivery zone then order delivery,delivery confirmed or zone explained,Response concise
+18,delivery,Try delivery below minimum order then add item,delivery confirmed,Minimum order handled
+19,delivery,Give landmark after address,delivery confirmed,Landmark optional and retained
+20,delivery,Ask delivery fee then place delivery order,delivery confirmed,Fee included if configured
+21,reservation,Book table for four tomorrow 8 pm,reservation confirmed,Time and guests captured
+22,reservation,Give name first then reservation details,reservation confirmed,Name not asked again
+23,reservation;change_order,Book for two then change to five,reservation confirmed with five guests,Guest count updated
+24,reservation;cancel_order,Start reservation then cancel,reservation cancelled cleanly,No reservation submitted
+25,reservation;interruption,Interrupt during time question with full booking details,reservation confirmed,No repeated time ask
+26,reservation;noisy_stt,Reservation call with background noise,reservation confirmed,Transcript review passes
+27,reservation,Ask branch options then book,reservation confirmed,Branch requirement handled
+28,reservation,Attempt too many guests then reduce count,reservation confirmed,Capacity rule handled
+29,reservation,Ask opening hours then book,reservation confirmed,Hours answer concise
+30,reservation,Complete reservation then say thank you,call ended cleanly,No unnecessary extra question
+31,complaint,Report cold food complaint,complaint logged,Empathetic concise response
+32,complaint,Report late delivery complaint with name,complaint logged,Name retained
+33,complaint;interruption,Interrupt while assistant apologizes with more details,complaint logged,Assistant adapts naturally
+34,complaint;noisy_stt,Complaint with noisy audio,complaint logged,Issue type captured
+35,complaint;cancel_order,Start complaint then say never mind,call ended cleanly,No complaint logged if cancelled
+36,complaint,Ask to speak to manager after complaint,complaint logged,Escalation wording appropriate
+37,complaint,Complaint about wrong item,complaint logged,Wrong item captured
+38,complaint,Complaint then provide order reference if asked,complaint logged,No repeated complaint ask
+39,complaint,Complaint with emotional customer,complaint logged,Human tone accepted
+40,complaint,Complaint then ask for callback expectation,complaint logged,Expectation explained
+41,no_speech,Join call and stay silent until timeout,call ended cleanly,No repeated slot event
+42,no_speech,Speak one word then long silence,call ended or recovered cleanly,No awkward loop
+43,interruption,Interrupt greeting with full takeaway order,takeaway confirmed,Fast recovery
+44,interruption,Interrupt delivery confirmation to correct address,delivery confirmed with corrected address,Old address not used
+45,noisy_stt,Takeaway call from speakerphone noise,takeaway confirmed,No repeated captured slot
+46,noisy_stt,Delivery call with street name repeated by customer,delivery confirmed,Assistant does not ask same captured slot again
+47,backend_failure,Run call while backend order endpoint is unavailable,write queued or graceful fallback,No false confirmation if submit failed
+48,backend_failure,Run complaint while backend complaint endpoint is unavailable,write queued or graceful fallback,No data loss
+49,takeaway;delivery,Start takeaway then switch to delivery,delivery confirmed,Flow switch retains useful info
+50,delivery;takeaway,Start delivery then switch to pickup,takeaway confirmed,Delivery address not forced after switch

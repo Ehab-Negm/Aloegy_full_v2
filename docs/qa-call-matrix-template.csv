@@ -1,0 +1,11 @@
+call_id,scenarios,audio_reviewed,notes
+,takeaway,false,
+,delivery,false,
+,reservation,false,
+,complaint,false,
+,cancel_order,false,
+,change_order,false,
+,no_speech,false,
+,interruption,false,
+,noisy_stt,false,
+,backend_failure,false,

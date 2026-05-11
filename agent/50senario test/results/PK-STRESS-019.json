@@ -1,0 +1,152 @@
+{
+  "scenario_id": "PK-STRESS-019",
+  "title": "Price trap",
+  "category": "stress",
+  "passed": true,
+  "scores": {
+    "routing": 5,
+    "entity_capture": 5,
+    "state_memory": 5,
+    "clarification_quality": 4,
+    "tone_and_empathy": 4,
+    "no_hallucination": 5,
+    "finalization_safety": 5
+  },
+  "critical_failures": [],
+  "agent_mistakes": [],
+  "missing_fields": [],
+  "hallucinations": [],
+  "final_state_captured_by_agent": {
+    "intent": "delivery",
+    "customer_name": "سامح",
+    "order": [
+      "بيتزا بيبروني لارج"
+    ],
+    "order_total": 220.0,
+    "order_total_history": [
+      220.0
+    ],
+    "order_validated": true,
+    "order_confirmed": false,
+    "order_id": "",
+    "delivery_address": "شارع 9 المعادي",
+    "delivery_landmark": "",
+    "reservation_time": "",
+    "guests_count": null,
+    "selected_branch": "",
+    "complaint_text": "",
+    "complaint_type": "",
+    "complaint_logged": false,
+    "reservation_confirmed": false,
+    "reservation_id": "",
+    "end_call_requested": false,
+    "end_call_reason": ""
+  },
+  "recommended_fix": "no fix required at this severity",
+  "harness_error": null,
+  "trace": [
+    {
+      "role": "agent",
+      "text": "أهلاً بيك! معاك ليلي من بيتزا كينج، أقدر أساعدك في إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "عاوز بيتزا بيبروني لارج، هي بـ 120 صح؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الطلب اتسجل: بيتزا بيبروني لارج (إجمالي: 220 جنيه).",
+      "tool_name": "update_order",
+      "tool_args": {
+        "items": [
+          {
+            "name": "بيتزا بيبروني لارج"
+          }
+        ]
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، طلبت بيتزا بيبروني لارج، السعر 220 جنيه. تحب تضيف حاجة تانية؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "أكيد يعني؟ عشان آخر مرة كانت كده.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، السعر 220 جنيه للبيتزا البيبروني لارج عندنا، مش 120. تحب تطلب حاجة تانية؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "طب لو مش عارف السعر قول مش عارف.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "حاضر يا فندم، لو مش عارف السعر هقولك مش عارف. تحب أساعدك بحاجة تانية؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "كمل الأوردر دليفري.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "النية اتسجلت: delivery. كمّل عادي وشوف ناقص إيه.",
+      "tool_name": "set_intent",
+      "tool_args": {
+        "intent": "delivery"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، هكمل معاك الطلب توصيل. ممكن تقول لي عنوان التوصيل؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "العنوان شارع 9 المعادي، الاسم سامح، الرقم 01010101010.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "العنوان اتسجل: شارع 9 المعادي",
+      "tool_name": "set_delivery_info",
+      "tool_args": {
+        "address": "شارع 9 المعادي",
+        "landmark": ""
+      }
+    },
+    {
+      "role": "tool",
+      "text": "الاسم اتسجل: سامح",
+      "tool_name": "set_name",
+      "tool_args": {
+        "name": "سامح"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، سجلت العنوان شارع 9 المعادي والاسم سامح. هل في معلم قريب ممكن تساعدنا نوصل؟",
+      "tool_name": "",
+      "tool_args": {}
+    }
+  ]
+}

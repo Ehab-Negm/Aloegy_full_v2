@@ -32,6 +32,21 @@ DEFAULT_PCM_SAMPLE_RATE = int(os.getenv("HAMSA_DEFAULT_SAMPLE_RATE", "16000"))
 MULAW_SAMPLE_RATE = 8000
 
 
+def _env_float(name: str, default: float, *, min_value: float) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        return max(min_value, float(raw))
+    except ValueError:
+        return default
+
+
+PREWARM_OPEN_TIMEOUT_SECONDS = _env_float(
+    "HAMSA_PREWARM_OPEN_TIMEOUT_SECONDS",
+    2.5,
+    min_value=0.2,
+)
+
+
 def _parse_wav_header(data: bytes) -> tuple[int, int] | None:
     # Returns (sample_rate, header_size) if a valid RIFF/WAVE PCM header is found at start.
     if len(data) < 44 or data[0:4] != b"RIFF" or data[8:12] != b"WAVE":
@@ -132,13 +147,34 @@ class TTS(tts.TTS):
             with contextlib.suppress(Exception):
                 await ws.close()
 
-    async def prewarm(self) -> None:
+    async def _prewarm_async(self) -> None:
         """Open and hold a WS so the first synthesis avoids handshake."""
         async with self._ws_lock:
             try:
-                await self._acquire_ws(open_timeout=5.0)
+                await self._acquire_ws(open_timeout=PREWARM_OPEN_TIMEOUT_SECONDS)
             except Exception as exc:
                 logger.debug("hamsa prewarm failed | %s", exc)
+
+    def prewarm(self) -> None:
+        """LiveKit StreamAdapter calls this synchronously; schedule best-effort warmup."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._prewarm_async())
+
+        def _log_prewarm_failure(done: asyncio.Task[None]) -> None:
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.debug("hamsa prewarm failed | %s", exc)
+
+        task.add_done_callback(_log_prewarm_failure)
+
+    async def warmup(self) -> None:
+        """Awaitable warmup used by the agent startup path."""
+        await self._prewarm_async()
 
     def synthesize(
         self, text: str, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS

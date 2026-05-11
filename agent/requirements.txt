@@ -1,9 +1,16 @@
-livekit-agents==1.4.5
-livekit-plugins-google==1.4.5
-livekit-plugins-soniox==1.4.5
-livekit-plugins-silero==1.4.5
-livekit-plugins-openai==1.4.5
+livekit-agents==1.5.2
+livekit-plugins-google==1.5.2
+livekit-plugins-soniox==1.5.2
+livekit-plugins-silero==1.5.2
+livekit-plugins-openai==1.5.2
 livekit-plugins-noise-cancellation==0.2.5
+# Self-hosted noise cancellation (DTLN). MIT-licensed, runs entirely on CPU,
+# native 16 kHz so SIP audio doesn't need resampling, and adds <1ms latency.
+# Used when SESSION_NOISE_CANCELLATION=dtln (the default on self-hosted —
+# the Cloud-only BVC plugin above silently no-ops without LiveKit Cloud).
+livekit-plugins-dtln>=0.1
+google-cloud-texttospeech>=2.33.0
+google-genai>=1.71.0
 httpx==0.28.1
 websockets>=13.0
 pydantic>=2.8.2

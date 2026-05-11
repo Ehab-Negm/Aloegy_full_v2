@@ -1,0 +1,153 @@
+{
+  "scenario_id": "PK-STRESS-022",
+  "title": "Wrong/short phone number",
+  "category": "stress",
+  "passed": true,
+  "scores": {
+    "routing": 5,
+    "entity_capture": 5,
+    "state_memory": 5,
+    "clarification_quality": 4,
+    "tone_and_empathy": 4,
+    "no_hallucination": 5,
+    "finalization_safety": 5
+  },
+  "critical_failures": [],
+  "agent_mistakes": [],
+  "missing_fields": [],
+  "hallucinations": [],
+  "final_state_captured_by_agent": {
+    "intent": "delivery",
+    "customer_name": "هاني",
+    "order": [
+      "بيتزا بيبروني ميديم"
+    ],
+    "order_total": 170.0,
+    "order_total_history": [
+      170.0
+    ],
+    "order_validated": true,
+    "order_confirmed": false,
+    "order_id": "",
+    "delivery_address": "دجلة المعادي شارع 200",
+    "delivery_landmark": "",
+    "reservation_time": "",
+    "guests_count": null,
+    "selected_branch": "",
+    "complaint_text": "",
+    "complaint_type": "",
+    "complaint_logged": false,
+    "reservation_confirmed": false,
+    "reservation_id": "",
+    "end_call_requested": false,
+    "end_call_reason": ""
+  },
+  "recommended_fix": "no fix required at this severity",
+  "harness_error": null,
+  "trace": [
+    {
+      "role": "agent",
+      "text": "أهلاً بيك! معاك ليلي من بيتزا كينج، أقدر أساعدك في إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "دليفري بيتزا بيبروني.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "النية اتسجلت: delivery. كمّل عادي وشوف ناقص إيه.",
+      "tool_name": "set_intent",
+      "tool_args": {
+        "intent": "delivery"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، عايز بيتزا بيبروني ميديم ولا لارج؟ وكمان ممكن تقول لي عنوان التوصيل؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "الاسم هاني.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الاسم اتسجل: هاني",
+      "tool_name": "set_name",
+      "tool_args": {
+        "name": "هاني"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "حاضر يا هاني، البيتزا بيبروني ميديم ولا لارج؟ وكمان عنوان التوصيل لو سمحت.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "رقمي 12345.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، سجلت اسمك هاني، الرقم مش محتاج. ممكن تقول لي عنوان التوصيل بالشارع والمنطقة؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "آه هو ده الرقم.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "معلش يا فندم، ممكن تقول لي عنوان التوصيل بالشارع والمنطقة؟ عشان نقدر نوصل لك الطلب.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "العنوان دجلة المعادي شارع 200.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "العنوان اتسجل: دجلة المعادي شارع 200",
+      "tool_name": "set_delivery_info",
+      "tool_args": {
+        "address": "دجلة المعادي شارع 200",
+        "landmark": ""
+      }
+    },
+    {
+      "role": "tool",
+      "text": "الطلب اتسجل: بيتزا بيبروني ميديم (إجمالي: 170 جنيه).",
+      "tool_name": "update_order",
+      "tool_args": {
+        "items": [
+          {
+            "name": "بيتزا بيبروني ميديم",
+            "qty": 1
+          }
+        ]
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا هاني، طلبك بيتزا بيبروني ميديم على عنوان دجلة المعادي شارع 200. السعر 170 جنيه. تأكدلي لو كل حاجة صح؟",
+      "tool_name": "",
+      "tool_args": {}
+    }
+  ]
+}

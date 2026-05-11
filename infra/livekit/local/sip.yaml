@@ -1,0 +1,35 @@
+# Local LiveKit-SIP config for Windows/Docker Desktop testing.
+# livekit-sip does NOT do env-var interpolation in YAML, so values are
+# hardcoded. Update PUBLIC_IP and the api_secret if you regenerate them.
+
+api_key: devkey
+api_secret: 1c4edda63807bc8dd223268255ada00eb474143e9832009aa786dac72bbf644f
+ws_url: ws://livekit-server:7880
+
+# livekit-sip requires Redis for participant + trunk state.
+redis:
+  address: redis:6379
+
+sip_port: 5060
+
+rtp_port: "10000-10100"
+
+# Force SDP to advertise the Windows ZeroTier IP that Issabel can reach.
+# Both flags must be FALSE so STUN auto-detection (which would return
+# the host's LAN IP — unreachable from Issabel's ZeroTier vantage) is
+# disabled, and our explicit override wins.
+#
+# Current ZeroTier topology:
+#   Windows / LiveKit-SIP: 10.48.171.157
+#   Issabel / Asterisk:    10.48.171.77
+use_external_ip: false
+media_use_external_ip: false
+nat_1_to_1_ip: 10.48.171.157
+media_nat_1_to_1_ip: 10.48.171.157
+
+# Tear down callers that don't get a 200 OK within 8s.
+invite_timeout: 8s
+
+logging:
+  level: info
+  json: false

@@ -135,7 +135,7 @@ APP_ENV=dev
 BACKEND_HOST=0.0.0.0
 BACKEND_PORT=8000
 BACKEND_API_KEY=your_secret_key
-CORS_ORIGINS=http://localhost:8080
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 DATABASE_URL=postgresql://user:pass@host:port/db
 ```
 
@@ -159,11 +159,11 @@ python backend/main.py
 # → http://127.0.0.1:8000
 
 # Terminal 2 — Voice Agent (optional)
-cd agent && python agent.py dev
+cd agent && python main.py start
 
 # Terminal 3 — Frontend
-cd frontend/entameen-main && npm run dev
-# → http://localhost:8080
+cd frontend/entameen-main && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
+# → http://127.0.0.1:5173
 ```
 
 ### 4. Test Login

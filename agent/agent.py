@@ -72,6 +72,9 @@ from backend.client import (
 from utils.money import _int_to_ar, money2ar, num2ar, phone2ar
 from utils.voice import _voice_safe_text
 
+AGENT_DIR = Path(__file__).resolve().parent
+load_dotenv(AGENT_DIR / ".env")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,6 +91,35 @@ _WORKER_HEALTH_SNAPSHOT_LOCK = threading.Lock()
 # Separate logger so it can be routed to a different handler (file, stdout, etc.)
 _telemetry_logger = logging.getLogger("restaurant.telemetry")
 _TELEMETRY_ENABLED = os.getenv("TELEMETRY_ENABLED", "true").lower() in {"1", "true", "yes"}
+_TELEMETRY_LOG_PATH = os.getenv("TELEMETRY_LOG_PATH", "").strip()
+QA_TRANSCRIPT_EVENTS_ENABLED = os.getenv("QA_TRANSCRIPT_EVENTS_ENABLED", "false").lower() in {"1", "true", "yes"}
+if _TELEMETRY_ENABLED:
+    _telemetry_logger.setLevel(logging.INFO)
+
+
+def _setup_telemetry_file_logging() -> None:
+    if not _TELEMETRY_ENABLED or not _TELEMETRY_LOG_PATH:
+        return
+    try:
+        telemetry_path = Path(_TELEMETRY_LOG_PATH)
+        if not telemetry_path.is_absolute():
+            telemetry_path = Path(__file__).resolve().parent / telemetry_path
+        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved = str(telemetry_path.resolve())
+        for handler in _telemetry_logger.handlers:
+            if isinstance(handler, logging.FileHandler) and handler.baseFilename == resolved:
+                return
+        handler = logging.FileHandler(resolved, encoding="utf-8")
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        _telemetry_logger.addHandler(handler)
+        _telemetry_logger.setLevel(logging.INFO)
+        logger.info("telemetry JSONL file enabled | path=%s", resolved)
+    except Exception as exc:
+        logger.warning("telemetry JSONL file setup failed | path=%s | %s", _TELEMETRY_LOG_PATH, exc)
+
+
+_setup_telemetry_file_logging()
 
 
 def _emit_event(event: str, *, call_id: str = "", flow: str = "", **kwargs: Any) -> None:
@@ -103,13 +135,43 @@ def _emit_event(event: str, *, call_id: str = "", flow: str = "", **kwargs: Any)
         payload["flow"] = flow
     payload.update(kwargs)
     _telemetry_logger.info(_json.dumps(payload, ensure_ascii=False))
+
+
+def _redact_qa_transcript_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return ""
+    digits = _phone_digits_only(cleaned)
+    if len(digits) >= 7 and _is_phone_like_text(cleaned):
+        return "[redacted_phone_like_turn]"
+    return re.sub(r"[\d\u0660-\u0669][\d\u0660-\u0669\s()+\-]{6,}", "[redacted_phone]", cleaned)
+
+
+def _emit_qa_transcript(
+    *,
+    call_id: str,
+    flow: str,
+    role: str,
+    text: str,
+    is_final: bool = True,
+) -> None:
+    if not QA_TRANSCRIPT_EVENTS_ENABLED:
+        return
+    redacted = _redact_qa_transcript_text(text)
+    if not redacted:
+        return
+    _emit_event(
+        "qa.transcript",
+        call_id=call_id,
+        flow=flow,
+        role=role,
+        text=redacted[:500],
+        is_final=is_final,
+    )
 try:
     CAIRO_TZ = ZoneInfo("Africa/Cairo")
 except Exception:
     CAIRO_TZ = timezone(timedelta(hours=2))
-
-AGENT_DIR = Path(__file__).resolve().parent
-
 
 def _get_env_float(name: str, default: float, *, min_value: float | None = None) -> float:
     raw = os.getenv(name)
@@ -162,8 +224,6 @@ def _get_env_bool(name: str, default: bool) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # Env — fail fast
 # ─────────────────────────────────────────────────────────────────────────────
-load_dotenv(AGENT_DIR / ".env")
-
 REQUIRED_ENV_VARS = [
     "LIVEKIT_URL",
     "LIVEKIT_API_KEY",
@@ -180,6 +240,52 @@ BACKEND_BASE   = os.getenv("BACKEND_BASE_URL", "").rstrip("/")
 BACKEND_APIKEY = os.getenv("BACKEND_API_KEY", "")
 APP_ENV = re.sub(r"[^a-z0-9_-]", "", os.getenv("APP_ENV", "dev").strip().lower()) or "dev"
 
+
+def _looks_like_placeholder_secret(value: str) -> bool:
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return True
+    placeholder_values = {
+        "...",
+        "changeme",
+        "change-me",
+        "change-me-in-production",
+        "mock",
+        "mock_secret",
+        "mock_secret_key",
+        "replace_with_your_key",
+        "your-key",
+        "your_api_key",
+    }
+    if normalized in placeholder_values:
+        return True
+    return (
+        "replace" in normalized
+        or normalized.startswith("your_")
+        or normalized.startswith("your-")
+        or normalized.endswith("_here")
+    )
+
+
+def _validate_production_env() -> None:
+    if APP_ENV != "prod":
+        return
+    invalid: list[str] = []
+    if _looks_like_placeholder_secret(BACKEND_APIKEY):
+        invalid.append("BACKEND_API_KEY")
+    if _looks_like_placeholder_secret(os.getenv("LIVEKIT_API_KEY", "")):
+        invalid.append("LIVEKIT_API_KEY")
+    if _looks_like_placeholder_secret(os.getenv("LIVEKIT_API_SECRET", "")):
+        invalid.append("LIVEKIT_API_SECRET")
+    if invalid:
+        raise RuntimeError(
+            "FATAL: placeholder production secrets are not allowed: "
+            + ", ".join(sorted(invalid))
+        )
+
+
+_validate_production_env()
+
 HTTP_TIMEOUT_SECONDS         = _get_env_float("HTTP_TIMEOUT_SECONDS", 3.5, min_value=0.05)
 HTTP_CONNECT_TIMEOUT_SECONDS = _get_env_float("HTTP_CONNECT_TIMEOUT_SECONDS", 1.0, min_value=0.05)
 HTTP_READ_TIMEOUT_SECONDS    = _get_env_float("HTTP_READ_TIMEOUT_SECONDS", 3.0, min_value=0.05)
@@ -188,51 +294,96 @@ BACKEND_MAX_RETRIES          = _get_env_int("BACKEND_MAX_RETRIES", 2, min_value=
 BACKEND_RETRY_BASE_SECONDS   = _get_env_float("BACKEND_RETRY_BASE_SECONDS", 0.2, min_value=0.01)
 CONFIG_FETCH_RETRIES         = _get_env_int("CONFIG_FETCH_RETRIES", 2, min_value=1)
 CONFIG_FETCH_BACKOFF_SECONDS = _get_env_float("CONFIG_FETCH_BACKOFF_SECONDS", 0.15, min_value=0.01)
-CONFIG_FETCH_TOTAL_BUDGET_SECONDS = _get_env_float("CONFIG_FETCH_TOTAL_BUDGET_SECONDS", 0.6, min_value=0.1)
-CONFIG_REFRESH_INTERVAL_SECONDS  = _get_env_float("CONFIG_REFRESH_INTERVAL_SECONDS", 300.0, min_value=30.0)
-MAX_CONCURRENT_SESSIONS          = _get_env_int("MAX_CONCURRENT_SESSIONS", 100, min_value=1)
-MAX_TURNS_PER_SESSION            = _get_env_int("MAX_TURNS_PER_SESSION", 50, min_value=10)
-TURN_CAP_WARNING_TURNS           = _get_env_int("TURN_CAP_WARNING_TURNS", 5, min_value=1)
-TURN_CAP_GRACE_TURNS             = _get_env_int("TURN_CAP_GRACE_TURNS", 3, min_value=0)
+CONFIG_FETCH_TOTAL_BUDGET_SECONDS = _get_env_float("CONFIG_FETCH_TOTAL_BUDGET_SECONDS", 1.5, min_value=0.1)
+CONFIG_REFRESH_INTERVAL_SECONDS   = _get_env_float("CONFIG_REFRESH_INTERVAL_SECONDS", 300.0, min_value=30.0)
+MAX_CONCURRENT_SESSIONS           = _get_env_int("MAX_CONCURRENT_SESSIONS", 100, min_value=1)
+MAX_TURNS_PER_SESSION             = _get_env_int("MAX_TURNS_PER_SESSION", 50, min_value=10)
+TURN_CAP_WARNING_TURNS            = _get_env_int("TURN_CAP_WARNING_TURNS", 5, min_value=1)
+TURN_CAP_GRACE_TURNS              = _get_env_int("TURN_CAP_GRACE_TURNS", 3, min_value=0)
 PROMPT_HISTORY_ITEMS         = _get_env_int("PROMPT_HISTORY_ITEMS", 2, min_value=2)
 TURN_CHAT_CTX_MAX_ITEMS      = _get_env_int("TURN_CHAT_CTX_MAX_ITEMS", 10, min_value=8)
 MAX_TOOL_STEPS               = _get_env_int("MAX_TOOL_STEPS", 4, min_value=2)
-MIN_INTERRUPTION_DURATION_SECONDS = _get_env_float("MIN_INTERRUPTION_DURATION_SECONDS", 0.35, min_value=0.0)
+# Interruption guard: a real Egyptian customer "ألو" / "آه" filler should
+# NOT cut off the agent's reply mid-sentence. 0.55s requires a sustained
+# utterance before VAD treats it as a barge-in, which cured the truncated-
+# response problem (agent gets cut off after 1-2 words because the customer
+# made a brief noise).
+MIN_INTERRUPTION_DURATION_SECONDS = _get_env_float("MIN_INTERRUPTION_DURATION_SECONDS", 0.55, min_value=0.0)
 # Endpointing tuned for Egyptian Arabic on real calls: customers pause
 # mid-sentence (e.g. "أنا هاخدها من المطعم... بس..."), and a 0.2s min
 # delay made the agent jump in on the partial transcript before the
-# customer finished. 0.5s/1.2s gives them room to breathe without
-# making the agent feel sluggish.
-MIN_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MIN_ENDPOINTING_DELAY_SECONDS", 0.5, min_value=0.05)
-MAX_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MAX_ENDPOINTING_DELAY_SECONDS", 1.2, min_value=0.1)
-FALSE_INTERRUPTION_TIMEOUT_SECONDS = _get_env_float("FALSE_INTERRUPTION_TIMEOUT_SECONDS", 0.8, min_value=0.1)
+# customer finished. The market profile is intentionally aggressive; common
+# Egyptian restaurant turns are short, and long endpointing delays are more
+# damaging than an occasional clarification.
+# Endpointing windows: how long to wait for the customer to finish speaking
+# before the model takes its turn. Arabic phrasing tends to have brief
+# mid-sentence pauses ("بيتزا ... وكوكا") which a 0.12s/0.35s window cuts
+# off. 0.30s min / 0.85s max gives natural breathers without making the
+# customer feel ignored. Tune via env if needed.
+MIN_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MIN_ENDPOINTING_DELAY_SECONDS", 0.30, min_value=0.05)
+MAX_ENDPOINTING_DELAY_SECONDS     = _get_env_float("MAX_ENDPOINTING_DELAY_SECONDS", 0.85, min_value=0.1)
+# If the model paused because of a noise spike (chan_dongle comfort noise,
+# breath, brief "آه" filler) and no full speech followed within this
+# window, resume the cut-off reply instead of staying silent.
+FALSE_INTERRUPTION_TIMEOUT_SECONDS = _get_env_float("FALSE_INTERRUPTION_TIMEOUT_SECONDS", 0.6, min_value=0.1)
+AEC_WARMUP_DURATION_SECONDS       = _get_env_float("AEC_WARMUP_DURATION_SECONDS", 0.8, min_value=0.0)
+TTS_WARMUP_JOIN_TIMEOUT_SECONDS   = _get_env_float("TTS_WARMUP_JOIN_TIMEOUT_SECONDS", 0.6, min_value=0.0)
+TTS_WARMUP_PROVIDER_TIMEOUT_SECONDS = _get_env_float("TTS_WARMUP_PROVIDER_TIMEOUT_SECONDS", 2.0, min_value=0.2)
 USER_AWAY_TIMEOUT_SECONDS         = _get_env_float("USER_AWAY_TIMEOUT_SECONDS", 9.0, min_value=0.5)
 NO_SPEECH_PROMPT_SECONDS          = _get_env_float("NO_SPEECH_PROMPT_SECONDS", 12.0, min_value=1.0)
 NO_SPEECH_CLOSE_SECONDS           = _get_env_float("NO_SPEECH_CLOSE_SECONDS", 28.0, min_value=2.0)
 NO_SPEECH_REPROMPT_LIMIT          = _get_env_int("NO_SPEECH_REPROMPT_LIMIT", 2, min_value=1)
 NO_SPEECH_REPROMPT_GAP_SECONDS    = _get_env_float("NO_SPEECH_REPROMPT_GAP_SECONDS", 8.0, min_value=0.5)
-SESSION_TTS_MODEL            = os.getenv("SESSION_TTS_MODEL", "hamsa/tts-realtime")
-SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "Nermin")
-SESSION_TTS_LANGUAGE         = os.getenv("SESSION_TTS_LANGUAGE", "ar")
+SESSION_TTS_MODEL            = os.getenv("SESSION_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+SESSION_TTS_VOICE            = os.getenv("SESSION_TTS_VOICE", "Leda")
+SESSION_TTS_LANGUAGE         = os.getenv("SESSION_TTS_LANGUAGE", "ar-EG")
 SESSION_TTS_DIALECT          = os.getenv("SESSION_TTS_DIALECT", "egy")
 SESSION_TTS_MULAW            = _get_env_bool("SESSION_TTS_MULAW", False)
 SESSION_TTS_STREAMING_ENABLED = _get_env_bool("SESSION_TTS_STREAMING_ENABLED", True)
 SESSION_TTS_STREAM_PACING    = _get_env_bool("SESSION_TTS_STREAM_PACING", False)
+# ── Realtime (speech-to-speech) mode ────────────────────────────────
+# When SESSION_REALTIME_MODEL is set, the AgentSession is built with a single
+# `livekit.plugins.google.realtime.RealtimeModel` and skips separate STT/TTS.
+# Gemini 3.1 Flash Live handles audio in + audio out + tool calls in one round
+# trip. Tool calls are synchronous-only on 3.1 (the model pauses until each
+# tool result is returned).
+SESSION_REALTIME_MODEL       = os.getenv("SESSION_REALTIME_MODEL", "").strip()
+SESSION_REALTIME_VOICE       = os.getenv("SESSION_REALTIME_VOICE", "Puck").strip() or "Puck"
+SESSION_REALTIME_TEMPERATURE = _get_env_float("SESSION_REALTIME_TEMPERATURE", 0.6, min_value=0.0)
+SESSION_REALTIME_LANGUAGE    = os.getenv("SESSION_REALTIME_LANGUAGE", "ar-EG").strip() or "ar-EG"
+SESSION_REALTIME_USE_VERTEX  = _get_env_bool("SESSION_REALTIME_USE_VERTEX", False)
+
+
+def _realtime_mode_active() -> bool:
+    """True when the unified realtime model should replace STT + LLM + TTS.
+
+    Active when ``SESSION_REALTIME_MODEL`` is set and ``SESSION_REALTIME_ENABLED``
+    is not explicitly disabled. Used at module import time to skip building
+    the classic stack when realtime owns the audio pipeline end-to-end.
+    """
+    if not SESSION_REALTIME_MODEL:
+        return False
+    enabled_raw = os.getenv("SESSION_REALTIME_ENABLED", "").strip().lower()
+    return enabled_raw not in {"0", "false", "no", "off"}
+
+
+_REALTIME_MODE_ACTIVE = _realtime_mode_active()
 SESSION_STT_LANGUAGE         = os.getenv("SESSION_STT_LANGUAGE", "ar")
 SESSION_STT_MODEL            = os.getenv("SESSION_STT_MODEL", "stt-rt-v4")
 SESSION_STT_BASE_URL         = os.getenv("SESSION_STT_BASE_URL", "wss://stt-rt.soniox.com/transcribe-websocket").strip()
 SESSION_STT_LANGUAGE_HINTS_STRICT = _get_env_bool("SESSION_STT_LANGUAGE_HINTS_STRICT", True)
-SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION = _get_env_bool("SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION", True)
+SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION = _get_env_bool("SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION", False)
+SESSION_STT_MAX_ENDPOINT_DELAY_MS = _get_env_int("SESSION_STT_MAX_ENDPOINT_DELAY_MS", 500, min_value=500)
 SESSION_STT_KEYTERM_LIMIT    = _get_env_int("SESSION_STT_KEYTERM_LIMIT", 40, min_value=5)
 SESSION_STT_EXTRA_KEYTERMS   = os.getenv("SESSION_STT_EXTRA_KEYTERMS", "")
 SESSION_LLM_MODEL            = os.getenv("SESSION_LLM_MODEL", "gemini-2.5-flash")
 SESSION_LLM_REASONING_EFFORT = os.getenv("SESSION_LLM_REASONING_EFFORT", "low").strip().lower() or "low"
 SESSION_LLM_VERBOSITY        = os.getenv("SESSION_LLM_VERBOSITY", "low").strip().lower() or "low"
-SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 160, min_value=32)
-SESSION_LLM_TEMPERATURE      = _get_env_float("SESSION_LLM_TEMPERATURE", 0.4, min_value=0.0)
+SESSION_LLM_MAX_COMPLETION_TOKENS = _get_env_int("SESSION_LLM_MAX_COMPLETION_TOKENS", 64, min_value=32)
+SESSION_LLM_TEMPERATURE      = _get_env_float("SESSION_LLM_TEMPERATURE", 0.25, min_value=0.0)
 SESSION_LLM_TOP_P            = _get_env_float("SESSION_LLM_TOP_P", 0.95, min_value=0.0)
 SESSION_LLM_THINKING_BUDGET  = _get_env_int("SESSION_LLM_THINKING_BUDGET", 0, min_value=0)
-SESSION_PREEMPTIVE_GENERATION = _get_env_bool("SESSION_PREEMPTIVE_GENERATION", False)
+SESSION_PREEMPTIVE_GENERATION = _get_env_bool("SESSION_PREEMPTIVE_GENERATION", True)
 CONFIG_SHARED_CACHE_ENABLED  = _get_env_bool("CONFIG_SHARED_CACHE_ENABLED", True)
 CONFIG_SHARED_CACHE_PATH     = os.getenv("CONFIG_SHARED_CACHE_PATH", f".runtime/{APP_ENV}/config_cache.json")
 BACKEND_WRITE_QUEUE_ENABLED  = _get_env_bool("BACKEND_WRITE_QUEUE_ENABLED", True)
@@ -246,8 +397,15 @@ BACKEND_POST_TIMEOUT_SECONDS = _get_env_float("BACKEND_POST_TIMEOUT_SECONDS", 3.
 AGENT_IDLE_PROCESSES         = _get_env_int("AGENT_IDLE_PROCESSES", 2 if APP_ENV == "prod" else 1, min_value=0)
 AGENT_HEALTH_SNAPSHOT_DIR    = os.getenv("AGENT_HEALTH_SNAPSHOT_DIR", f".runtime/{APP_ENV}/worker_health")
 AGENT_HEALTH_SNAPSHOT_STALE_SECONDS = _get_env_float("AGENT_HEALTH_SNAPSHOT_STALE_SECONDS", 90.0, min_value=5.0)
+AGENT_HEALTH_HEARTBEAT_SECONDS = _get_env_float(
+    "AGENT_HEALTH_HEARTBEAT_SECONDS",
+    max(1.0, min(30.0, AGENT_HEALTH_SNAPSHOT_STALE_SECONDS / 3.0)),
+    min_value=1.0,
+)
 
 _WORKER_CONTEXT = build_worker_context(BACKEND_WRITE_QUEUE_MAX_ITEMS)
+_WORKER_HEALTH_HEARTBEAT_THREAD: threading.Thread | None = None
+_WORKER_HEALTH_HEARTBEAT_STOP = threading.Event()
 
 
 def worker_context() -> WorkerContext:
@@ -262,6 +420,7 @@ def _setup_worker_process(proc: Any) -> None:
     proc.userdata["worker_context"] = _WORKER_CONTEXT
     logger.info("worker process setup | pid=%d | context_id=%d", os.getpid(), id(_WORKER_CONTEXT))
     _write_worker_health_snapshot_sync(reason="worker_setup")
+    _start_worker_health_heartbeat_sync()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TTS/STT/LLM — session-level فقط، مفيش per-agent overrides
@@ -304,6 +463,7 @@ def _session_stt_options(*, context_terms: list[str] | None = None, client_refer
         "language_hints_strict": SESSION_STT_LANGUAGE_HINTS_STRICT,
         "context": context,
         "enable_language_identification": SESSION_STT_ENABLE_LANGUAGE_IDENTIFICATION,
+        "max_endpoint_delay_ms": SESSION_STT_MAX_ENDPOINT_DELAY_MS,
         "client_reference_id": client_reference_id,
     }
     if soniox is None:
@@ -344,6 +504,32 @@ def _build_base_session_tts() -> Any:
             language=SESSION_TTS_LANGUAGE,
         )
 
+    if model_name.startswith("gemini") and "live" not in model_name:
+        from google.cloud import texttospeech_v1 as _tts_v1
+
+        creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+        if not creds_path:
+            logger.warning(
+                "google cloud gemini tts: GOOGLE_APPLICATION_CREDENTIALS is not set; "
+                "Cloud TTS will fall back to ADC and may fail in dev"
+            )
+
+        tts_kwargs: dict[str, Any] = {
+            "voice_name": SESSION_TTS_VOICE,
+            "language": SESSION_TTS_LANGUAGE,
+            "model_name": SESSION_TTS_MODEL,
+            "credentials_file": creds_path or None,
+            "audio_encoding": _tts_v1.AudioEncoding.PCM,
+            "location": os.getenv("SESSION_TTS_LOCATION", "global"),
+            "sample_rate": 24000,
+            "use_streaming": True,
+        }
+        prompt = os.getenv("SESSION_TTS_PROMPT", "").strip()
+        if prompt:
+            tts_kwargs["prompt"] = prompt
+
+        return google.TTS(**tts_kwargs)
+
     # ─── Google Cloud TTS streaming (RECOMMENDED) ───────────────────
     # Cloud TTS exposes the same Gemini-trained voices (Aoede, Sulafat,
     # Charon, Kore, ...) under the Chirp3-HD family, but via the GA
@@ -369,8 +555,9 @@ def _build_base_session_tts() -> Any:
             voice_name=SESSION_TTS_VOICE,
             language=SESSION_TTS_LANGUAGE,
             credentials_file=creds_path or None,
-            audio_encoding=_tts_v1.AudioEncoding.LINEAR16,
+            audio_encoding=_tts_v1.AudioEncoding.PCM,
             location=os.getenv("SESSION_TTS_LOCATION", "global"),
+            sample_rate=24000,
             use_streaming=True,
         )
 
@@ -442,53 +629,360 @@ def _build_session_tts() -> Any:
     )
 
 
-SESSION_TTS = _build_session_tts()
+# Pure realtime: when the unified Gemini Live model owns audio I/O, no
+# standalone TTS is built. The model handles speech-out itself and any
+# attempt to mix a side TTS into the same session causes audio echo to be
+# fed back into the model's input (the model "hears" the TTS opening, treats
+# it as user speech, and starts calling tools unprompted). The trade-off is
+# that the agent has no way to speak proactively in realtime mode — the
+# customer must speak first, and the model responds based on persona.
+SESSION_TTS = None if _REALTIME_MODE_ACTIVE else _build_session_tts()
 SESSION_STT_PROVIDER = "soniox"
-if SESSION_LLM_MODEL.startswith("gpt-") or SESSION_LLM_MODEL.startswith("o"):
-    # reasoning_effort / verbosity are only supported on reasoning models
-    # (o1, o3, gpt-5 family). Passing them to gpt-4.1 / gpt-4o / etc. is a
-    # 400 invalid_request_error. Gate them by model name.
-    _is_reasoning_model = (
-        SESSION_LLM_MODEL.startswith("o1")
-        or SESSION_LLM_MODEL.startswith("o3")
-        or SESSION_LLM_MODEL.startswith("o4")
-        or SESSION_LLM_MODEL.startswith("gpt-5")
-    )
-    _openai_kwargs: dict[str, Any] = {
-        "model": SESSION_LLM_MODEL,
-        "max_completion_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
-    }
-    if _is_reasoning_model:
-        _openai_kwargs["reasoning_effort"] = SESSION_LLM_REASONING_EFFORT
-        _openai_kwargs["verbosity"] = SESSION_LLM_VERBOSITY
-    else:
-        _openai_kwargs["temperature"] = SESSION_LLM_TEMPERATURE
-        _openai_kwargs["top_p"] = SESSION_LLM_TOP_P
-    SESSION_LLM = openai.LLM(**_openai_kwargs)
-    logger.info(
-        "LLM provider: OpenAI | model=%s | reasoning=%s",
-        SESSION_LLM_MODEL, _is_reasoning_model,
-    )
-else:
-    from google.genai import types as _genai_types  # noqa: E402
-    _gemini_kwargs: dict[str, Any] = {
-        "model": SESSION_LLM_MODEL,
-        "temperature": SESSION_LLM_TEMPERATURE,
-        "top_p": SESSION_LLM_TOP_P,
-        "max_output_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
-    }
-    if SESSION_LLM_MODEL.startswith("gemini-2.5"):
-        _gemini_kwargs["thinking_config"] = _genai_types.ThinkingConfig(
-            thinking_budget=SESSION_LLM_THINKING_BUDGET,
+
+
+def _build_session_realtime_model() -> Any:
+    """Build a Gemini realtime (speech-to-speech) model when configured.
+
+    Active when ``SESSION_REALTIME_MODEL`` is set and ``SESSION_REALTIME_ENABLED``
+    is not explicitly disabled. Returns ``None`` to fall back to the classic
+    STT + LLM + TTS pipeline. The realtime model replaces all three.
+    """
+    enabled_raw = os.getenv("SESSION_REALTIME_ENABLED", "").strip().lower()
+    explicitly_disabled = enabled_raw in {"0", "false", "no", "off"}
+    if explicitly_disabled:
+        logger.info("realtime model disabled via SESSION_REALTIME_ENABLED=%s", enabled_raw)
+        return None
+    if not SESSION_REALTIME_MODEL:
+        return None
+
+    try:
+        from livekit.plugins import google as _google_plugin
+    except Exception as exc:  # pragma: no cover — install issue
+        raise RuntimeError(
+            f"SESSION_REALTIME_MODEL={SESSION_REALTIME_MODEL!r} requires "
+            f"livekit-plugins-google to be installed: {exc}"
+        ) from exc
+
+    # The realtime entry point lives at `google.beta.realtime.RealtimeModel`
+    # in older plugin builds and `google.realtime.RealtimeModel` from 1.5+.
+    # Try the stable path first, then fall back.
+    realtime_module = getattr(_google_plugin, "realtime", None)
+    if realtime_module is None:
+        beta = getattr(_google_plugin, "beta", None)
+        realtime_module = getattr(beta, "realtime", None) if beta is not None else None
+    if realtime_module is None or not hasattr(realtime_module, "RealtimeModel"):
+        raise RuntimeError(
+            "livekit-plugins-google is installed but does not expose a "
+            "RealtimeModel — upgrade to livekit-plugins-google>=1.5"
         )
-    SESSION_LLM = google.LLM(**_gemini_kwargs)
-    logger.info(
-        "LLM provider: Google | model=%s | temp=%.2f | top_p=%.2f | thinking_budget=%d",
-        SESSION_LLM_MODEL, SESSION_LLM_TEMPERATURE, SESSION_LLM_TOP_P, SESSION_LLM_THINKING_BUDGET,
+
+    api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    # Explicit user opt-in via SESSION_REALTIME_USE_VERTEX is the only way to
+    # route this model through Vertex. Otherwise Gemini API takes precedence
+    # whenever an API key is set, even if GOOGLE_APPLICATION_CREDENTIALS is
+    # also exported (the credentials usually live there for Cloud TTS / Vertex
+    # LLM in the *classic* pipeline, which is irrelevant in realtime mode).
+    use_vertex = SESSION_REALTIME_USE_VERTEX or (
+        not api_key and bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip())
     )
+
+    # tool_response_scheduling controls when the realtime model processes a
+    # tool result. The plugin default is WHEN_IDLE — the model waits for
+    # silence before continuing — which stalls the conversation when the
+    # customer is still breathing into the mic, room noise persists, or VAD
+    # is sensitive. INTERRUPT forces the model to act on the tool response
+    # immediately, which is the right behaviour for a phone agent.
+    try:
+        from google.genai import types as _genai_types  # noqa: WPS433
+        _tool_scheduling: Any = _genai_types.FunctionResponseScheduling.INTERRUPT
+        logger.info("realtime model: tool_response_scheduling=INTERRUPT")
+    except (ImportError, AttributeError) as exc:
+        _tool_scheduling = None
+        # Loud warning instead of silent fallback. Without INTERRUPT the
+        # model takes ~7s to respond after every tool call (the default
+        # WHEN_IDLE waits for VAD silence which never comes on a phone
+        # line with continuous comfort noise).
+        logger.warning(
+            "FunctionResponseScheduling.INTERRUPT unavailable (%s) — "
+            "model will use WHEN_IDLE and exhibit ~7s post-tool latency. "
+            "Upgrade google-genai SDK to fix.",
+            exc,
+        )
+
+    kwargs: dict[str, Any] = {
+        "model": SESSION_REALTIME_MODEL,
+        "voice": SESSION_REALTIME_VOICE,
+        "temperature": SESSION_REALTIME_TEMPERATURE,
+        "language": SESSION_REALTIME_LANGUAGE,
+    }
+    if _tool_scheduling is not None:
+        kwargs["tool_response_scheduling"] = _tool_scheduling
+
+    # Force Gemini Live to emit a DEDICATED transcript of the input audio
+    # (separate from whatever the audio-understanding model uses
+    # internally for routing). Without this, the transcripts written to
+    # the call log are the model's loose-internal interpretation — which
+    # comes back as French/German/Spanish on Arabic phone audio even
+    # though the model's *actions* (tool calls + spoken Arabic replies)
+    # are correct. The dedicated transcription pass is more reliable.
+    # Also enable output transcription so the assistant transcript in
+    # the log matches what the model actually said.
+    # Gemini API (non-Vertex) rejects language_codes on AudioTranscriptionConfig
+    # — it auto-detects. Only pass language_codes when routing through Vertex,
+    # where the parameter is supported. Either way, enabling the dedicated
+    # transcription pass is more reliable than the model's internal loose
+    # transcript (which drifts into French/German on Arabic phone audio).
+    try:
+        from google.genai import types as _gt
+        if use_vertex:
+            _xcript_kwargs = {"language_codes": ["ar-EG", "ar"]}
+        else:
+            _xcript_kwargs = {}
+        kwargs["input_audio_transcription"] = _gt.AudioTranscriptionConfig(
+            **_xcript_kwargs
+        )
+        kwargs["output_audio_transcription"] = _gt.AudioTranscriptionConfig(
+            **_xcript_kwargs
+        )
+        logger.info(
+            "realtime model: dedicated audio transcription enabled | langs=%s",
+            _xcript_kwargs.get("language_codes") or "auto-detect",
+        )
+    except (ImportError, AttributeError, TypeError) as exc:
+        logger.warning(
+            "AudioTranscriptionConfig unavailable (%s) — call logs will show "
+            "the model's internal loose transcription instead of a dedicated "
+            "pass; upgrade google-genai SDK to fix.",
+            exc,
+        )
+    if use_vertex:
+        kwargs["vertexai"] = True
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "").strip() or os.getenv(
+            "SESSION_TTS_LOCATION", "global"
+        ).strip() or "global"
+        if project:
+            kwargs["project"] = project
+        kwargs["location"] = location
+    elif api_key:
+        # Force the genai SDK to ignore any ambient GOOGLE_APPLICATION_CREDENTIALS
+        # so it doesn't accidentally route to a Vertex project that has not been
+        # granted access to the realtime model. The classic pipeline keeps using
+        # the credentials independently — it's not affected by this override.
+        kwargs["vertexai"] = False
+        kwargs["api_key"] = api_key
+    else:
+        raise RuntimeError(
+            f"SESSION_REALTIME_MODEL={SESSION_REALTIME_MODEL!r} needs either "
+            "GOOGLE_API_KEY (Gemini API) or GOOGLE_APPLICATION_CREDENTIALS "
+            "(Vertex AI) to authenticate."
+        )
+
+    # Plugin-level kwargs vary slightly across versions. Drop any kwargs the
+    # current plugin doesn't accept rather than failing hard.
+    realtime_cls = realtime_module.RealtimeModel
+    try:
+        import inspect as _inspect
+        accepted = set(_inspect.signature(realtime_cls).parameters.keys())
+    except (TypeError, ValueError):
+        accepted = set(kwargs.keys())
+    filtered = {k: v for k, v in kwargs.items() if k in accepted or not accepted}
+
+    logger.info(
+        "realtime model | provider=google | model=%s | voice=%s | language=%s | vertex=%s",
+        SESSION_REALTIME_MODEL,
+        SESSION_REALTIME_VOICE,
+        SESSION_REALTIME_LANGUAGE,
+        bool(use_vertex),
+    )
+    return realtime_cls(**filtered)
+
+
+# Install our 3.1-Live tool-response shim BEFORE any RealtimeSession is built
+# so the patch is in place when the LiveKit framework calls update_chat_ctx
+# to deliver function-call results. Idempotent and safe in the classic path.
+try:
+    from realtime_patch import apply as _apply_realtime_patch
+    _apply_realtime_patch()
+except Exception as _patch_exc:  # pragma: no cover
+    logger.debug("realtime patch could not be applied | %s", _patch_exc)
+
+SESSION_REALTIME = _build_session_realtime_model()
+
+# Skip the classic LLM client when realtime owns the whole pipeline. The
+# unified Gemini Live model handles STT + LLM + TTS itself; constructing a
+# second LLM here would (a) waste a TLS pool, (b) run credential checks for
+# providers we don't use, (c) raise on stale ``cerebras/`` / ``groq/`` model
+# ids the realtime path ignores.
+if _REALTIME_MODE_ACTIVE:
+    SESSION_LLM = None
+    logger.info("realtime mode active — skipping classic STT/LLM build")
+else:
+    _OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+    _CEREBRAS_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
+    _GROQ_KEY = os.getenv("GROQ_API_KEY", "").strip()
+    # "cerebras/" prefix routes to Cerebras inference. Strip the prefix before
+    # passing the bare model id to with_cerebras().
+    _WANTS_CEREBRAS = SESSION_LLM_MODEL.startswith("cerebras/")
+    _USE_CEREBRAS = _WANTS_CEREBRAS and bool(_CEREBRAS_KEY)
+    if _WANTS_CEREBRAS and not _USE_CEREBRAS:
+        raise RuntimeError(
+            f"SESSION_LLM_MODEL={SESSION_LLM_MODEL!r} requests Cerebras but "
+            "CEREBRAS_API_KEY is not set. Add it to .env or change the model id."
+        )
+    # "groq/" prefix routes to Groq directly via the OpenAI-compatible endpoint
+    # at https://api.groq.com/openai/v1 (no with_groq helper exists in the
+    # livekit plugin). This is the primary low-latency profile for Arabic calls
+    # because it supports function tools on the Llama 3.3 70B model family.
+    _WANTS_GROQ = SESSION_LLM_MODEL.startswith("groq/")
+    _USE_GROQ = _WANTS_GROQ and bool(_GROQ_KEY)
+    if _WANTS_GROQ and not _USE_GROQ:
+        raise RuntimeError(
+            f"SESSION_LLM_MODEL={SESSION_LLM_MODEL!r} requests Groq but "
+            "GROQ_API_KEY is not set. Add it to .env or change the model id."
+        )
+    _USE_OPENROUTER = (
+        not _USE_CEREBRAS
+        and not _USE_GROQ
+        and "/" in SESSION_LLM_MODEL
+        and bool(_OPENROUTER_KEY)
+        and not _OPENROUTER_KEY.endswith("REPLACE_WITH_YOUR_KEY")
+    )
+
+    if _USE_CEREBRAS:
+        _cerebras_model = SESSION_LLM_MODEL.split("/", 1)[1]
+        SESSION_LLM = openai.LLM.with_cerebras(
+            model=_cerebras_model,
+            api_key=_CEREBRAS_KEY,
+            temperature=SESSION_LLM_TEMPERATURE,
+            top_p=SESSION_LLM_TOP_P,
+        )
+        logger.info(
+            "LLM provider: Cerebras | model=%s | temp=%.2f | top_p=%.2f",
+            _cerebras_model, SESSION_LLM_TEMPERATURE, SESSION_LLM_TOP_P,
+        )
+    elif _USE_GROQ:
+        _groq_model = SESSION_LLM_MODEL.split("/", 1)[1]
+        SESSION_LLM = openai.LLM(
+            model=_groq_model,
+            api_key=_GROQ_KEY,
+            base_url="https://api.groq.com/openai/v1",
+            temperature=SESSION_LLM_TEMPERATURE,
+            top_p=SESSION_LLM_TOP_P,
+        )
+        logger.info(
+            "LLM provider: Groq | model=%s | temp=%.2f | top_p=%.2f",
+            _groq_model, SESSION_LLM_TEMPERATURE, SESSION_LLM_TOP_P,
+        )
+    elif _USE_OPENROUTER:
+        # OpenRouter routing — model id contains "/" (e.g. "meta-llama/llama-3.3-70b-instruct").
+        # provider.order + allow_fallbacks=False forces a specific backend (else
+        # OpenRouter silently routes to slower providers when the preferred one
+        # is busy / unsupported, which masks latency regressions).
+        _provider_order = os.getenv("SESSION_LLM_OPENROUTER_PROVIDER", "").strip()
+        _or_provider: dict[str, Any] | None = None
+        if _provider_order:
+            _or_provider = {
+                "order": [p.strip() for p in _provider_order.split(",") if p.strip()],
+                "allow_fallbacks": False,
+            }
+        SESSION_LLM = openai.LLM.with_openrouter(
+            model=SESSION_LLM_MODEL,
+            api_key=_OPENROUTER_KEY,
+            temperature=SESSION_LLM_TEMPERATURE,
+            top_p=SESSION_LLM_TOP_P,
+            provider=_or_provider,
+        )
+        logger.info(
+            "LLM provider: OpenRouter | model=%s | provider_order=%s | allow_fallbacks=%s",
+            SESSION_LLM_MODEL, _provider_order or "auto",
+            False if _or_provider else True,
+        )
+    elif SESSION_LLM_MODEL.startswith("gpt-") or SESSION_LLM_MODEL.startswith("o"):
+        # reasoning_effort / verbosity are only supported on reasoning models
+        # (o1, o3, gpt-5 family). Passing them to gpt-4.1 / gpt-4o / etc. is a
+        # 400 invalid_request_error. Gate them by model name.
+        _is_reasoning_model = (
+            SESSION_LLM_MODEL.startswith("o1")
+            or SESSION_LLM_MODEL.startswith("o3")
+            or SESSION_LLM_MODEL.startswith("o4")
+            or SESSION_LLM_MODEL.startswith("gpt-5")
+        )
+        _openai_kwargs: dict[str, Any] = {
+            "model": SESSION_LLM_MODEL,
+            "max_completion_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
+        }
+        if _is_reasoning_model:
+            _openai_kwargs["reasoning_effort"] = SESSION_LLM_REASONING_EFFORT
+            _openai_kwargs["verbosity"] = SESSION_LLM_VERBOSITY
+        else:
+            _openai_kwargs["temperature"] = SESSION_LLM_TEMPERATURE
+            _openai_kwargs["top_p"] = SESSION_LLM_TOP_P
+        SESSION_LLM = openai.LLM(**_openai_kwargs)
+        logger.info(
+            "LLM provider: OpenAI | model=%s | reasoning=%s",
+            SESSION_LLM_MODEL, _is_reasoning_model,
+        )
+    else:
+        from google.genai import types as _genai_types  # noqa: E402
+        _gemini_kwargs: dict[str, Any] = {
+            "model": SESSION_LLM_MODEL,
+            "temperature": SESSION_LLM_TEMPERATURE,
+            "top_p": SESSION_LLM_TOP_P,
+            "max_output_tokens": SESSION_LLM_MAX_COMPLETION_TOKENS,
+        }
+        if SESSION_LLM_MODEL.startswith("gemini-2.5"):
+            _gemini_kwargs["thinking_config"] = _genai_types.ThinkingConfig(
+                thinking_budget=SESSION_LLM_THINKING_BUDGET,
+            )
+        if _get_env_bool("SESSION_LLM_USE_VERTEXAI", False):
+            from google.oauth2 import service_account as _service_account  # noqa: E402
+
+            _vertex_location = os.getenv("SESSION_LLM_LOCATION", "global").strip() or "global"
+            _vertex_project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+            _creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+            _credentials = None
+            if _creds_path:
+                _credentials = _service_account.Credentials.from_service_account_file(
+                    _creds_path,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+                if not _vertex_project:
+                    try:
+                        _vertex_project = getattr(_credentials, "project_id", "") or ""
+                    except Exception:
+                        _vertex_project = ""
+            if not _vertex_project:
+                raise RuntimeError(
+                    "SESSION_LLM_USE_VERTEXAI=true requires GOOGLE_CLOUD_PROJECT or "
+                    "a GOOGLE_APPLICATION_CREDENTIALS JSON with project_id"
+                )
+            _gemini_kwargs.update(
+                {
+                    "vertexai": True,
+                    "project": _vertex_project,
+                    "location": _vertex_location,
+                    "credentials": _credentials,
+                }
+            )
+        SESSION_LLM = google.LLM(**_gemini_kwargs)
+        if _get_env_bool("SESSION_LLM_USE_VERTEXAI", False):
+            logger.info(
+                "LLM provider: Google Vertex | model=%s | location=%s | project=%s | temp=%.2f | top_p=%.2f",
+                SESSION_LLM_MODEL,
+                os.getenv("SESSION_LLM_LOCATION", "global").strip() or "global",
+                os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or "credentials_project",
+                SESSION_LLM_TEMPERATURE,
+                SESSION_LLM_TOP_P,
+            )
+        else:
+            logger.info(
+                "LLM provider: Google | model=%s | temp=%.2f | top_p=%.2f | thinking_budget=%d",
+                SESSION_LLM_MODEL, SESSION_LLM_TEMPERATURE, SESSION_LLM_TOP_P, SESSION_LLM_THINKING_BUDGET,
+            )
 SESSION_VAD = silero.VAD.load(
-    min_silence_duration=0.8,
-    prefix_padding_duration=0.2,
+    min_silence_duration=0.25,
+    prefix_padding_duration=0.15,
     activation_threshold=0.5,
 )
 
@@ -501,18 +995,33 @@ async def warmup_llm() -> None:
     task — silently swallows errors because this is a best-effort optimization,
     not a correctness requirement.
     """
-    if not SESSION_LLM_MODEL.startswith(("gpt-", "o1", "o3", "o4")):
-        return  # only OpenAI benefits; Gemini/etc. handled by their own SDKs
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if _USE_CEREBRAS:
+        api_key = _CEREBRAS_KEY
+        base_url: str | None = "https://api.cerebras.ai/v1"
+        warmup_model = SESSION_LLM_MODEL.split("/", 1)[1]
+    elif _USE_GROQ:
+        api_key = _GROQ_KEY
+        base_url = "https://api.groq.com/openai/v1"
+        warmup_model = SESSION_LLM_MODEL.split("/", 1)[1]
+    elif _USE_OPENROUTER:
+        api_key = _OPENROUTER_KEY
+        base_url = "https://openrouter.ai/api/v1"
+        warmup_model = SESSION_LLM_MODEL
+    elif SESSION_LLM_MODEL.startswith(("gpt-", "o1", "o3", "o4")):
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        base_url = None
+        warmup_model = SESSION_LLM_MODEL
+    else:
+        return  # Gemini/etc. handled by their own SDKs
     if not api_key:
         return
     try:
         from openai import AsyncOpenAI  # type: ignore
 
-        client = AsyncOpenAI(api_key=api_key)
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url) if base_url else AsyncOpenAI(api_key=api_key)
         try:
             await client.chat.completions.create(
-                model=SESSION_LLM_MODEL,
+                model=warmup_model,
                 messages=[{"role": "user", "content": "hi"}],
                 max_completion_tokens=1,
             )
@@ -548,15 +1057,51 @@ async def warmup_backend() -> None:
 
 
 async def warmup_tts() -> None:
-    """Pre-open a Hamsa TTS WebSocket so the first utterance avoids handshake.
-    Best-effort; silent on failure.
-    """
+    """Best-effort TTS warmup so the first utterance avoids provider setup."""
     try:
         wrapped = getattr(SESSION_TTS, "_wrapped_tts", SESSION_TTS)
         warmup_fn = getattr(wrapped, "warmup", None) or getattr(wrapped, "prewarm", None)
-        if warmup_fn is None:
+        if warmup_fn is not None:
+            await warmup_fn()
             return
-        await warmup_fn()
+
+        ensure_client = getattr(wrapped, "_ensure_client", None)
+        opts = getattr(wrapped, "_opts", None)
+        if ensure_client is None or opts is None:
+            return
+
+        from google.cloud import texttospeech as _google_tts
+
+        streaming_config = _google_tts.StreamingSynthesizeConfig(
+            voice=opts.voice,
+            streaming_audio_config=_google_tts.StreamingAudioConfig(
+                audio_encoding=opts.encoding,
+                sample_rate_hertz=opts.sample_rate,
+                speaking_rate=opts.speaking_rate,
+            ),
+            custom_pronunciations=opts.custom_pronunciations,
+        )
+
+        async def _requests():
+            yield _google_tts.StreamingSynthesizeRequest(streaming_config=streaming_config)
+            yield _google_tts.StreamingSynthesizeRequest(
+                input=_google_tts.StreamingSynthesisInput(text="تمام.")
+            )
+
+        async def _run_google_warmup() -> None:
+            stream = await ensure_client().streaming_synthesize(
+                _requests(),
+                timeout=TTS_WARMUP_PROVIDER_TIMEOUT_SECONDS,
+            )
+            async for response in stream:
+                if response.audio_content:
+                    logger.debug("google cloud tts warmup first audio received")
+                    return
+
+        await asyncio.wait_for(
+            _run_google_warmup(),
+            timeout=TTS_WARMUP_PROVIDER_TIMEOUT_SECONDS + 0.5,
+        )
     except Exception as exc:
         logger.debug("tts warmup skipped | %s", exc)
 
@@ -746,6 +1291,31 @@ def _write_worker_health_snapshot_sync(*, reason: str = "") -> None:
                 time.sleep(0.02 * (attempt + 1))
 
 
+def _start_worker_health_heartbeat_sync() -> None:
+    global _WORKER_HEALTH_HEARTBEAT_THREAD
+    if (
+        _WORKER_HEALTH_HEARTBEAT_THREAD is not None
+        and _WORKER_HEALTH_HEARTBEAT_THREAD.is_alive()
+    ):
+        return
+    _WORKER_HEALTH_HEARTBEAT_STOP.clear()
+
+    def _run() -> None:
+        while not _WORKER_HEALTH_HEARTBEAT_STOP.wait(AGENT_HEALTH_HEARTBEAT_SECONDS):
+            _write_worker_health_snapshot_sync(reason="heartbeat")
+
+    _WORKER_HEALTH_HEARTBEAT_THREAD = threading.Thread(
+        target=_run,
+        name=f"worker-health-heartbeat-{os.getpid()}",
+        daemon=True,
+    )
+    _WORKER_HEALTH_HEARTBEAT_THREAD.start()
+
+
+def _stop_worker_health_heartbeat_sync() -> None:
+    _WORKER_HEALTH_HEARTBEAT_STOP.set()
+
+
 async def _write_worker_health_snapshot(*, reason: str = "") -> None:
     try:
         await asyncio.to_thread(_write_worker_health_snapshot_sync, reason=reason)
@@ -863,15 +1433,17 @@ def build_agent_health_report(
         reasons.append("livekit_connection_failed")
     else:
         if fresh_snapshots:
-            if config_available is False:
+            standby_idle = active_sessions == 0
+            queue_has_work = recovery_queue_items > 0 or in_memory_queue_size > 0
+            if config_available is False and not standby_idle:
                 reasons.append("config_unavailable")
             if circuits_open:
                 reasons.append("circuits_open")
-            if queue_workers_running is False:
+            if queue_workers_running is False and queue_has_work:
                 reasons.append("backend_queue_worker_stopped")
-            if config_refresh_workers_running is False:
+            if config_refresh_workers_running is False and config_available is True:
                 reasons.append("config_refresh_worker_stopped")
-            if recovery_queue_items > 0 or in_memory_queue_size > 0:
+            if queue_has_work:
                 reasons.append("write_queue_backlog")
             if reasons:
                 status = "degraded"
@@ -882,6 +1454,7 @@ def build_agent_health_report(
     http_status = 200 if status == "ok" else 503
     payload = {
         "status": status,
+        "app_env": APP_ENV,
         "active_sessions": active_sessions,
         "active_jobs": int(active_jobs),
         "livekit_connected": not server_connection_failed,
@@ -939,6 +1512,34 @@ def _config_to_dict(cfg: RestaurantConfig) -> dict:
     }
 
 
+def _normalize_delivery_zones(raw: Any) -> list[str]:
+    """Flatten delivery zones to one entry per area.
+
+    Backend payloads sometimes ship zones as a single string with separators
+    (``|``, ``،``, ``,``, ``;``, newlines). The matcher iterates the list as-is,
+    so a single pipe-glued blob never matches any address. Splitting here keeps
+    matching, persona display, and rejection messages consistent.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        items: list[str] = [raw]
+    elif isinstance(raw, list):
+        items = [str(z) for z in raw if z is not None]
+    else:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in items:
+        for piece in re.split(r"[|،,;\n]+", entry):
+            zone = piece.strip()
+            if not zone or zone in seen:
+                continue
+            seen.add(zone)
+            out.append(zone)
+    return out
+
+
 def _config_from_dict(data: dict) -> RestaurantConfig:
     return RestaurantConfig(
         name=data.get("name", ""),
@@ -959,7 +1560,7 @@ def _config_from_dict(data: dict) -> RestaurantConfig:
         delivery_minutes=data.get("delivery_minutes", 45),
         delivery_fee=float(data.get("delivery_fee", 0.0)),
         min_order=float(data.get("min_order", 0.0)),
-        delivery_zones=data.get("delivery_zones", []),
+        delivery_zones=_normalize_delivery_zones(data.get("delivery_zones", [])),
     )
 
 
@@ -1092,16 +1693,38 @@ def _can_attempt_backend_write(ud: "UserData") -> bool:
     return True
 
 
-async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfig:
+def _schedule_config_refresh_now(cache_key: str, restaurant_id: str) -> None:
+    async def _refresh() -> None:
+        try:
+            cfg = await fetch_config(
+                f"refresh-stale-{cache_key}",
+                restaurant_id=restaurant_id,
+                allow_stale_immediate=False,
+            )
+            logger.info("config refresh immediate | key=%s | source=%s", cache_key, cfg.config_source)
+        except Exception:
+            logger.warning("config refresh immediate failed | key=%s", cache_key, exc_info=True)
+
+    asyncio.create_task(_refresh(), name=f"config_refresh_immediate_{cache_key}")
+
+
+async def fetch_config(
+    call_id: str,
+    restaurant_id: str = "",
+    *,
+    allow_stale_immediate: bool = True,
+) -> RestaurantConfig:
     """
     جلب إعدادات المطعم مع أولوية واضحة:
-    fresh cache -> stale cache -> backend fetch ضمن budget -> degraded fallback.
+    fresh cache -> stale cache immediately + background refresh -> backend fetch
+    within budget when no cache exists -> degraded fallback.
     """
     ctx = worker_context()
     cache_key = restaurant_id or "__default__"
     endpoint = f"{BACKEND_BASE}/restaurant/config"
     stale_fallback: RestaurantConfig | None = None
     cache_age: float | None = None
+    stale_fallback_age: float | None = None
 
     async with ctx.config_lock:
         cached_entry = ctx.config_cache.get(cache_key)
@@ -1127,6 +1750,7 @@ async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfi
             )
             _emit_event("config.cache", call_id=call_id, state="hit_stale", restaurant=cache_key, age_s=round(cache_age or 0.0, 3))
             stale_fallback = _clone_config_with_source(cached_entry.config, "cache_stale")
+            stale_fallback_age = cache_age
 
     async with ctx.config_refresh_lock:
         async with ctx.config_lock:
@@ -1173,6 +1797,25 @@ async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfi
             _emit_event("config.cache", call_id=call_id, state="shared_hit_stale", restaurant=cache_key, age_s=round(shared_age, 3))
             if stale_fallback is None or (cache_age is not None and shared_age < cache_age):
                 stale_fallback = _clone_config_with_source(shared_cfg, "cache_stale")
+                stale_fallback_age = shared_age
+
+        if stale_fallback is not None and allow_stale_immediate:
+            ctx.runtime_health.config_available = True
+            _emit_event(
+                "config.cache",
+                call_id=call_id,
+                state="stale_immediate",
+                restaurant=cache_key,
+                age_s=round(stale_fallback_age or 0.0, 3),
+            )
+            _schedule_worker_health_snapshot("config_stale_immediate")
+            _schedule_config_refresh_now(cache_key, restaurant_id)
+            logger.warning(
+                "call=%s | stale cache used immediately | restaurant=%s | age=%.2fs | action=background_refresh",
+                call_id, cache_key, stale_fallback_age or 0.0,
+            )
+            logger.info("call=%s | config source chosen | source=%s", call_id, stale_fallback.config_source)
+            return stale_fallback
 
         headers: dict[str, str] = {"X-Runtime-Source": "voice-agent"}
         params: dict[str, str] = {}
@@ -1225,7 +1868,7 @@ async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfi
                     delivery_minutes=d.get("delivery_minutes", 45),
                     delivery_fee=float(d.get("delivery_fee", 0.0)),
                     min_order=float(d.get("min_order", 0.0)),
-                    delivery_zones=d.get("delivery_zones", []),
+                    delivery_zones=_normalize_delivery_zones(d.get("delivery_zones", [])),
                     degraded_mode=False,
                     config_source="backend",
                 )
@@ -1283,7 +1926,7 @@ async def fetch_config(call_id: str, restaurant_id: str = "") -> RestaurantConfi
             _schedule_worker_health_snapshot("config_stale_fallback")
             logger.warning(
                 "call=%s | stale cache used fallback | restaurant=%s | age=%.2fs | last_error=%s",
-                call_id, cache_key, cache_age or 0.0,
+                call_id, cache_key, stale_fallback_age or cache_age or 0.0,
                 _exc_log_fields(last_exc) if last_exc else "none",
             )
             logger.info("call=%s | config source chosen | source=%s", call_id, stale_fallback.config_source)
@@ -1737,7 +2380,11 @@ async def _config_refresh_loop() -> None:
             for key in keys:
                 try:
                     restaurant_id = key if key != "__default__" else ""
-                    cfg = await fetch_config(f"refresh-{key}", restaurant_id=restaurant_id)
+                    cfg = await fetch_config(
+                        f"refresh-{key}",
+                        restaurant_id=restaurant_id,
+                        allow_stale_immediate=False,
+                    )
                     logger.info("config refresh | key=%s | source=%s", key, cfg.config_source)
                 except Exception:
                     logger.warning("config refresh failed | key=%s", key, exc_info=True)
@@ -1852,14 +2499,19 @@ async def _post(
     max_retries: int = BACKEND_MAX_RETRIES,
     write_health: CallWriteHealth | None = None,
     enqueue_on_retryable_failure: bool = True,
+    restaurant_public_id: str = "",
 ) -> dict | None:
     """
     POST مع retry exponential backoff وإضافة Idempotency-Key تلقائياً.
     - max_retries: عدد المحاولات (default=3)
     - idempotency_action: اسم العملية للـ idempotency key (مثلاً 'takeaway')
+    - restaurant_public_id: لو محدد، يتبعت كـ X-Restaurant-ID علشان الـ backend
+      يسجل الـ row تحت الـ tenant الصح بدل ما يفُل-باك للـ demo-restaurant.
     """
     full_url = f"{BACKEND_BASE}{endpoint}"
     headers: dict[str, str] = {"X-Runtime-Source": "voice-agent"}
+    if restaurant_public_id:
+        headers["X-Restaurant-ID"] = restaurant_public_id
     effective_timeout = BACKEND_POST_TIMEOUT_SECONDS if tool_timeout is None else max(0.05, float(tool_timeout))
     idempotency_key = ""
     if idempotency_action:
@@ -1948,6 +2600,16 @@ async def _post(
     return None
 
 
+def _resolve_channel(ud: "UserData") -> str:
+    """Map UserData.call_source onto the backend's channel field."""
+    src = (getattr(ud, "call_source", "") or "").strip().lower()
+    if src == "sip":
+        return "phone_sip"
+    if src == "web":
+        return "web_widget"
+    return "voice_agent"
+
+
 async def submit_takeaway(ud: "UserData") -> dict | None:
     order_items = _build_order_items(ud.order or [], ud.restaurant.menu_items)
     return await _post("/orders", {
@@ -1955,12 +2617,16 @@ async def submit_takeaway(ud: "UserData") -> dict | None:
         "type":             "takeaway",
         "customer_name":    ud.customer_name or "",
         "customer_phone":   ud.customer_phone or "",
+        # Original Caller-ID before any spoken-number overrides. Lets the
+        # backend correlate a customer who repeated a different number with
+        # the trunk that delivered the call.
+        "caller_phone":     getattr(ud, "caller_phone", "") or "",
         "order_items":      order_items,
         "special_requests": ud.special_requests or "",
-        "order_time":       datetime.now(timezone.utc).isoformat(),
         "upsell_accepted":  ud.upsell_accepted,
-        "channel":          "voice_agent",
-    }, ud.call_id, idempotency_action="takeaway", write_health=ud.write_health)
+        "channel":          _resolve_channel(ud),
+    }, ud.call_id, idempotency_action="takeaway", write_health=ud.write_health,
+       restaurant_public_id=getattr(ud, "restaurant_public_id", "") or "")
 
 
 async def submit_delivery(ud: "UserData") -> dict | None:
@@ -1970,15 +2636,16 @@ async def submit_delivery(ud: "UserData") -> dict | None:
         "type":              "delivery",
         "customer_name":     ud.customer_name or "",
         "customer_phone":    ud.customer_phone or "",
+        "caller_phone":      getattr(ud, "caller_phone", "") or "",
         "order_items":       order_items,
         "special_requests":  ud.special_requests or "",
         "delivery_address":  ud.delivery_address or "",
         "delivery_zone":     ud.delivery_zone or "",
         "delivery_landmark": ud.delivery_landmark or "",
-        "order_time":        datetime.now(timezone.utc).isoformat(),
         "upsell_accepted":   ud.upsell_accepted,
-        "channel":           "voice_agent",
-    }, ud.call_id, idempotency_action="delivery", write_health=ud.write_health)
+        "channel":           _resolve_channel(ud),
+    }, ud.call_id, idempotency_action="delivery", write_health=ud.write_health,
+       restaurant_public_id=getattr(ud, "restaurant_public_id", "") or "")
 
 
 async def submit_reservation(ud: "UserData") -> dict | None:
@@ -1986,13 +2653,15 @@ async def submit_reservation(ud: "UserData") -> dict | None:
         "call_id":          ud.call_id,
         "customer_name":    ud.customer_name or "",
         "customer_phone":   ud.customer_phone or "",
+        "caller_phone":     getattr(ud, "caller_phone", "") or "",
         "reservation_time": ud.reservation_time or "",
         "reservation_time_iso": ud.reservation_time_iso or "",
         "guests_count":     ud.guests_count,
         "branch":           ud.selected_branch or "",
         "notes":            ud.reservation_notes or "",
-        "channel":          "voice_agent",
-    }, ud.call_id, idempotency_action="reservation", write_health=ud.write_health)
+        "channel":          _resolve_channel(ud),
+    }, ud.call_id, idempotency_action="reservation", write_health=ud.write_health,
+       restaurant_public_id=getattr(ud, "restaurant_public_id", "") or "")
 
 
 async def submit_complaint(ud: "UserData", text: str, ctype: str) -> dict | None:
@@ -2000,11 +2669,12 @@ async def submit_complaint(ud: "UserData", text: str, ctype: str) -> dict | None
         "call_id":        ud.call_id,
         "customer_name":  ud.customer_name or "",
         "customer_phone": ud.customer_phone or "",
+        "caller_phone":   getattr(ud, "caller_phone", "") or "",
         "complaint_text": text,
         "complaint_type": ctype,
-        "logged_at":      datetime.now(timezone.utc).isoformat(),
-        "channel":        "voice_agent",
-    }, ud.call_id, idempotency_action="complaint", write_health=ud.write_health)
+        "channel":        _resolve_channel(ud),
+    }, ud.call_id, idempotency_action="complaint", write_health=ud.write_health,
+       restaurant_public_id=getattr(ud, "restaurant_public_id", "") or "")
 
 
 def _call_outcome_and_failure_reason(ud: "UserData", close_reason: str) -> tuple[str, str]:
@@ -2113,7 +2783,8 @@ async def submit_call_log(
         "duration_seconds": max(0, int(duration_seconds)),
         "started_at": started_at_iso,
         "ended_at": ended_at_iso,
-    }, ud.call_id, idempotency_action="call-log", write_health=ud.write_health)
+    }, ud.call_id, idempotency_action="call-log", write_health=ud.write_health,
+       restaurant_public_id=getattr(ud, "restaurant_public_id", "") or "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2405,6 +3076,22 @@ async def _apply_phone_update(
     holder: object | None = None,
 ) -> str:
     from base_agent import _log_tool_outcome
+    # SIP calls seed customer_phone from Caller-ID at entrypoint and mark
+    # phone_confirmed=True. If the model still tries to overwrite it later
+    # (e.g. mis-parsing a customer utterance as a phone number), ignore the
+    # update — the SIP-side number is authoritative and we don't want to
+    # silently swap it for a possibly-hallucinated digit string.
+    if (
+        getattr(ud, "call_source", "") == "sip"
+        and getattr(ud, "caller_phone", "")
+        and ud.customer_phone
+        and ud.confirmed_facts.phone_confirmed
+    ):
+        logger.info(
+            "call=%s | phone update skipped (sip Caller-ID is authoritative)",
+            ud.call_id,
+        )
+        return ""
     incoming_digits = _phone_digits_only(phone_text)
     if not incoming_digits:
         ud.phone_capture_failures += 1
@@ -2851,14 +3538,47 @@ def _address_seems_specific(address: str) -> bool:
     return False
 
 
+def _match_delivery_zone(address: str, delivery_zones: list[str] | None) -> str | None:
+    """Return the configured delivery zone mentioned in an address, if any.
+
+    Matching is bidirectional. Substring containment wins outright; otherwise
+    we score by how many ≥3-char zone tokens appear in the address. This lets
+    "شارع 9 المعادي" match a "المعادي القديمة"-style zone even though the
+    customer didn't name the specific sub-area.
+    """
+    if not delivery_zones:
+        return None
+    addr_norm = _normalize_ar(address)
+    if not addr_norm:
+        return None
+    addr_tokens = set(addr_norm.split())
+
+    best: tuple[int, int, str] | None = None  # (score, -idx, zone)
+    for idx, z in enumerate(delivery_zones):
+        z_norm = _normalize_ar(z)
+        if not z_norm:
+            continue
+        if z_norm in addr_norm:
+            return z
+        z_tokens = [t for t in z_norm.split() if len(t) >= 3]
+        if not z_tokens:
+            continue
+        score = sum(1 for t in z_tokens if t in addr_tokens)
+        if score <= 0:
+            continue
+        candidate = (score, -idx, z)
+        if best is None or candidate > best:
+            best = candidate
+    return best[2] if best else None
+
+
 def _extract_zone_from_address(address: str, delivery_zones: list[str] | None) -> str:
     """Try to extract zone from address text by matching known delivery zones."""
+    matched_zone = _match_delivery_zone(address, delivery_zones)
+    if matched_zone:
+        return matched_zone
     if not delivery_zones:
         return address.strip().split(",")[-1].strip() if "," in address else address.strip()
-    addr_norm = _normalize_ar(address)
-    for z in delivery_zones:
-        if _normalize_ar(z) in addr_norm:
-            return z
     # Fallback: use the last part of the address as zone guess
     parts = re.split(r"[،,\-]", address)
     return parts[-1].strip() if len(parts) > 1 else address.strip()
@@ -3688,8 +4408,11 @@ def _token_overlap_score(target_tokens: set[str], menu_tokens: set[str]) -> floa
     return len(overlap) / max(len(target_tokens), len(menu_tokens))
 
 
-# Minimum token overlap score to accept a fuzzy match
-_MENU_MATCH_THRESHOLD = 0.5
+# Minimum token overlap score to accept a fuzzy match.
+# 0.65 keeps legitimate fuzzy matches (e.g. "بيتزا فراخ كبيرة" → "بيتزا فراخ"
+# scores 2/3 ≈ 0.67) while rejecting cross-category one-token overlap
+# (e.g. "شاورما فراخ" → "بيتزا فراخ" scores 1/2 = 0.5).
+_MENU_MATCH_THRESHOLD = 0.65
 _SHORT_MENU_MATCH_THRESHOLD = 0.8
 
 
@@ -3859,14 +4582,30 @@ def _normalize_order_items(items: list[str], menu_items: list[dict]) -> tuple[li
 
 
 def _build_order_items(order: list[str], menu_items: list[dict]) -> list[dict]:
+    """Convert the agent's internal order list into the backend payload shape.
+
+    Unknown items (those that don't resolve to a menu entry) are dropped
+    rather than included with ``price=0``. Posting ghost zero-price lines to
+    the backend created phantom items in the kitchen ticket whenever the
+    agent's normalization had a near-miss. If the agent has rejected an item
+    upstream, it should never reach the wire.
+    """
     result = []
     for raw in order:
         name, qty = _parse_order_item(raw)
         if not name:
             continue
-        menu_item = _resolve_menu_item(name, menu_items)
-        canonical_name = menu_item["name"] if menu_item else name
-        price = float(menu_item.get("price", 0) or 0) if menu_item else 0.0
+        menu_item = _resolve_menu_item(name, menu_items) if menu_items else None
+        if menu_item is None:
+            # Degraded mode is the one legitimate path that keeps unknown
+            # items — kitchen reads the raw string. Detect by empty menu.
+            if not menu_items:
+                result.append({"name": name, "qty": qty, "price": 0.0})
+            else:
+                logger.warning("dropping unknown order item from payload: %s", name)
+            continue
+        canonical_name = menu_item["name"]
+        price = float(menu_item.get("price", 0) or 0)
         result.append({"name": canonical_name, "qty": qty, "price": price})
     return result
 
@@ -4137,6 +4876,7 @@ async def _maybe_submit_pending_complaint(context: RunContext_T) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Graceful shutdown — httpx cleanup via atexit (signal handling done by SDK)
 # ─────────────────────────────────────────────────────────────────────────────
+atexit.register(_stop_worker_health_heartbeat_sync)
 atexit.register(_remove_worker_health_snapshot_sync)
 atexit.register(_cleanup_http_client_impl)
 
@@ -4166,7 +4906,9 @@ async def _safe_close_session_once(
     if farewell:
         with contextlib.suppress(Exception):
             session.userdata.last_agent_message = farewell
-            await session.say(
+            from utils.voice import say_safe as _say_safe
+            await _say_safe(
+                session,
                 _voice_safe_text(farewell),
                 allow_interruptions=False,
                 add_to_chat_ctx=False,

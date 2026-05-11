@@ -1,0 +1,153 @@
+{
+  "scenario_id": "PK-STRESS-023",
+  "title": "Customer asks unrelated question",
+  "category": "stress",
+  "passed": true,
+  "scores": {
+    "routing": 5,
+    "entity_capture": 5,
+    "state_memory": 5,
+    "clarification_quality": 4,
+    "tone_and_empathy": 4,
+    "no_hallucination": 5,
+    "finalization_safety": 5
+  },
+  "critical_failures": [],
+  "agent_mistakes": [],
+  "missing_fields": [],
+  "hallucinations": [],
+  "final_state_captured_by_agent": {
+    "intent": "delivery",
+    "customer_name": "وليد",
+    "order": [
+      "بيتزا خضار لارج"
+    ],
+    "order_total": 190.0,
+    "order_total_history": [
+      190.0
+    ],
+    "order_validated": true,
+    "order_confirmed": false,
+    "order_id": "",
+    "delivery_address": "",
+    "delivery_landmark": "",
+    "reservation_time": "",
+    "guests_count": null,
+    "selected_branch": "",
+    "complaint_text": "",
+    "complaint_type": "",
+    "complaint_logged": false,
+    "reservation_confirmed": false,
+    "reservation_id": "",
+    "end_call_requested": false,
+    "end_call_reason": ""
+  },
+  "recommended_fix": "no fix required at this severity",
+  "harness_error": null,
+  "trace": [
+    {
+      "role": "agent",
+      "text": "أهلاً بيك! معاك ليلي من بيتزا كينج، أقدر أساعدك في إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "هو عندكم شغل؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، إحنا فاتحين من 12 الظهر لحد 2 أو 3 الصبح حسب اليوم. تحب تطلب حاجة؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "طب بتقبضوا كام؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "معلش، ممكن توضح أكتر قصدك إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "طيب بالمرة عاوز أطلب بيتزا.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، تحب توصيل ولا تيك أواي؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "بيتزا خضار لارج دليفري.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "النية اتسجلت: delivery. كمّل عادي وشوف ناقص إيه.",
+      "tool_name": "set_intent",
+      "tool_args": {
+        "intent": "delivery"
+      }
+    },
+    {
+      "role": "tool",
+      "text": "الطلب اتسجل: بيتزا خضار لارج (إجمالي: 190 جنيه).",
+      "tool_name": "update_order",
+      "tool_args": {
+        "items": [
+          {
+            "name": "بيتزا خضار لارج",
+            "qty": 1
+          }
+        ]
+      }
+    },
+    {
+      "role": "agent",
+      "text": "حاضر يا فندم، طلبت بيتزا خضار لارج توصيل. ممكن عنوان التوصيل؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "العنوان شارع النصر، الرقم 01045454545، الاسم وليد.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الاسم اتسجل: وليد",
+      "tool_name": "set_name",
+      "tool_args": {
+        "name": "وليد"
+      }
+    },
+    {
+      "role": "tool",
+      "text": "العنوان خارج نطاق التوصيل عندنا. التوصيل متاح في المعادي، المعادي الجديدة، زهراء المعادي، دجلة المعادي، كورنيش المعادي، ثكنات المعادي. اعتذر للعميل واعرض عليه الاستلام من الفرع.",
+      "tool_name": "set_delivery_info",
+      "tool_args": {
+        "address": "شارع النصر",
+        "landmark": ""
+      }
+    },
+    {
+      "role": "agent",
+      "text": "يا فندم، العنوان ده مش في مناطق التوصيل عندنا. التوصيل متاح بس في المعادي وفروعها. تحب تستلم الطلب من الفرع بدل التوصيل؟",
+      "tool_name": "",
+      "tool_args": {}
+    }
+  ]
+}

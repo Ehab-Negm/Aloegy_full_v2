@@ -1,0 +1,166 @@
+{
+  "scenario_id": "PK-STRESS-018",
+  "title": "Mixed Arabic English",
+  "category": "stress",
+  "passed": true,
+  "scores": {
+    "routing": 5,
+    "entity_capture": 5,
+    "state_memory": 5,
+    "clarification_quality": 4,
+    "tone_and_empathy": 4,
+    "no_hallucination": 5,
+    "finalization_safety": 5
+  },
+  "critical_failures": [],
+  "agent_mistakes": [],
+  "missing_fields": [],
+  "hallucinations": [],
+  "final_state_captured_by_agent": {
+    "intent": "takeaway",
+    "customer_name": "Mark",
+    "order": [
+      "بيتزا بيبروني لارج",
+      "كولا واحد لتر"
+    ],
+    "order_total": 255.0,
+    "order_total_history": [
+      255.0
+    ],
+    "order_validated": true,
+    "order_confirmed": false,
+    "order_id": "",
+    "delivery_address": "",
+    "delivery_landmark": "",
+    "reservation_time": "",
+    "guests_count": null,
+    "selected_branch": "",
+    "complaint_text": "",
+    "complaint_type": "",
+    "complaint_logged": false,
+    "reservation_confirmed": false,
+    "reservation_id": "",
+    "end_call_requested": false,
+    "end_call_reason": ""
+  },
+  "recommended_fix": "no fix required at this severity",
+  "harness_error": null,
+  "trace": [
+    {
+      "role": "agent",
+      "text": "أهلاً بيك! معاك ليلي من بيتزا كينج، أقدر أساعدك في إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "Hi, I need delivery order.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "النية اتسجلت: delivery. كمّل عادي وشوف ناقص إيه.",
+      "tool_name": "set_intent",
+      "tool_args": {
+        "intent": "delivery"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، هتوصيل الطلب فين؟ ممكن تقول لي العنوان؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "One large pepperoni pizza, extra cheese, and Pepsi.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الطلب اتسجل: بيتزا بيبروني لارج, كولا واحد لتر (إجمالي: 255 جنيه).",
+      "tool_name": "update_order",
+      "tool_args": {
+        "items": [
+          {
+            "name": "بيتزا بيبروني لارج",
+            "qty": 1
+          },
+          {
+            "name": "كولا واحد لتر",
+            "qty": 1
+          }
+        ]
+      }
+    },
+    {
+      "role": "agent",
+      "text": "ماشي يا فندم، طلبك بيتزا بيبروني لارج وكولا واحد لتر. عايز تضيف حاجة تانية؟ وعايز أأكد العنوان لو سمحت.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "العنوان في Maadi Degla, street 200, building 8.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "العنوان خارج نطاق التوصيل عندنا. التوصيل متاح في المعادي، المعادي الجديدة، زهراء المعادي، دجلة المعادي، كورنيش المعادي، ثكنات المعادي. اعتذر للعميل واعرض عليه الاستلام من الفرع.",
+      "tool_name": "set_delivery_info",
+      "tool_args": {
+        "address": "Maadi Degla, street 200, building 8",
+        "landmark": ""
+      }
+    },
+    {
+      "role": "agent",
+      "text": "معلش يا فندم، العنوان ده خارج نطاق التوصيل عندنا. التوصيل متاح بس في المعادي، المعادي الجديدة، زهراء المعادي، دجلة المعادي، كورنيش المعادي، وثكنات المعادي. تحب تستلم الطلب من فرع قريب؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "Name is Mark, phone 01155554444.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "tool",
+      "text": "الاسم اتسجل: Mark",
+      "tool_name": "set_name",
+      "tool_args": {
+        "name": "Mark"
+      }
+    },
+    {
+      "role": "tool",
+      "text": "النية اتسجلت: takeaway. كمّل عادي وشوف ناقص إيه.",
+      "tool_name": "set_intent",
+      "tool_args": {
+        "intent": "takeaway"
+      }
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، سجلت اسمك مارك وطلبك هيكون استلام من الفرع. تحب تختار فرع المعادي، المعادي الجديدة، ولا زهراء المعادي؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "Can you confirm please?",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا مارك، طلبك بيتزا بيبروني لارج وكولا واحد لتر للاستلام من الفرع. ممكن تقول لي تختار فرع المعادي، المعادي الجديدة، ولا زهراء المعادي؟",
+      "tool_name": "",
+      "tool_args": {}
+    }
+  ]
+}

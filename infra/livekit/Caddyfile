@@ -1,0 +1,30 @@
+# Caddy reverse proxy for LiveKit's WebRTC signaling. Auto-provisions a
+# Let's Encrypt cert for {LIVEKIT_DOMAIN} on first start. Caddy listens on
+# 80 (HTTP-01 challenge) and 443 (signaling); livekit-server stays on the
+# internal docker network and doesn't expose itself directly.
+
+{$LIVEKIT_DOMAIN} {
+    encode zstd gzip
+    tls {$ACME_EMAIL}
+
+    # WebRTC signaling — wss://{livekit-domain}/rtc upgrade.
+    reverse_proxy livekit-server:7880 {
+        # LiveKit needs full WebSocket pass-through; default Caddy proxy
+        # already handles Upgrade/Connection headers correctly.
+        flush_interval -1
+    }
+
+    log {
+        output stdout
+        format json
+    }
+}
+
+# HTTP-only health probe (handy for monitors that can't do TLS handshake).
+:80 {
+    @health path /healthz
+    handle @health {
+        respond "ok" 200
+    }
+    redir https://{host}{uri}
+}

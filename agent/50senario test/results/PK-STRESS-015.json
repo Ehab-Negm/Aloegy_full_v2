@@ -1,0 +1,115 @@
+{
+  "scenario_id": "PK-STRESS-015",
+  "title": "Angry complaint",
+  "category": "stress",
+  "passed": false,
+  "scores": {
+    "routing": 1,
+    "entity_capture": 4,
+    "state_memory": 5,
+    "clarification_quality": 4,
+    "tone_and_empathy": 4,
+    "no_hallucination": 5,
+    "finalization_safety": 5
+  },
+  "critical_failures": [],
+  "agent_mistakes": [
+    "intent never set (expected complaint)"
+  ],
+  "missing_fields": [
+    "complaint_text"
+  ],
+  "hallucinations": [],
+  "final_state_captured_by_agent": {
+    "intent": "",
+    "customer_name": "",
+    "order": [],
+    "order_total": 0.0,
+    "order_total_history": [],
+    "order_validated": false,
+    "order_confirmed": false,
+    "order_id": "",
+    "delivery_address": "",
+    "delivery_landmark": "",
+    "reservation_time": "",
+    "guests_count": null,
+    "selected_branch": "",
+    "complaint_text": "",
+    "complaint_type": "",
+    "complaint_logged": false,
+    "reservation_confirmed": false,
+    "reservation_id": "",
+    "end_call_requested": false,
+    "end_call_reason": ""
+  },
+  "recommended_fix": "P0 — strengthen intent routing: enforce set_intent before any flow-specific tool, or auto-call set_intent on the first qualifying utterance.",
+  "harness_error": null,
+  "trace": [
+    {
+      "role": "agent",
+      "text": "أهلاً بيك! معاك ليلي من بيتزا كينج، أقدر أساعدك في إيه؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "إنتوا بجد أسوأ خدمة، الأوردر وصل ساقع ومش ناقص غير إنكم تنسوه!",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، آسفة جداً على اللي حصل. ممكن تقولّي اسمك عشان أسجل شكواك؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "أنا مش عاوز أطلب، أنا عاوز أشتكي.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "حاضر يا فندم، ممكن تقولّي تفاصيل شكواك بالظبط عشان أسجلها؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "رقمي 01066667777 والطلب كان من ساعة تقريباً.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، خدنا رقمك بس مش هنسجله، ممكن تقولّي اسمك عشان أسجل الشكوى؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "مش فاكر رقم الأوردر.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "ماشي يا فندم، مش مشكلة خالص. ممكن تقولّي تفاصيل أكتر عن المشكلة في الطلب؟",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "caller",
+      "text": "عاوز حد يكلمني من الإدارة.",
+      "tool_name": "",
+      "tool_args": {}
+    },
+    {
+      "role": "agent",
+      "text": "تمام يا فندم، هسجل شكواك دلوقتي وأبلغ الإدارة فوراً. ممكن تقولّي اسمك عشان أسجل؟",
+      "tool_name": "",
+      "tool_args": {}
+    }
+  ]
+}
