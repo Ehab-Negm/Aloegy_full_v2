@@ -718,6 +718,32 @@ def _build_session_realtime_model() -> Any:
     if _tool_scheduling is not None:
         kwargs["tool_response_scheduling"] = _tool_scheduling
 
+    # Override Gemini Live's default server-side VAD which holds tool-response
+    # generation on SIP lines with comfort noise. Without this, tool_response_
+    # scheduling=INTERRUPT is silently overridden by VAD waiting for end-of-
+    # speech that never fires — model stalls 5-10s after each tool result.
+    try:
+        from google.genai import types as _gt
+        kwargs["realtime_input_config"] = _gt.RealtimeInputConfig(
+            automatic_activity_detection=_gt.AutomaticActivityDetection(
+                start_of_speech_sensitivity=_gt.StartSensitivity.START_SENSITIVITY_LOW,
+                end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
+                prefix_padding_ms=100,
+                silence_duration_ms=200,
+            ),
+            activity_handling=_gt.ActivityHandling.NO_INTERRUPTION,
+        )
+        logger.info(
+            "realtime model: VAD tuned for SIP (end_sensitivity=HIGH, "
+            "silence=200ms, no-interruption)"
+        )
+    except (ImportError, AttributeError) as exc:
+        logger.warning(
+            "RealtimeInputConfig unavailable (%s) — model may stall up to "
+            "10s after tool results on noisy SIP lines.",
+            exc,
+        )
+
     # Force Gemini Live to emit a DEDICATED transcript of the input audio
     # (separate from whatever the audio-understanding model uses
     # internally for routing). Without this, the transcripts written to
