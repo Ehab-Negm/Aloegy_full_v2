@@ -1,8 +1,8 @@
-livekit-agents==1.5.2
-livekit-plugins-google==1.5.2
-livekit-plugins-soniox==1.5.2
-livekit-plugins-silero==1.5.2
-livekit-plugins-openai==1.5.2
+livekit-agents==1.5.9
+livekit-plugins-google==1.5.9
+livekit-plugins-soniox==1.5.9
+livekit-plugins-silero==1.5.9
+livekit-plugins-openai==1.5.9
 livekit-plugins-noise-cancellation==0.2.5
 # Self-hosted noise cancellation (DTLN). MIT-licensed, runs entirely on CPU,
 # native 16 kHz so SIP audio doesn't need resampling, and adds <1ms latency.

@@ -160,16 +160,21 @@ def _scan_sip_attrs(ctx: JobContext) -> dict[str, str]:
 async def _wait_for_sip_attrs(
     ctx: JobContext,
     *,
-    timeout: float = 3.0,
-    poll_interval: float = 0.15,
+    timeout: float = 0.4,
+    poll_interval: float = 0.05,
 ) -> dict[str, str]:
     """Poll remote participants until SIP attributes show up.
 
     Participant attributes propagate slightly after the participant itself
     joins the room — LiveKit publishes them in a separate sync message. If
-    we read at job-start before the sync lands, ``sip.*`` is empty and the
-    caller's phone gets dropped. Up to 3 seconds of polling resolves the
-    race without adding noticeable latency (typical sync is < 200ms).
+    we read at job-start before the sync lands, ``sip.*`` is empty.
+
+    The running LiveKit-SIP build does NOT publish ``sip.*`` attributes the
+    way the agent expects (every SIP call hits the warning fallback). The
+    phone number is recoverable from ``participant.identity`` / room-name
+    suffix at zero cost, so the budget here is kept tight (400ms) instead
+    of the original 3s wait that was the largest single contributor to
+    pre-greeting latency on phone calls.
     """
     deadline = time.monotonic() + timeout
     last_dump: dict[str, str] = {}

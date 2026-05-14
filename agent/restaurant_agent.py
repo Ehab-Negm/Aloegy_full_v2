@@ -553,46 +553,63 @@ class RestaurantAgent(Agent):
         nudges the model to greet. The text is never spoken by anyone; only
         the model's response audio reaches the caller.
 
-        This relies on internals of livekit-plugins-google >=1.5
-        (``AgentActivity.realtime_llm_session._send_client_event``). If the
-        plugin layout changes the call is a silent no-op and the agent simply
-        waits for the customer to speak first.
+        Why the private API: ``livekit-plugins-google==1.5.2`` rejects every
+        public greeting trigger for ``gemini-3.1-flash-live-preview``:
+        ``generate_reply`` logs ``"generate_reply is not compatible"`` and
+        no-ops, ``update_instructions`` is rejected the same way, and
+        ``session.say`` raises because realtime mode has no standalone TTS.
+        The only path the model actually accepts is ``_send_client_event``
+        with a ``LiveClientContent`` carrying a synthetic user turn — that's
+        the model's native "you have a new user message, please respond"
+        protocol. If the plugin internals change in a future upgrade, the
+        call falls through to a silent no-op and the agent waits for the
+        customer to speak first.
         """
         from google.genai import types as _gt  # noqa: WPS433
 
-        # SIP calls historically needed a 300ms pause for the RTP path to
-        # stabilise, but Gemini Live takes much longer than 300ms to be
-        # ready anyway — by the time the realtime session appears below,
-        # the RTP leg is already steady. Drop the sleep entirely so the
-        # greeting fires the moment the model is available.
         ud = self.session.userdata
         rt_session = None
-        # Fast poll: 50ms steps for up to 1s. The realtime session typically
-        # appears within 200-400ms. Larger steps used to add ~300ms of
-        # avoidable latency to the first greeting.
-        for _ in range(20):
+        # Two-stage wait. Just having ``realtime_llm_session`` is not enough —
+        # the AgentSession can still be in ``initializing`` state, in which
+        # case the model's audio response is dropped by the plugin with a
+        # ``"received server content but no active generation"`` warning and
+        # the caller hears 20+ seconds of silence until the inactivity
+        # watchdog re-nudges.
+        #
+        # Stage 1: poll for the realtime session object to exist.
+        # Stage 2: wait for ``session.agent_state == "listening"`` so the
+        # plugin's generation lifecycle is ready to route the response.
+        # Total budget 3s (50ms × 60); the typical wait is 200-700ms.
+        for _ in range(60):
             activity = getattr(self.session, "_activity", None)
-            if activity is None:
-                await asyncio.sleep(0.05)
-                continue
-            candidate = getattr(activity, "realtime_llm_session", None)
-            if candidate is not None:
-                rt_session = candidate
-                break
+            if activity is not None:
+                candidate = getattr(activity, "realtime_llm_session", None)
+                if candidate is not None:
+                    rt_session = candidate
+                    if getattr(self.session, "agent_state", None) == "listening":
+                        break
             await asyncio.sleep(0.05)
 
         if rt_session is None:
             logger.warning(
                 "call=%s | realtime greeting nudge: rt_session never appeared",
-                self.session.userdata.call_id,
+                ud.call_id,
             )
             return
+        if getattr(self.session, "agent_state", None) != "listening":
+            logger.warning(
+                "call=%s | realtime greeting nudge: agent_state still %r after 3s, "
+                "firing anyway (may be dropped)",
+                ud.call_id,
+                getattr(self.session, "agent_state", None),
+            )
 
         send_event = getattr(rt_session, "_send_client_event", None)
         if not callable(send_event):
             logger.warning(
-                "call=%s | realtime greeting nudge: _send_client_event missing",
-                self.session.userdata.call_id,
+                "call=%s | realtime greeting nudge: _send_client_event missing "
+                "(plugin internals changed?) — caller will need to speak first",
+                ud.call_id,
             )
             return
 
@@ -610,12 +627,12 @@ class RestaurantAgent(Agent):
             )
             logger.info(
                 "call=%s | realtime greeting nudged via synthetic user turn",
-                self.session.userdata.call_id,
+                ud.call_id,
             )
         except Exception as exc:
             logger.warning(
                 "call=%s | realtime greeting nudge failed | %s",
-                self.session.userdata.call_id,
+                ud.call_id,
                 exc,
             )
 

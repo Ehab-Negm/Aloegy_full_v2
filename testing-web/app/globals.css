@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 220 25% 14%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 25% 14%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 25% 14%;
+    --primary: 224 82% 51%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 25% 95%;
+    --secondary-foreground: 220 20% 30%;
+    --muted: 216 18% 94%;
+    --muted-foreground: 220 12% 50%;
+    --accent: 224 60% 96%;
+    --accent-foreground: 224 60% 35%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 15% 90%;
+    --input: 220 15% 87%;
+    --ring: 224 82% 51%;
+    --brand: 224 82% 51%;
+    --brand-dark: 228 80% 22%;
+    --brand-light: 224 75% 62%;
+    --brand-glow: 224 90% 70%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 225 30% 6%;
+    --foreground: 220 15% 92%;
+    --card: 225 25% 10%;
+    --card-foreground: 220 15% 92%;
+    --popover: 225 25% 10%;
+    --popover-foreground: 220 15% 92%;
+    --primary: 224 82% 58%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 225 20% 15%;
+    --secondary-foreground: 220 15% 88%;
+    --muted: 225 18% 14%;
+    --muted-foreground: 220 12% 55%;
+    --accent: 225 25% 17%;
+    --accent-foreground: 220 15% 90%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 225 18% 17%;
+    --input: 225 18% 17%;
+    --ring: 224 82% 58%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+}
